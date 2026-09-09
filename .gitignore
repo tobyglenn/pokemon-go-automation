@@ -1,0 +1,43 @@
+# Private configuration and environment
+.env
+.env.*
+!.env.example
+config/
+private/
+local/
+*.yaml
+*.yml
+!examples/*.yaml
+!pokemon_go_automation/templates/*.yaml
+!**/.github/workflows/*.yml
+# Runtime information and captured account/device data
+logs/
+artifacts/
+state/
+cache/
+*.log
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.json
+*.jsonl
+*.csv
+*.db
+*.sqlite*
+*.lock
+*.bak*
+# Tool caches and generated distributions
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+.DS_Store
+.agents/
+.claude/
+.idea/
+.vscode/

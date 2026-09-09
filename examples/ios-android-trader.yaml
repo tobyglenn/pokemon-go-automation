@@ -1,0 +1,34 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+ios:
+  appium_config: ios-gifter.yaml
+  coordinates:
+    TRADE_BTN:
+    - 0
+    - 0
+    FIRST_PKMN_BTN:
+    - 0
+    - 0
+    NEXT_BTN:
+    - 0
+    - 0
+    MAX_LEVEL_RESET_BTN: null
+    CONFIRM_BTN:
+    - 0
+    - 0
+    X_BTN:
+    - 0
+    - 0
+    POWER_UP_CANCEL_BTN: null
+    IOS_TRADING_UNAVAILABLE_OK_BTN:
+    - 0
+    - 0
+android:
+  serial: null
+delay_modifier: 0
+delays:
+  TRADE_BTN: 6
+  FIRST_PKMN_BTN: 1
+  NEXT_BTN: 3
+  MAX_LEVEL_RESET_BTN: 4
+  CONFIRM_BTN: 15
+  X_BTN: 1

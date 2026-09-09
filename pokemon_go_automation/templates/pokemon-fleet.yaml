@@ -1,0 +1,53 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+version: 1
+devices:
+  android-one:
+    platform: android
+    enabled: false
+    serial: YOUR_ANDROID_SERIAL
+    operations:
+      gifts: {}
+      delete: {}
+      berries: {}
+      gbl: {}
+      trade: {}
+  ios-one:
+    platform: ios
+    enabled: false
+    appium_config: ios-gifter.yaml
+    operations:
+      gifts:
+        config: ios-gifter.yaml
+        calibrated: false
+      delete:
+        config: luckytrash-ios.yaml
+        calibrated: false
+      berries:
+        config: berry-ios.yaml
+        calibrated: false
+      gbl:
+        config: gbl-ios.yaml
+        calibrated: false
+      trade:
+        calibrated: false
+        coordinates:
+          TRADE_BTN:
+          - 0
+          - 0
+          FIRST_PKMN_BTN:
+          - 0
+          - 0
+          NEXT_BTN:
+          - 0
+          - 0
+          CONFIRM_BTN:
+          - 0
+          - 0
+          X_BTN:
+          - 0
+          - 0
+          MAX_LEVEL_RESET_BTN: null
+          POWER_UP_CANCEL_BTN: null
+          IOS_TRADING_UNAVAILABLE_OK_BTN:
+          - 0
+          - 0

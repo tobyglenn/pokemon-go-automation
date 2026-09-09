@@ -1,0 +1,12 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+machines:
+  controller:
+    hostnames:
+    - YOUR_CONTROLLER_HOSTNAME
+  worker:
+    hostnames:
+    - YOUR_WORKER_HOSTNAME
+    ssh_host: YOUR_SSH_ALIAS
+    project_dir: ~/pokemon-go-automation
+    python: .venv/bin/python
+    config_dir: ~/.config/pokemon-go-automation

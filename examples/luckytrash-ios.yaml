@@ -1,0 +1,46 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+appium_config: ios-gifter.yaml
+delay_modifier: 0
+coordinates:
+  FIRST_TILE_BTN:
+  - 0
+  - 0
+  TILE_PITCH:
+  - 0
+  - 0
+  X_BTN:
+  - 0
+  - 0
+  TRASH_MENU_BTN:
+  - 0
+  - 0
+  TRANSFER_BTN:
+  - 0
+  - 0
+  TRANSFER_YES_BTN:
+  - 0
+  - 0
+  TRANSFER_NO_BTN:
+  - 0
+  - 0
+  FILTER_CLEAR_BTN:
+  - 0
+  - 0
+detection:
+  TOP_BAND_Y:
+  - 0
+  - 0
+  MID_BAND_Y:
+  - 0
+  - 0
+  QUERY_BAND_Y:
+  - 0
+  - 0
+  COUNT_BAND_Y:
+  - 0
+  - 0
+  QUERY_MIN_INK: 0.06
+  QUERY_MATCH: 0.98
+  FILTER_CLEAR_MIN: 0.04
+  TILE_OCCUPIED: 0.02
+  COUNT_MOVED: 3

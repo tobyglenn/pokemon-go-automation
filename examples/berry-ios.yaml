@@ -1,0 +1,21 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+appium_config: ios-gifter.yaml
+delay_modifier: 0
+spend_cap: null
+coordinates:
+  BERRY_BTN:
+  - 0
+  - 0
+  NEXT_MON_FROM:
+  - 0
+  - 0
+  NEXT_MON_TO:
+  - 0
+  - 0
+detection:
+  CARD_BAND_Y:
+  - 0
+  - 0
+  BERRY_DISC_Y:
+  - 0
+  - 0

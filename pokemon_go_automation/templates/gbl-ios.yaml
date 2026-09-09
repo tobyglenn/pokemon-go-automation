@@ -1,0 +1,14 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+appium_config: ios-gifter.yaml
+delay_modifier: 0
+battles: 5
+coordinates:
+  GBL_MOVE_BTN:
+  - 0
+  - 0
+  GBL_MENU_BTN:
+  - 0
+  - 0
+  GBL_MENU_BATTLE_BTN:
+  - 0
+  - 0
