@@ -1,0 +1,48 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+server_url: http://127.0.0.1:4723
+delay_modifier: 0
+device:
+  name: ios-one
+  platform_version: YOUR_IOS_VERSION
+  udid: YOUR_IOS_UDID
+  bundle_id: com.nianticlabs.pokemongo
+  team_id: YOUR_APPLE_TEAM_ID
+  wda_bundle_id: com.example.pogo.WebDriverAgentRunner
+  wda_local_port: 8100
+  mjpeg_server_port: 9100
+  derived_data_path: ~/.cache/pokemon-go-automation/wda-ios-one
+  strategy_key: ios-one
+coordinates:
+  OPEN_BTN:
+  - 0
+  - 0
+  SEND_GIFT_BTN:
+  - 0
+  - 0
+  FIRST_GIFT_BTN:
+  - 0
+  - 0
+  SEND_BTN:
+  - 0
+  - 0
+  CLOSE_BTN:
+  - 0
+  - 0
+  SORT_BTN:
+  - 0
+  - 0
+  GIFT_SORT_BTN:
+  - 0
+  - 0
+  CAN_RECEIVE_GIFT_BTN:
+  - 0
+  - 0
+  NEXT_FRIEND_BTN:
+  - 0
+  - 0
+  AVATAR_BTN:
+  - 0
+  - 0
+  FRIENDS_TAB_BTN:
+  - 0
+  - 0

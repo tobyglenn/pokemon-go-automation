@@ -1,0 +1,85 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+TRADE_BTN:
+- 0
+- 0
+FIRST_PKMN_BTN:
+- 0
+- 0
+NEXT_BTN:
+- 0
+- 0
+CONFIRM_BTN:
+- 0
+- 0
+X_BTN:
+- 0
+- 0
+BATTLE_BTN:
+- 0
+- 0
+USE_PARTY_BTN:
+- 0
+- 0
+REMATCH_BTN:
+- 0
+- 0
+RUN_BTN:
+- 0
+- 0
+SURRENDER_BTN:
+- 0
+- 0
+SORT_BTN:
+- 0
+- 0
+NEXT_FRIEND_BTN:
+- 0
+- 0
+OPEN_BTN:
+- 0
+- 0
+SEND_GIFT_BTN:
+- 0
+- 0
+FIRST_GIFT_BTN:
+- 0
+- 0
+SEND_BTN:
+- 0
+- 0
+CLOSE_BTN:
+- 0
+- 0
+GBL_MOVE_BTN:
+- 0
+- 0
+FIRST_TILE_BTN:
+- 0
+- 0
+TILE_PITCH:
+- 0
+- 0
+TRASH_MENU_BTN:
+- 0
+- 0
+TRANSFER_BTN:
+- 0
+- 0
+TRANSFER_YES_BTN:
+- 0
+- 0
+TRANSFER_NO_BTN:
+- 0
+- 0
+FILTER_CLEAR_BTN:
+- 0
+- 0
+BERRY_BTN:
+- 0
+- 0
+NEXT_MON_FROM:
+- 0
+- 0
+NEXT_MON_TO:
+- 0
+- 0

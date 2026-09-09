@@ -1,0 +1,6 @@
+# Copy to your private POGO_CONFIG_DIR and calibrate before running.
+version: 1
+team_building:
+  enabled: false
+  select_team: false
+devices: {}
