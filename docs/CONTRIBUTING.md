@@ -1,6 +1,6 @@
 # Contributing
 
-Start with [AGENTS.md](AGENTS.md), the [architecture](docs/architecture.md), and the relevant [workflow](docs/workflows.md).
+Start with [AGENTS.md](../AGENTS.md), the [architecture](architecture.md), and the relevant [workflow](workflows.md).
 
 Use an isolated branch, keep the change focused, and include the concrete trigger and resulting behavior in its description. Update generic examples and documentation when changing a configuration field or public option. Preserve existing MIT attribution.
 

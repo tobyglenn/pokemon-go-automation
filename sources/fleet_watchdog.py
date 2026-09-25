@@ -8,8 +8,9 @@ the end to remind anyone they exist.  Live, a run held two phones for 44 hours
 after its last useful output.
 
 This is the floor under all of them.  Every public command installs it, and it
-ends the run when either of the two things that make a run pointless happens:
-nothing has been printed for a long time, or every phone has left the USB bus.
+ends the run when any of the three things that make a run pointless happens:
+nothing has been printed for a long time, every phone has left the USB bus, or
+the supervisor that started this run has gone.
 
 It ends the run with SIGINT first, deliberately.  Each script already handles
 KeyboardInterrupt by putting the phone back on the map screen; killing it
@@ -45,6 +46,46 @@ EMPTY_READINGS_BEFORE_STOPPING = 3
 # phones deliberately unplugged, and as the escape hatch when this thing is
 # wrong -- it must always be possible to say "leave my run alone".
 ENABLED = os.environ.get("POKEMON_WATCHDOG", "1") != "0"
+
+# --- Outliving the supervisor ---
+# A leg is started with `start_new_session=True`, which is what lets `gbl_day`
+# signal the whole leg on purpose rather than having the terminal signal all of
+# it by accident.  The cost is that a leg no longer shares the supervisor's
+# fate: on 2026-09-21 a `gbl.py --devices razr` leg was still tapping the phone
+# 19 minutes after its supervisor was gone, holding the fleet lock, so the next
+# day run died with "razr is already controlled by another fleet command".
+# Nothing was left to notice, because the noticing lived in the supervisor.
+#
+# So the leg carries the supervisor's pid and checks it is still there.  The
+# environment variable, rather than `os.getppid() == 1`: a run deliberately
+# detached by hand (`nohup ... &`, terminal closed) is reparented to launchd
+# too, and that run is meant to keep going.  Only a leg that was handed a
+# supervisor gets held to one.
+SUPERVISOR_PID = os.environ.get("POKEMON_SUPERVISOR_PID", "")
+
+# Signal 0 checks the pid without touching it.  A pid can in principle be
+# reused between checks, and being wrong that way only means missing one
+# orphan -- the lock error that follows names the pid, so it stays findable.
+def supervisor_gone(pid_text: str = "", *, alive: Callable[[int], bool] | None = None) -> bool:
+    """Whether the supervisor that started this run has since exited."""
+    text = pid_text or SUPERVISOR_PID
+    try:
+        pid = int(text)
+    except (TypeError, ValueError):
+        return False  # Nobody is supervising this run; it answers to nobody.
+    if pid <= 1:
+        return False
+    return not (alive or _pid_alive)(pid)
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # Alive, just not ours to signal.
+    return True
 
 
 @dataclass
@@ -140,12 +181,18 @@ def _watch(
     poll_seconds: float,
     idle_seconds: float,
     rounds: int | None,
+    orphaned: Callable[[], bool],
 ) -> None:
     empty_readings = 0
     completed = 0
     while rounds is None or completed < rounds:
         sleep(poll_seconds)
         completed += 1
+        # Checked before the bus, and on its own: an orphaned leg is holding a
+        # phone the next run is entitled to, whatever the phones look like.
+        if orphaned():
+            stop("the supervisor that started this run has gone")
+            return
         try:
             empty_readings = empty_readings + 1 if attached() == 0 else 0
         except Exception:  # noqa: BLE001 - a failed probe is not a disconnect
@@ -167,12 +214,15 @@ def install(
     poll_seconds: float = POLL_SECONDS,
     idle_seconds: float = IDLE_SECONDS,
     rounds: int | None = None,
+    orphaned: Callable[[], bool] = supervisor_gone,
 ) -> threading.Thread | None:
     """Watch this process from a daemon thread.  Returns it, or None if off.
 
     `POKEMON_IDLE_TIMEOUT=0` turns the idle half off for a run that is expected
     to sit silent; the disconnect half stays, because no phone means no work
-    however patient the operator is.  `POKEMON_WATCHDOG=0` turns off both.
+    however patient the operator is.  `POKEMON_WATCHDOG=0` turns off all three,
+    orphan check included -- a leg started outside a supervisor never had one
+    to lose, so only a deliberately supervised run is affected either way.
     """
     if not ENABLED:
         return None
@@ -189,6 +239,7 @@ def install(
             "poll_seconds": poll_seconds,
             "idle_seconds": idle_seconds,
             "rounds": rounds,
+            "orphaned": orphaned,
         },
         name="fleet-watchdog",
         daemon=True,

@@ -45,6 +45,12 @@ TRADE_OPTIONAL = {
     "MAX_LEVEL_RESET_BTN",
     "POWER_UP_CANCEL_BTN",
     "IOS_TRADING_UNAVAILABLE_OK_BTN",
+    # Both are recovery's business rather than a trade step's, and both are
+    # iOS-only: Android answers the cancel dialog and leaves these screens with
+    # BACK. Listed here so a fleet config that maps them is checked like any
+    # other coordinate instead of being carried through unread.
+    "TRADE_CANCEL_YES_BTN",
+    "TRADE_EXIT_BTN",
 }
 BATTLE_REQUIRED = {"BATTLE_BTN", "USE_PARTY_BTN", "REMATCH_BTN"}
 BATTLE_SURRENDER = {"RUN_BTN", "SURRENDER_BTN"}
@@ -528,19 +534,61 @@ def appium_ready(url: str) -> bool:
         return False
 
 
+# Appium is not installed the same way on every Mac in the fleet. One has it
+# global under Homebrew; another only ever got it as a dependency of the
+# trading checkout, so nothing named `appium` is on PATH there and the leg
+# died at "launcher was not found" even though a working 3.6.0 sat in
+# node_modules. Those local copies are `.bin` shims with a `#!/usr/bin/env
+# node` line, so node has to be on PATH for them -- it is on both Macs.
+def appium_launcher_candidates() -> list[Path]:
+    override = os.environ.get("POKEMON_GO_APPIUM_BIN")
+    candidates = [Path(override)] if override else []
+    found = shutil.which("appium")
+    if found:
+        candidates.append(Path(found))
+    candidates.append(Path("/opt/homebrew/bin/appium"))
+    candidates.append(ROOT / "node_modules" / ".bin" / "appium")
+    candidates.append(Path.home() / "ios-gifter" / "node_modules" / ".bin" / "appium")
+    return candidates
+
+
+def find_appium_launcher() -> Path | None:
+    for candidate in appium_launcher_candidates():
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def ensure_appium_server(url: str = "http://127.0.0.1:4723", timeout: float = 12.0) -> None:
     if appium_ready(url):
         return
     env = dict(os.environ)
     env.setdefault("APPIUM_XCUITEST_PREFER_DEVICECTL", "true")
     script = ROOT / "bin" / "start-ios-appium.command"
-    appium_bin = shutil.which("appium") or "/opt/homebrew/bin/appium"
+    appium_bin = find_appium_launcher()
     if script.is_file():
         subprocess.Popen(["/bin/zsh", str(script)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    elif os.path.exists(appium_bin):
-        subprocess.Popen([appium_bin, "--address", "127.0.0.1", "--port", "4723"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif appium_bin is not None:
+        # A driver installed alongside a local Appium is only found when
+        # APPIUM_HOME names that install's own project root. Started from
+        # anywhere else the server comes up healthy and then turns the leg away
+        # with "Could not find driver automationName 'XCUITest'", which reads
+        # like a missing driver rather than a server started in the wrong
+        # place. Deriving it from the launcher keeps the two from drifting.
+        if appium_bin.parent.name == ".bin" and appium_bin.parent.parent.name == "node_modules":
+            env.setdefault("APPIUM_HOME", str(appium_bin.parent.parent.parent))
+        subprocess.Popen(
+            [str(appium_bin), "--address", "127.0.0.1", "--port", "4723"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     else:
-        raise FleetError(f"Appium server is offline at {url} and Appium launcher was not found")
+        looked = ", ".join(str(candidate) for candidate in appium_launcher_candidates())
+        raise FleetError(
+            f"Appium server is offline at {url} and Appium launcher was not found "
+            f"(looked at: {looked}; set POKEMON_GO_APPIUM_BIN to point at one)"
+        )
 
     start = time.time()
     while time.time() - start < timeout:
@@ -683,12 +731,15 @@ def select_devices(
                         selected_ids.add(serial)
 
                 skipped = [spec.name for spec in candidates if spec not in selected]
-            if skipped:
-                print(
-                    "Skipping disconnected configured device(s): "
-                    + ", ".join(skipped),
-                    flush=True,
-                )
+            print(
+                attachment_summary(
+                    operation,
+                    [spec.name for spec in selected],
+                    len(skipped),
+                    os.environ.get("POGO_MACHINE", ""),
+                ),
+                flush=True,
+            )
             if not allow_unready:
                 ready: list[DeviceSpec] = []
                 unready: list[str] = []
@@ -735,9 +786,69 @@ def select_devices(
     return selected
 
 
+def attachment_summary(
+    operation: str, attached: Sequence[str], missing: int, machine: str = ""
+) -> str:
+    """What this computer is about to work on, said as what it has.
+
+    The fan-out prints one of these per machine, and both lines used to name
+    the phones that were *not* there -- two near-identical lists of absences,
+    neither saying which computer it came from, from which the reader had to
+    work out the one thing they wanted: what is plugged in where.  The phones
+    that are missing are counted rather than named; `fleet.py owners` is the
+    command for chasing a particular phone.
+    """
+    where = f"[{machine}] " if machine else ""
+    if attached:
+        core = f"{operation} on {', '.join(attached)}"
+    else:
+        core = f"nothing attached for {operation}"
+    total = len(attached) + missing
+    tail = f" ({missing} of {total} configured not attached)" if missing else ""
+    return f"{where}{core}{tail}"
+
+
 def lock_name(spec: DeviceSpec) -> str:
     token = spec.identifier or spec.name
     return re.sub(r"[^A-Za-z0-9_.-]", "_", token)
+
+
+def process_command(pid: int) -> str:
+    """The holder's command line, or "" when it cannot be read."""
+    try:
+        listing = subprocess.run(
+            ["/bin/ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return listing.stdout.strip().splitlines()[0].strip() if listing.stdout.strip() else ""
+
+
+def lock_holder(path: Path) -> str:
+    """Who is holding this lock, said the way the reader has to act on it.
+
+    The flock is what refused us, so the pid in the file is a live process and
+    not the leftover it looks like -- the files outlive their runs, the locks
+    do not.  Naming the pid and its command turns "another fleet command" into
+    something the operator can find, because the usual holder is not another
+    command at all: it is a leg that outlived its supervisor and kept the
+    phone (2026-09-21, razr, pid 55317, orphaned 19 minutes).
+    """
+    try:
+        written = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    match = re.search(r"pid=(\d+)", written)
+    if not match:
+        return ""
+    pid = int(match.group(1))
+    command = process_command(pid)
+    if not command:
+        return f"pid {pid}"
+    return f"pid {pid} ({command})"
 
 
 @contextmanager
@@ -754,10 +865,18 @@ def acquire_device_locks(
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 handle.close()
-                raise FleetError(f"{spec.name} is already controlled by another fleet command") from exc
+                holder = lock_holder(path)
+                blame = f" by {holder}" if holder else ""
+                raise FleetError(
+                    f"{spec.name} is already controlled{blame}; "
+                    f"stop that process (kill -INT) before running this again"
+                ) from exc
             handle.seek(0)
             handle.truncate()
-            handle.write(f"pid={os.getpid()} device={spec.name}\n")
+            handle.write(
+                f"pid={os.getpid()} device={spec.name} "
+                f"supervisor={os.environ.get('POKEMON_SUPERVISOR_PID', '-')}\n"
+            )
             handle.flush()
             handles.append(handle)
         yield
@@ -820,12 +939,15 @@ async def stop_child(label: str, process: Any) -> None:
     await process.wait()
 
 
-async def run_child(label: str, arguments: Sequence[str]) -> None:
+async def run_child(label: str, arguments: Sequence[str], *, accepted: Sequence[int] = (0,)) -> int:
     print(f"[{label}] {' '.join(arguments)}", flush=True)
     env = {
         **os.environ,
         "POKEMON_FLEET_CHILD": "1",
         "POKEMON_FLEET_LOCK_HELD": "1",
+        # `stop_child` below is skipped when this process is killed outright,
+        # and the child then runs on without anybody reading its output.
+        "POKEMON_SUPERVISOR_PID": str(os.getpid()),
     }
     process = await asyncio.create_subprocess_exec(
         *arguments,
@@ -847,8 +969,9 @@ async def run_child(label: str, arguments: Sequence[str]) -> None:
     except (asyncio.CancelledError, KeyboardInterrupt):
         await stop_child(label, process)
         raise
-    if code != 0:
+    if code not in accepted:
         raise FleetError(f"{label} exited with status {code}")
+    return code
 
 
 async def connected_android_gifters(specs: Sequence[DeviceSpec]) -> list[Any]:
@@ -872,39 +995,145 @@ async def connected_android_gifters(specs: Sequence[DeviceSpec]) -> list[Any]:
     return ready
 
 
+# `berry_ios --if-feed-screen` exits with this when the iPhone is not parked on
+# a gym's feeding screen; it is `berry_ios.NOT_A_FEED_SCREEN`, kept here so the
+# fleet does not import the Appium stack to read one number.
+IOS_NOT_A_FEED_SCREEN = 3
+
+
+def ios_gift_command(spec: DeviceSpec, args: argparse.Namespace) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "sources.gift_ios",
+        "--config",
+        str(operation_config_path(spec, "gifts")),
+    ]
+    if args.all:
+        command.extend(["--all", "--max-cycles", str(args.max_cycles)])
+    else:
+        command.extend(["--count", str(args.count)])
+    if args.no_guard:
+        command.append("--no-guard")
+    return command
+
+
+def ios_berry_command(spec: DeviceSpec, args: argparse.Namespace) -> list[str]:
+    command = [
+        sys.executable,
+            "-m",
+            "sources.berry_ios",
+        "--config",
+        str(operation_config_path(spec, "berries")),
+        "--fleet-child",
+    ]
+    spend = args.spend_overrides.get(spec.name, args.spend)
+    if spend is not None:
+        command.extend(["--spend", str(spend)])
+    return command
+
+
+def set_berry_budgets(berry_module: Any, specs: Sequence[DeviceSpec], args: argparse.Namespace) -> None:
+    berry_module.SPEND_CAP = args.spend
+    berry_module.SPEND_CAPS = {
+        spec.identifier: args.spend_overrides[spec.name]
+        for spec in specs
+        if spec.name in args.spend_overrides
+    }
+
+
+async def android_feed_screens(specs: Sequence[DeviceSpec]) -> set[str]:
+    """Serials of the Android phones parked on a gym's feeding screen.
+
+    `gift.py` feeds those and gifts from the rest.  A phone whose berry config
+    will not load, or whose screen will not read, goes to the gifts -- what the
+    command did with every phone before it fed berries too.
+    """
+    from . import berry_android as berry
+
+    found = {device.serial: device for device in await berry.ClientAsync().devices()}
+    feeding: set[str] = set()
+    for spec in specs:
+        device = found.get(spec.identifier)
+        if device is None:
+            continue
+        device.label = spec.name
+        try:
+            await berry.get_config(device)
+            device.display_id = await berry.find_display_id(device)
+            frame = await berry.screencap_raw(device)
+        except Exception as exc:
+            print(f"[{spec.name}] Could not look for a gym feeding screen ({exc}); sending gifts", flush=True)
+            continue
+        if (
+            frame is not None
+            and berry.feed_screen_metrics(device, frame)[2]
+            and not berry.encounter_showing(*frame)
+        ):
+            feeding.add(spec.identifier)
+    return feeding
+
+
+async def ios_gifts_or_berries(spec: DeviceSpec, args: argparse.Namespace) -> None:
+    """Feed the gym this iPhone is parked on, or else send its gifts.
+
+    Only the berry worker can read the feeding screen, so it goes first and
+    steps aside, touching nothing, when the phone is somewhere else.
+    """
+    code = await run_child(
+        spec.name,
+        [*ios_berry_command(spec, args), "--if-feed-screen"],
+        accepted=(0, IOS_NOT_A_FEED_SCREEN),
+    )
+    if code == IOS_NOT_A_FEED_SCREEN:
+        await run_child(spec.name, ios_gift_command(spec, args))
+
+
 async def run_gifts(specs: Sequence[DeviceSpec], args: argparse.Namespace) -> None:
+    """Send gifts, except from a phone parked on a gym's feeding screen.
+
+    That phone feeds the gym's defenders instead, so one command covers both:
+    leave each phone on the screen for the job it should do.  `--gifts-only`
+    skips the look and gifts from every phone, as the command used to.
+    """
+    berries_too = not getattr(args, "gifts_only", True)
     ios = [spec for spec in specs if spec.platform == "ios"]
     android = [spec for spec in specs if spec.platform == "android"]
     tasks: list[Any] = []
     if android:
-        count = (
-            args.android_count
-            if args.all and args.android_count is not None
-            else args.max_cycles if args.all else args.count
-        )
-        if not isinstance(count, int) or count < 1:
-            raise FleetError("Android gifts need a positive cycle safety cap")
-        from . import gift_android as gift
+        feeding = await android_feed_screens(android) if berries_too else set()
+        gifters = [spec for spec in android if spec.identifier not in feeding]
+        feeders = [spec for spec in android if spec.identifier in feeding]
+        if gifters:
+            count = (
+                args.android_count
+                if args.all and args.android_count is not None
+                else args.max_cycles if args.all else args.count
+            )
+            if not isinstance(count, int) or count < 1:
+                raise FleetError("Android gifts need a positive cycle safety cap")
+            from . import gift_android as gift
 
-        devices = await connected_android_gifters(android)
-        tasks.append(
-            asyncio.create_task(gift.gift_process(devices, count, all_mode=args.all))
-        )
+            devices = await connected_android_gifters(gifters)
+            tasks.append(
+                asyncio.create_task(gift.gift_process(devices, count, all_mode=args.all))
+            )
+        if feeders:
+            from . import berry_android
+
+            print(
+                "On a gym feeding screen, feeding berries: "
+                + ", ".join(spec.name for spec in feeders),
+                flush=True,
+            )
+            set_berry_budgets(berry_android, feeders, args)
+            devices = await connected_android_berry_devices(feeders)
+            tasks.append(asyncio.create_task(berry_android.berry_process(devices)))
     for spec in ios:
-        command = [
-            sys.executable,
-            "-m",
-            "sources.gift_ios",
-            "--config",
-            str(operation_config_path(spec, "gifts")),
-        ]
-        if args.all:
-            command.extend(["--all", "--max-cycles", str(args.max_cycles)])
+        if berries_too and operation_readiness(spec, "berries").startswith("ready"):
+            tasks.append(asyncio.create_task(ios_gifts_or_berries(spec, args)))
         else:
-            command.extend(["--count", str(args.count)])
-        if args.no_guard:
-            command.append("--no-guard")
-        tasks.append(asyncio.create_task(run_child(spec.name, command)))
+            tasks.append(asyncio.create_task(run_child(spec.name, ios_gift_command(spec, args))))
     results = await asyncio.gather(*tasks, return_exceptions=True)
     errors = [result for result in results if isinstance(result, BaseException)]
     if errors:
@@ -1006,26 +1235,11 @@ async def run_berries(specs: Sequence[DeviceSpec], args: argparse.Namespace) -> 
                 for device in android_devices
             )
         else:
-            berry_module.SPEND_CAP = args.spend
-            berry_module.SPEND_CAPS = {
-                spec.identifier: args.spend_overrides[spec.name]
-                for spec in android
-                if spec.name in args.spend_overrides
-            }
+            set_berry_budgets(berry_module, android, args)
             tasks.append(asyncio.create_task(berry_module.berry_process(android_devices)))
 
     for spec in ios:
-        command = [
-            sys.executable,
-                "-m",
-                "sources.berry_ios",
-            "--config",
-            str(operation_config_path(spec, "berries")),
-            "--fleet-child",
-        ]
-        spend = args.spend_overrides.get(spec.name, args.spend)
-        if spend is not None:
-            command.extend(["--spend", str(spend)])
+        command = ios_berry_command(spec, args)
         if args.check:
             command.extend(
                 [
@@ -1333,6 +1547,31 @@ def save_trade_diagnostics(
 FRIEND_RECOVERY_ROUNDS = 4
 FRIEND_RECOVERY_DELAY = 3
 FRIEND_GUARD_LOOKS_BEFORE_RECOVERY = 2
+# Long enough for one of the game's cross-fades to finish. A frame caught
+# halfway through one is tinted from edge to edge, and the tint takes the white
+# out of every measurement that names a screen: the SE's friend screen, caught
+# coming back from a trade on 2026-09-13, measured white_panel, card_band and
+# card_edges all at exactly 0.000 and so read as a lobby. Recovery then pressed
+# X_BTN on a friend screen, which is the one press that starts a fresh trade
+# nobody answers — so the tint did not just lose a round, it queued another
+# expired trade behind the one already on screen.
+STATE_CONFIRM_DELAY = 1
+# Pokémon GO raises one "Trade expired." per lobby that timed out and shows
+# them one at a time, each in front of a screen identical to the last. Six were
+# counted on the SE on 2026-09-13, five of whose frames were byte-for-byte the
+# same — so a phone still on a dialog after being pressed looks exactly like a
+# phone whose button did nothing, and recovery's four rounds ran out halfway
+# down the queue. Dismissing one is progress and buys back the round it spent,
+# this many times.
+#
+# Set high because nothing cheaper can measure the depth. Fourteen rounds of the
+# SE's notice were saved on 2026-09-13 and every frame below the status bar was
+# pixel-identical — the clock in the corner was the only thing that moved, so
+# there is no reading of the picture that tells the tenth notice from the first.
+# Pressing OK on a notice that has already gone is harmless, which makes a
+# budget that is too large cost only time, while one that is too small ends the
+# run; the two are not worth trading off evenly.
+DIALOG_DRAIN_ROUNDS = 40
 # Consecutive failed cycles before the whole run gives up. A trade that dies is
 # retried from the friend screen rather than taking the other 99 down with it.
 TRADE_CYCLE_RETRIES = 3
@@ -1363,6 +1602,7 @@ TRADE_STATE_LABELS = {
     "lobby": "a trade lobby",
     "post_trade": "the post-trade card",
     "empty_lobby": "a trade it has not offered a Pokémon into",
+    "friendship": "the friendship-bonus sheet",
     "dialog": "a dialog",
     "unknown": "a screen it does not recognise",
 }
@@ -1373,6 +1613,11 @@ TRADE_STATE_CLOSES_ON = {
     "selection": "X_BTN",
     "next": "X_BTN",
     "post_trade": "X_BTN",
+    # The sheet's close disc is drawn at the same point the friend screen puts
+    # its own: measured on the SE's capture at pixel 374,1236, which is X_BTN
+    # [187, 618] exactly. No new coordinate to calibrate, and closing it lands
+    # back on the friend screen it was opened from.
+    "friendship": "X_BTN",
 }
 # A phone that comes back to a screen it has already been stepped out of is
 # not being stepped anywhere: the android-two spent all four of its recovery rounds
@@ -1393,10 +1638,17 @@ TRADE_CANCEL_YES = "TRADE_CANCEL_YES_BTN"
 TRADE_EXIT = "TRADE_EXIT_BTN"
 
 
-def repeat_escape(controller: TradeController) -> str | None:
+def repeat_escape(controller: TradeController, state: str | None = None) -> str | None:
     """The other way out, for a screen whose mapped button did not work."""
     if controller.spec.platform == "android":
         return "BACK"
+    if state == "selection":
+        # The picker has no door: its top-left corner is the search row, and
+        # the iphone-second spent its last two recovery rounds on 2026-09-13
+        # pressing that empty space. The disc at the bottom really does close
+        # this screen — what sent the phone back to it was the lobby below,
+        # which is handled where that screen is named.
+        return None
     return TRADE_EXIT if controller.point(TRADE_EXIT) is not None else None
 
 
@@ -1421,7 +1673,9 @@ async def step_towards_friend(
     """
     from . import trade_ios_android as cross
 
-    state, _ = cross.describe_state(image, lambda name: controller.image_point(image, name))
+    state, metrics = cross.describe_state(
+        image, lambda name: controller.image_point(image, name)
+    )
     if state == "friend":
         return state, None
     if state == "map":
@@ -1462,7 +1716,7 @@ async def step_towards_friend(
     # out is still a blind press, and a blind BACK is what turned a stranded
     # phone into a stuck one in the first place.
     if seen is not None and state in seen and state in cross.DESCRIBED_STATES:
-        escape = repeat_escape(controller)
+        escape = repeat_escape(controller, state)
         if escape == "BACK":
             await controller.back()
             return state, "BACK"
@@ -1470,6 +1724,27 @@ async def step_towards_friend(
             await controller.tap_point(controller.point(escape))
             return state, escape
     if state == "lobby":
+        # Two screens answer to this name, and only one of them listens to
+        # BACK. Once this phone has confirmed, the pill under the action point
+        # turns from a green CONFIRM into an amber CANCEL and the trade is
+        # waiting on the other trainer: nothing else on that screen does
+        # anything, and the razr sat through all four of its recovery rounds
+        # pressing BACK at it on 2026-09-13 while the iPhone it was waiting for
+        # stood on the picker. The pill itself is the way out, and it is
+        # already under a mapped coordinate.
+        if metrics["action_orange"] >= cross.ACTION_PILL_FRACTION:
+            point = controller.point("CONFIRM_BTN")
+            if point is not None:
+                await controller.tap_point(point)
+                return state, "CANCEL"
+        # Before CONFIRM there is no amber pill, and on iOS the disc BACK maps
+        # to opens the Pokémon picker rather than closing anything — picker and
+        # lobby then hand the phone back and forth until the rounds run out.
+        # The door in the corner is the one press that leaves.
+        point = controller.point(TRADE_EXIT)
+        if point is not None:
+            await controller.tap_point(point)
+            return state, TRADE_EXIT
         await controller.back()
         return state, "BACK"
     if state == "empty_lobby":
@@ -1509,6 +1784,47 @@ def describe_step(
     return f"{name} is {action}{counter}"
 
 
+async def settled_screens(
+    stranded: Sequence[tuple[TradeController, Any]],
+    sleep: Callable[[float], Any] = asyncio.sleep,
+) -> list[tuple[TradeController, Any]]:
+    """The phones among these whose screen has stopped moving, and its picture.
+
+    A phone caught mid-cross-fade is dropped for this round rather than pressed
+    on: the tint of a fade takes the white out of every measurement, and the
+    screen it is named after is not the screen that will be there when the press
+    lands. Waiting a beat and asking again is the whole of it.
+
+    What gets compared is the *name*, not the pixels. A friend screen is never
+    pixel-stable — the avatar breathes — but it is always called "friend", and
+    a fade is called one thing on the way in and another on the way out.
+    """
+    from . import trade_ios_android as cross
+
+    def name_of(controller: TradeController, image: Any) -> str:
+        state, _ = cross.describe_state(
+            image, lambda point: controller.image_point(image, point)
+        )
+        return state
+
+    before = [(controller, image, name_of(controller, image)) for controller, image in stranded]
+    await sleep(STATE_CONFIRM_DELAY)
+    settled = []
+    for controller, _, was in before:
+        image = await controller.screenshot()
+        if cross.state_matches(
+            "friend", cross.screen_metrics(image, controller.image_point(image, "TRADE_BTN"))
+        ):
+            # It was on its way home while the first picture was taken. Pressing
+            # anything now would be pressing on the friend screen.
+            continue
+        if name_of(controller, image) != was:
+            print(f"    {controller.spec.name} is between screens — looking again")
+            continue
+        settled.append((controller, image))
+    return settled
+
+
 async def recover_to_friend(
     controllers: Sequence[TradeController], sleep: Callable[[float], Any] = asyncio.sleep
 ) -> bool:
@@ -1517,7 +1833,11 @@ async def recover_to_friend(
 
     history: dict[str, set[str]] = {}
     trail: list[tuple[TradeController, Any, str]] = []
-    for round_number in range(FRIEND_RECOVERY_ROUNDS + 1):
+    allowance = FRIEND_RECOVERY_ROUNDS
+    drained = 0
+    round_number = -1
+    while True:
+        round_number += 1
         images = await asyncio.gather(*(controller.screenshot() for controller in controllers))
         stranded = [
             (controller, image)
@@ -1529,7 +1849,7 @@ async def recover_to_friend(
         ]
         if not stranded:
             return True
-        if round_number == FRIEND_RECOVERY_ROUNDS:
+        if round_number == allowance:
             # Recovery that runs out of rounds says only "did not come home",
             # and the screens it was walking are gone by the time anyone looks.
             # A android-two alternating picker -> detail screen -> picker for four
@@ -1547,17 +1867,25 @@ async def recover_to_friend(
             )
             print(f"    Recovery gave up; every round's screens saved in {directory}")
             return False
+        settled = await settled_screens(stranded, sleep)
         trail.extend(
             (controller, image, f"{controller.spec.name}-round{round_number}")
-            for controller, image in stranded
+            for controller, image in settled
         )
-        for controller, image in stranded:
+        dismissed = False
+        for controller, image in settled:
             seen = history.setdefault(controller.spec.name, set())
             state, pressed = await step_towards_friend(controller, image, seen)
             seen.add(state)
             print(f"    {describe_step(controller.spec.name, state, pressed, round_number + 1)}")
+            dismissed = dismissed or (state == "dialog" and bool(pressed))
+        # A dismissed notice is a screen gone, even though the one behind it is
+        # identical. Recovery only has rounds to spend on presses that might not
+        # be working, so this one is given back.
+        if dismissed and drained < DIALOG_DRAIN_ROUNDS:
+            drained += 1
+            allowance += 1
         await sleep(FRIEND_RECOVERY_DELAY)
-    return False
 
 
 def describe_screens(controllers: Sequence[TradeController], images: Sequence[Any]) -> str:
@@ -1820,7 +2148,15 @@ async def execute_trade_sequence(
         print(f"  {step.name}: {names}; wait {delay:g}s")
         if not dry_run:
             expected = cross.STEP_EXPECTED_STATE.get(step.name)
-            if expected and step.name != start_step:
+            if expected:
+                # The step a run is told to start from is guarded like any
+                # other. Being told the phones are on the picker is not the
+                # same as their being there, and the tap that goes in blind
+                # lands on whatever is: state_matches("selection") cannot tell
+                # a filled picker from an empty one, but it knows a picker from
+                # a friend screen, which is the mistake worth catching. A phone
+                # that is not where it was said to be fails this cycle, comes
+                # home, and starts the next one from TRADE_BTN.
                 await guard_trade_state(controllers, expected, step.name, sleep)
             await asyncio.gather(*(controller.tap_step(step.name) for controller in enabled))
         await sleep(delay)
@@ -2042,6 +2378,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true")
     status.add_argument("--adb", default=default_adb_binary())
 
+    owners = sub.add_parser("owners", help="which computer each configured phone is plugged into")
+    owners.add_argument("--json", action="store_true")
+
     gifts = sub.add_parser("gifts", help="open/send gifts on any selected mixture")
     gifts.add_argument("--devices", nargs="+", default=["all"])
     gift_mode = gifts.add_mutually_exclusive_group(required=True)
@@ -2056,6 +2395,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-cycles", type=int, default=100, help="per-phone safety cap for --all"
     )
     gifts.add_argument("--no-guard", action="store_true")
+    gifts.add_argument(
+        "--gifts-only",
+        action="store_true",
+        help="send gifts from every phone, even one parked on a gym's feeding screen",
+    )
+    gifts.add_argument("--spend", type=int, help="berry budget for a phone on a gym feeding screen")
+    gifts.add_argument(
+        "--spend-device",
+        action="append",
+        default=[],
+        metavar="DEVICE=N",
+        help="override berry budget for one fleet device",
+    )
     gifts.add_argument("--plan", action="store_true")
     gifts.add_argument("--allow-empty", action="store_true", help=argparse.SUPPRESS)
 
@@ -2148,6 +2500,13 @@ def main() -> int:
         print_status(rows, unregistered, args.json)
         return 0
 
+    if args.command == "owners":
+        from . import device_owners  # deferred: it reads this module's probes
+
+        rows, snapshots = device_owners.survey(fleet)
+        device_owners.print_survey(rows, snapshots, device_owners.unregistered_serials(fleet, snapshots), args.json)
+        return 0
+
     operation = "battle" if args.command == "battle-check" else args.command
     names = (
         args.pair
@@ -2182,6 +2541,11 @@ def main() -> int:
         else:
             positive(args.count, "--count")
             detail = f"{args.count} cycles per device"
+        if args.spend is not None:
+            positive(args.spend, "--spend")
+        args.spend_overrides = parse_spend_overrides(args.spend_device, specs)
+        if not args.gifts_only:
+            detail += "; a phone on a gym feeding screen feeds berries instead"
         if args.plan:
             print_plan("gifts", specs, detail)
             return 0

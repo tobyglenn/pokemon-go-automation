@@ -48,14 +48,14 @@ Configure separate calibration files where workflows require them. Keep the phon
 ## 5. Inspect, plan, then run one supervised action
 
 ```sh
-python fleet.py status
-python send_gifts.py --devices all --count 1 --plan
+python scripts/fleet.py status
+python gift.py --devices all --count 1 --plan
 ```
 
 Read the selected devices and computer routing. If correct, prepare the Friends screen and run a single gift cycle:
 
 ```sh
-python send_gifts.py --devices all --count 1
+python gift.py --devices all --count 1
 ```
 
 Watch the physical phones, verify the resulting state, and inspect local logs. Increase the count only after the small run behaves as expected. See [Testing](testing.md) for the evidence to retain privately.

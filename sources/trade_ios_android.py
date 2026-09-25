@@ -123,9 +123,18 @@ STATE_ACTION_COORDINATE = {
     "lobby": "CONFIRM_BTN",
     "post_trade": "X_BTN",
 }
+# How much of the patch under an action coordinate a pill has to fill to count
+# as being there. A pill measured on the android-two fills 0.904 of it and the
+# gap beside one measures 0.0, so anything in the middle is a patch that has
+# half a pill in it — a coordinate that needs moving rather than a screen.
+ACTION_PILL_FRACTION = 0.55
 
 LOCK_PATH = Path("/tmp/pokemon-go-ios-trade.lock")
-ARTIFACT_ROOT = config_paths.state_dir()
+ARTIFACT_ROOT = (
+    config_paths.state_dir()
+    if hasattr(config_paths, "state_dir")
+    else Path.home() / "PokemonAutomationArtifacts"
+)
 TRADE_DIAGNOSTICS_DIR = ARTIFACT_ROOT / "trades" / "diagnostics"
 
 
@@ -570,11 +579,33 @@ def state_matches(expected: str, metrics: dict[str, float]) -> bool:
         # TRADE_BTN sits in the gap between the two lines of "LOCAL TRADE"
         # (points 40px away score 0.13), so a 0.07 floor rejected the very
         # screen it was meant to accept.
-        return green >= 0.05 and 0.20 <= white <= 0.80 and pale < 0.80
+        #
+        # The white ceiling is not one number because how much white a friend
+        # screen shows depends on the friend. The android-three measures 0.771
+        # against one and 0.850 against another — the taller panel gets the
+        # action row, POKÉMON FOR REMOTE TRADE and the TOTAL ACTIVITY table in
+        # the band at once — and a flat 0.80 sat between the two, so the same
+        # phone's friend screen read as a post-trade card every other friend.
+        # That is not a near miss: post_trade answers to X_BTN, and X_BTN on a
+        # friend screen leaves for the map, which nothing recovers from. It is
+        # what put the razr on the map three runs running on 2026-09-13.
+        #
+        # What the post-trade card has that a friend screen does not is a card
+        # filling the head band: measured 0.992 on the android-three against
+        # 0.663-0.668 for its friend screen. That separates them on the handset
+        # where white cannot, and the 0.87 ceiling keeps the iPhone's own cards
+        # out — they measure 0.899-0.916 white, and the one that dips to 0.582
+        # in the band is held off by the ceiling rather than by the band.
+        return (
+            green >= 0.05
+            and pale < 0.80
+            and white >= 0.20
+            and (white <= 0.80 or (white <= 0.87 and metrics["card_band"] <= 0.70))
+        )
     if expected == "selection":
         return pale >= 0.80
     if expected == "next":
-        return green >= 0.55
+        return green >= ACTION_PILL_FRACTION
     if expected == "lobby":
         # The trade screen keeps the same shape either side of CONFIRM: before
         # it, a green CONFIRM pill sits under the coordinate; after it, that
@@ -582,11 +613,23 @@ def state_matches(expected: str, metrics: dict[str, float]) -> bool:
         # trainer. Reading only the green turned the second half into a screen
         # nothing recognised, and a phone left waiting there was walked past by
         # every recovery round until the game gave up with "Trade expired."
-        return green >= 0.55 or metrics["action_orange"] >= 0.55
+        return (
+            green >= ACTION_PILL_FRACTION
+            or metrics["action_orange"] >= ACTION_PILL_FRACTION
+        )
     if expected == "post_trade":
         if green < 0.04 or pale >= 0.80:
             return False
-        if white >= 0.82:
+        if white >= 0.82 and metrics["card_edges"] < 0.92:
+            # White alone used to be enough here, and on the android-three that
+            # takes screens which are not cards at all: its friend screen
+            # measures 0.849 white and its friendship-bonus sheet 0.865, both
+            # over the floor. The edge test is what the short cut was missing —
+            # a post-trade card stops short of the outer columns (0.824-0.903
+            # on the iPhone) where those two full-bleed screens reach 0.965 and
+            # 1.000. The android-three's own card is above the gate and does not
+            # need the short cut: it fills the head band at 0.992 and is taken
+            # by the measurement below.
             return True
         # How much of white_panel's band the card fills depends on how many
         # rows of card the handset fits into it. The android-three's 1224x2992 panel
@@ -613,7 +656,20 @@ def state_matches(expected: str, metrics: dict[str, float]) -> bool:
 # does, but it stops well short of the screen's outer columns: measured 0.804/
 # 0.178 on the android-three, 0.840/0.220 on the android-one and 0.818/0.332 on an iPhone,
 # against 0.90+/0.80+ for a card and 0.33-0.40 in the band for a friend screen.
-FLOATING_DIALOG_BAND = 0.80
+# The 0.80 floor was measured off the android-three's own cancel dialog, and the same
+# dialog came back at 0.792 on 2026-09-13 — under its own floor, so the guard
+# did not fire and the screen went on to match "friend": the background behind
+# a dialog is the trade's flat green, which reads 1.000 under TRADE_BTN, and
+# white_panel sits at 0.464, inside every friend bound. The guard then believed
+# the razr was home, tapped TRADE_BTN into the dialog, and left the iPhone
+# waiting in a trade nobody joined until Pokémon GO expired it. That is the
+# loop that stopped three runs.
+#
+# The edges are what actually tell a dialog from a card — 0.178 here against
+# 0.60+ for anything with a card in it — so the band floor only has to be low
+# enough to let the edge test speak. Nothing in the 59 captures on hand sits in
+# the widened window with edges low enough to be caught by mistake.
+FLOATING_DIALOG_BAND = 0.75
 FLOATING_DIALOG_EDGES = 0.40
 
 # Every screen the trade sequence can be left standing on, in the order they
@@ -816,6 +872,8 @@ def describe_state(
         return "lobby", metrics
     if is_empty_handed_trade_screen(image):
         return "empty_lobby", metrics
+    if is_friendship_sheet(image, metrics):
+        return "friendship", metrics
     return "unknown", metrics
 
 
@@ -850,6 +908,42 @@ def is_empty_handed_trade_screen(image: Any) -> bool:
         return False
     pill = _fraction_in_crop(image, (0.10, 0.60, 0.90, 0.95), _is_green)
     return pill < EMPTY_LOBBY_GREEN
+
+
+# The friendship-bonus sheet: the sub-screen behind the heart bar, listing
+# REMOTE TRADE / TRADE / GYM BATTLE and how many points the next heart needs.
+# It is not a trade screen at all, which is why nothing named it, and an
+# unnamed screen is left alone — so the iphone-second stood on this one through
+# every recovery round on 2026-09-13 while the razr walked itself out to the
+# map, and the run gave up with both phones somewhere else.
+#
+# What separates it is the card: the bonus list is full-bleed white, so both
+# outer columns card_edges samples read solid. Measured over all 33 iOS
+# diagnostic captures, this sheet is the only screen that saturates there —
+# the next highest are the picker at 0.908 and the post-trade card at 0.903 —
+# so the floor sits above both with room either side. The rest of the test is
+# what it must not be: no green under TRADE_BTN (the friend screen's LOCAL
+# TRADE reads 0.214), not the picker's pale search bar, and a card white
+# enough to tell it from the two dark trade screens that score 0.000 here.
+FRIENDSHIP_SHEET_EDGES = 0.97
+FRIENDSHIP_SHEET_WHITE = 0.50
+FRIENDSHIP_SHEET_GREEN = 0.05
+FRIENDSHIP_SHEET_PALE = 0.80
+
+
+def is_friendship_sheet(image: Any, metrics: dict[str, float]) -> bool:
+    """True for the friendship-bonus sheet opened from the friend screen.
+
+    Checked last, after every other state has had its say, so it can only ever
+    turn an "unknown" into something recoverable and never take a screen off a
+    state that already reads correctly.
+    """
+    return (
+        metrics["card_edges"] >= FRIENDSHIP_SHEET_EDGES
+        and metrics["white_panel"] >= FRIENDSHIP_SHEET_WHITE
+        and metrics["action_green"] < FRIENDSHIP_SHEET_GREEN
+        and metrics["search_pale"] < FRIENDSHIP_SHEET_PALE
+    )
 
 
 def is_ios_trading_unavailable_dialog(image: Any) -> bool:
@@ -1095,7 +1189,25 @@ class IOSController:
         self.driver = driver
         self.coordinates = coordinates
         self.bundle_id = bundle_id
-        self.viewport = driver.get_window_rect()
+        try:
+            self.viewport = driver.get_window_rect()
+        except Exception as exc:
+            if not ios_wda_cleanup.stale_wda_error(exc):
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                raise
+            print("iPhone target app is not active; activating Pokemon GO...", flush=True)
+            try:
+                driver.execute_script("mobile: activateApp", {"bundleId": bundle_id})
+                self.viewport = driver.get_window_rect()
+            except Exception as activation_exc:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                raise activation_exc
 
     @classmethod
     def connect(cls, config: RuntimeConfig) -> "IOSController":
@@ -1151,12 +1263,31 @@ class IOSController:
             capabilities["appium:usePreinstalledWDA"] = True
 
         name = device.get("name", "iPhone")
-        try:
+
+        def _connect_and_create() -> "IOSController":
             driver = webdriver.Remote(
                 command_executor=config.appium_server_url,
                 options=XCUITestOptions().load_capabilities(capabilities),
             )
+            return cls(driver, config.ios_coordinates, capabilities["appium:bundleId"])
+
+        try:
+            return _connect_and_create()
         except Exception as exc:
+            if ios_wda_cleanup.stale_wda_error(exc):
+                print(
+                    f"[{name}] WDA session lost UI authorization "
+                    f"({exc}); restarting runner and retrying...",
+                    flush=True,
+                )
+                ios_wda_cleanup.stop_wda_runner(device["udid"])
+                time.sleep(2.0)
+                try:
+                    return _connect_and_create()
+                except Exception as retry_exc:
+                    raise CrossPlatformTradeError(
+                        f"Could not create the iOS Appium session for {name} ({device['udid']}) after restarting WDA: {retry_exc}"
+                    ) from retry_exc
             if capabilities.get("appium:usePreinstalledWDA", False):
                 print(
                     f"[{name}] Preinstalled WebDriverAgent would not start ({exc});"
@@ -1166,19 +1297,14 @@ class IOSController:
                 ios_wda_cleanup.stop_wda_runner(device["udid"])
                 time.sleep(1)
                 try:
-                    driver = webdriver.Remote(
-                        command_executor=config.appium_server_url,
-                        options=XCUITestOptions().load_capabilities(capabilities),
-                    )
+                    return _connect_and_create()
                 except Exception as retry_exc:
                     raise CrossPlatformTradeError(
                         f"Could not create the iOS Appium session for {name} ({device['udid']}): {retry_exc}"
                     ) from retry_exc
-            else:
-                raise CrossPlatformTradeError(
-                    f"Could not create the iOS Appium session for {name} ({device['udid']}): {exc}"
-                ) from exc
-        return cls(driver, config.ios_coordinates, capabilities["appium:bundleId"])
+            raise CrossPlatformTradeError(
+                f"Could not create the iOS Appium session for {name} ({device['udid']}): {exc}"
+            ) from exc
 
     async def tap_step(self, name: str) -> bool:
         point = self.coordinates.get(name)
@@ -1728,7 +1854,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     from . import fleet_entrypoint
-    public_result = fleet_entrypoint.direct_module_operation('trade', 'trade_pokemon.py')
+    public_result = fleet_entrypoint.direct_module_operation('trade', 'trade.py')
     if public_result is not None:
         raise SystemExit(public_result)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests import support as _test_support
 
 import io
+import os
 import sys
 import threading
 import unittest
@@ -68,7 +69,15 @@ class ActivityTests(unittest.TestCase):
 
 
 class WatchLoopTests(unittest.TestCase):
-    def _run_loop(self, attached, clock_values, *, idle_seconds=1800.0, rounds=3):
+    def _run_loop(
+        self,
+        attached,
+        clock_values,
+        *,
+        idle_seconds=1800.0,
+        rounds=3,
+        orphaned=lambda: False,
+    ):
         stopped: list[str] = []
         clock = iter(clock_values)
         activity = fleet_watchdog.Activity(at=0.0)
@@ -81,6 +90,7 @@ class WatchLoopTests(unittest.TestCase):
             poll_seconds=0.0,
             idle_seconds=idle_seconds,
             rounds=rounds,
+            orphaned=orphaned,
         )
         return stopped
 
@@ -110,6 +120,45 @@ class WatchLoopTests(unittest.TestCase):
         stopped = self._run_loop(lambda: 2, [10.0, 5_000.0, 6_000.0])
         self.assertEqual(len(stopped), 1)
         self.assertIn("nothing printed", stopped[0])
+
+    def test_a_leg_whose_supervisor_died_stops_itself(self) -> None:
+        """The 2026-09-21 orphan: busy, phones attached, nobody reading it."""
+        stopped = self._run_loop(lambda: 2, [10.0, 20.0, 30.0], orphaned=lambda: True)
+        self.assertEqual(len(stopped), 1)
+        self.assertIn("supervisor", stopped[0])
+
+    def test_an_orphan_stops_even_while_its_phone_is_attached_and_chatty(self) -> None:
+        """Neither other half would ever fire on a leg that is working fine."""
+        gone = iter([False, True])
+        stopped = self._run_loop(
+            lambda: 2, [10.0, 20.0, 30.0], orphaned=lambda: next(gone)
+        )
+        self.assertEqual(len(stopped), 1)
+
+
+class SupervisorTests(unittest.TestCase):
+    """Only a leg that was handed a supervisor answers to one."""
+
+    def test_a_live_supervisor_leaves_the_leg_alone(self) -> None:
+        self.assertFalse(
+            fleet_watchdog.supervisor_gone("4242", alive=lambda pid: pid == 4242)
+        )
+
+    def test_a_dead_supervisor_orphans_the_leg(self) -> None:
+        self.assertTrue(
+            fleet_watchdog.supervisor_gone("4242", alive=lambda pid: False)
+        )
+
+    def test_a_run_started_by_hand_has_no_supervisor_to_lose(self) -> None:
+        """`nohup gbl.py &` is reparented to launchd and is meant to keep going."""
+        for text in ("", "   ", "none", "1"):
+            with self.subTest(text=text):
+                self.assertFalse(
+                    fleet_watchdog.supervisor_gone(text, alive=lambda pid: False)
+                )
+
+    def test_the_real_check_reads_this_process_as_alive(self) -> None:
+        self.assertFalse(fleet_watchdog.supervisor_gone(str(os.getpid())))
 
 
 class InstallTests(unittest.TestCase):
@@ -161,6 +210,7 @@ class ProbeHonestyTests(unittest.TestCase):
             poll_seconds=0.0,
             idle_seconds=1800.0,
             rounds=4,
+            orphaned=lambda: False,
         )
         self.assertEqual(stopped, [])
 

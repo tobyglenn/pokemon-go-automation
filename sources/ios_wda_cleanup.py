@@ -213,6 +213,34 @@ def wda_session_alive(port: int, session_id: str, timeout: float = 3.0) -> bool:
         return False
 
 
+def wda_screenshot_authorized(port: int, timeout: float = 3.0) -> bool:
+    """Check if WDA can perform UI testing actions when no session is active.
+
+    WebDriverAgent exposes /screenshot as a sessionless endpoint. If testmanagerd
+    has revoked UI testing authorization, /screenshot returns HTTP 500
+    (or an error payload with 'Not authorized for performing UI testing actions').
+    Probing /screenshot detects detached runners even when there is no active session.
+    """
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/screenshot")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return False
+            payload = json.loads(resp.read().decode("utf-8"))
+            val = payload.get("value")
+            if isinstance(val, dict) and "error" in val:
+                return False
+            return isinstance(val, str) and len(val) > 0
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        TimeoutError,
+        ValueError,
+    ):
+        return False
+
+
 def host_runner_alive(udid: str) -> bool:
     """Is an xcodebuild test runner for this phone still up on this Mac?"""
     try:
@@ -243,7 +271,10 @@ def wda_health(udid: str, port: int = WDA_DEFAULT_PORT) -> str:
         if isinstance(payload.get("value"), dict)
         else None
     )
-    if session_id and not wda_session_alive(port, str(session_id)):
+    if session_id:
+        if not wda_session_alive(port, str(session_id)):
+            return "detached"
+    elif not wda_screenshot_authorized(port):
         return "detached"
     return "live"
 

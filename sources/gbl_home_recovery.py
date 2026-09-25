@@ -60,6 +60,14 @@ ADB_BINARY = str(_ADB) if _ADB.exists() else 'adb'
 
 SCREENCAP_TIMEOUT = 20  # adb exec-out screencap wedges outright now and then
 
+GAME_PACKAGE = 'com.nianticlabs.pokemongo'
+# The launcher intent is what a tap on the icon sends: it brings a backgrounded
+# game forward and cold-starts a dead one, so one command covers both.
+LAUNCH_INTENT = ('shell', 'monkey', '-p', GAME_PACKAGE,
+                 '-c', 'android.intent.category.LAUNCHER', '1')
+FOREGROUND_TIMEOUT = 45.0  # a cold start takes its time before it draws
+COLD_START_SETTLE = 180.0  # ... and much longer before the map is up
+
 # Config keys a mapped handset carries, used only when detection finds nothing.
 BALL_KEY = 'GBL_MENU_BTN'
 BATTLE_KEY = 'GBL_MENU_BATTLE_BTN'
@@ -290,7 +298,31 @@ def gbl_card_confirmed(image: Image.Image) -> bool:
     return gbl_vision.gbl_card_visible(boxes)
 
 
+def safety_notice_ok(image: Image.Image) -> list[int] | None:
+    """Where the start-up safety warning's OK sits, or None if it is not up."""
+    try:
+        boxes = gbl_vision.recognize(image)
+    except Exception:
+        return None
+    return gbl_vision.safety_notice_point(boxes, image)
+
+
 # --- Devices ---
+
+def package_in_front(dumped: str) -> str:
+    """The package owning the focused window, per `dumpsys window`, or ''.
+
+    The line reads `mCurrentFocus=Window{326ab68 u0 <package>/<activity>}`, and
+    says `null` between apps and on the lock screen, where nothing is focused.
+    """
+    for line in dumped.splitlines():
+        if 'mCurrentFocus' not in line:
+            continue
+        for token in line.split('=', 1)[1].strip().rstrip('}').split():
+            if '/' in token:
+                return token.split('/', 1)[0]
+    return ''
+
 
 @dataclass
 class Step:
@@ -304,6 +336,9 @@ class Target:
     """One phone, reduced to the four things this walk needs of it."""
 
     label: str
+    # Set by restore() when it had to start the game from nothing, so the walk
+    # knows to wait out a title screen rather than a resume.
+    restored_cold: bool = False
 
     async def screenshot(self) -> Image.Image:
         raise NotImplementedError
@@ -386,6 +421,35 @@ class AndroidTarget(Target):
             return list(value)
         return None
 
+    def front_package(self) -> str:
+        return package_in_front(self._adb('shell', 'dumpsys', 'window').stdout or '')
+
+    def game_running(self) -> bool:
+        return bool((self._adb('shell', 'pidof', GAME_PACKAGE).stdout or '').strip())
+
+    async def restore(self) -> bool:
+        """Bring Pokemon GO back, whether it is behind something or gone.
+
+        Android can do what iOS will not: a game that has died is restarted
+        here rather than left for a human, because the walk below starts from
+        the map and a cold start ends on it.  The alternative is a leg that
+        taps map coordinates into whatever notification took the screen --
+        seen on the moto-g, which sat in Google Messages for an hour with the
+        game still running behind it.
+        """
+        if await asyncio.to_thread(self.front_package) == GAME_PACKAGE:
+            return False  # In front already; an unrecognised screen is its own.
+        self.restored_cold = not await asyncio.to_thread(self.game_running)
+        await asyncio.to_thread(self._adb, *LAUNCH_INTENT)
+        deadline = time.monotonic() + FOREGROUND_TIMEOUT
+        while await asyncio.to_thread(self.front_package) != GAME_PACKAGE:
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(POLL_GAP)
+        # True either way: the launch was sent, so the caller must judge the
+        # screen that follows rather than tap the one it had.
+        return True
+
 
 class IOSTarget(Target):
     def __init__(self, label: str, device: Any) -> None:
@@ -465,14 +529,14 @@ SETTLE_TIMEOUT = 12.0   # the menu and the GBL card both animate in
 POLL_GAP = 1.0
 
 
-async def _settle(target: Target, predicate) -> tuple[bool, Image.Image]:
+async def _settle(target: Target, predicate, timeout: float | None = None) -> tuple[bool, Image.Image]:
     """Polls until predicate holds, or until it has waited long enough.
 
     Polled rather than slept through: the menu opens in well under a second on
     the android-three and takes several on the android-one, and a fixed sleep either wastes the
     fast phone's time or reads the slow one mid-animation.
     """
-    deadline = time.monotonic() + SETTLE_TIMEOUT
+    deadline = time.monotonic() + (SETTLE_TIMEOUT if timeout is None else timeout)
     image = await target.screenshot()
     while True:
         if predicate(image):
@@ -497,6 +561,32 @@ async def _press(target: Target, point: list[int], image: Image.Image) -> None:
         await target.tap(point)
 
 
+async def _dismiss_safety_notice(target: Target, image: Image.Image) -> tuple[str, Image.Image]:
+    """Press OK on the start-up safety warning when that is what is showing.
+
+    Nothing dismisses this card by itself, and the game draws nothing else
+    until it goes, so a walk that steps over it is walking over a wall.
+    Answers '' when the card was not up at all, which is not a failure.
+    """
+    point = safety_notice_ok(image)
+    if point is None:
+        return '', image
+    await _press(target, point, image)
+    gone, image = await _settle(target, lambda shot: safety_notice_ok(shot) is None)
+    return ('cleared' if gone else 'stuck'), image
+
+
+def _home_or_notice(image: Image.Image) -> bool:
+    """Whether the game has drawn anything the walk knows how to leave.
+
+    The OCR is only reached when both cheap pixel tests fail, which during a
+    cold start's splash is every poll -- the price of noticing the safety card
+    the moment it appears rather than after the whole patience budget.
+    """
+    return (on_map(image) or main_menu_open(image)
+            or safety_notice_ok(image) is not None)
+
+
 async def recover(target: Target, shots: Path, *, dry_run: bool = False) -> list[Step]:
     """Map -> pokeball -> main menu -> BATTLE -> GO BATTLE LEAGUE."""
     steps: list[Step] = []
@@ -517,14 +607,31 @@ async def recover(target: Target, shots: Path, *, dry_run: bool = False) -> list
     # Neither screen recognised means the game may not be the thing on top.
     if not on_map(image) and not main_menu_open(image):
         if await target.restore():
-            acted, image = await _settle(
-                target, lambda shot: on_map(shot) or main_menu_open(shot))
+            # A resume draws the map in a second; a cold start runs a splash,
+            # a login and a world load first, and the old 12s gave up during
+            # the splash and called a game that was coming back a failure.
+            patience = COLD_START_SETTLE if target.restored_cold else None
+            acted, image = await _settle(target, _home_or_notice, patience)
             path = _save(image, shots, f'{target.label}-{stamp}-0-restored')
+            started = 'restarted' if target.restored_cold else 'brought forward'
             steps.append(Step('foreground', acted,
-                              'Pokemon GO is back in front' if acted
+                              f'Pokemon GO {started} and back in front' if acted
                               else 'asked for Pokemon GO, still nothing recognised', path))
             if not acted:
                 return steps
+
+    # A cold start ends here rather than on the map: one OK stands between the
+    # game and everything this walk does next.  Checked whether or not the
+    # restore above ran, because a game that restarted on its own is found
+    # sitting on the card with nobody having asked it to.
+    outcome, image = await _dismiss_safety_notice(target, image)
+    if outcome:
+        path = _save(image, shots, f'{target.label}-{stamp}-0-safety')
+        steps.append(Step('safety notice', outcome == 'cleared',
+                          'pressed OK on the start-up warning' if outcome == 'cleared'
+                          else 'pressed OK; the start-up warning is still up', path))
+        if outcome == 'stuck':
+            return steps
 
     width, height = image.size
 

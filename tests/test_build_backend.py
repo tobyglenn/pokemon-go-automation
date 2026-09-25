@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-import build_backend
+from scripts import build_backend
 
 
 class SourceArchiveTests(unittest.TestCase):

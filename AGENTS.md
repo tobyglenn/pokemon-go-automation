@@ -1,6 +1,6 @@
 # Working on Pokémon GO Automation
 
-Read README.md and docs/architecture.md before changing a workflow. Public entry points should describe the user action; reusable Android/iOS workers live in sources/.
+Read docs/README.md and docs/architecture.md before changing a workflow. Public entry points should describe the user action; reusable Android/iOS workers live in sources/.
 
 ## Privacy
 

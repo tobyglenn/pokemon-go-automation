@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from . import config_paths
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 import math
 from pathlib import Path
@@ -173,6 +173,28 @@ def league_matches(wanted: str, name: str | None) -> bool:
         words[start:start + span] == wanted_words
         for start in range(len(words) - span + 1)
     )
+
+
+def adopt_league(profile: "StrategyProfile", league_name: str) -> "StrategyProfile":
+    """Re-aim a profile at the league the game is actually offering.
+
+    The configured league is a preference, not a promise.  Pokemon GO rotates
+    its list, and on a day Master League is nowhere on it a phone that insists
+    on Master plays nothing at all -- which is how three phones spent a whole
+    run entering Great League sets, backing out of them, and stopping.  Playing
+    what is on offer is worth more than playing nothing.
+
+    The name is not the only thing that has to move: the party builder and
+    every meta lookup read the CP cap off these settings, so a Master team
+    carried into a Great League set is three Pokemon the game will not let in.
+    """
+    settings = replace(profile.settings, preferred_league=league_name)
+    try:
+        from . import gbl_meta
+        gbl_meta.set_active_cap(gbl_meta.cap_for_league(league_name))
+    except (ImportError, OSError, TypeError, ValueError):
+        pass
+    return StrategyProfile(profile.team, settings)
 
 
 def _member_from_mapping(value: Any, label: str) -> TeamMember:

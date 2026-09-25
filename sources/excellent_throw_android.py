@@ -25,7 +25,7 @@ try:
     from ppadb.client_async import ClientAsync
     from ppadb.device_async import DeviceAsync
 except ModuleNotFoundError as exc:  # pragma: no cover - environment dependency
-    raise RuntimeError("Missing pure-python-adb dependency; install requirements.txt") from exc
+    raise RuntimeError("Missing pure-python-adb dependency; install docs/requirements.txt") from exc
 
 ARTIFACT_ROOT = config_paths.state_dir() / "excellent-throw"
 
@@ -74,7 +74,30 @@ BALL_SHEET_SECONDS = 1.2
 # Pokemon's head scores as well as the ball -- see the ring seeding notes) or
 # came back blank, and each disagreement threw the good read away. Two reads
 # that agree inside a second are the same evidence without that fragility.
+#
+# A second is only the floor.  A window shorter than the phone's own read
+# cadence throws every reading away before the next one arrives, and the
+# window can never be met: the foldable scored a flat 1.00 for the whole 25s
+# of an award encounter on 10 Sep 2026 and never locked, because one capture
+# and search on it costs about a second and the previous read had always just
+# expired.  Hold a reading for a few reads instead of a fixed wall-clock
+# second, so the lock costs the same number of agreeing frames on every phone.
+#
+# The count has to cover frames the ball is *not* legible in, too.  A tan
+# Pokemon standing over the corridor the ball is searched in merges with it
+# and the frame reads as nothing at all: the foldable's Fearow on 10 Sep 2026
+# gave one clean reading -- the same (612,2517) r283 every time -- once every
+# four reads, four seconds apart, and 2.5 reads of memory expired each one
+# before its twin arrived.  Only a *current* detection can fire the lock, and
+# it still has to agree on position, so holding the history longer cannot
+# invent an encounter that has ended.
 BALL_AGREE_WINDOW = 1.0
+BALL_AGREE_READS = 6.0
+
+
+def agree_window(read_seconds: float) -> float:
+    """How long a ball reading stays worth agreeing with on this phone."""
+    return max(BALL_AGREE_WINDOW, read_seconds * BALL_AGREE_READS)
 
 # Every vision helper resizes its frame to the viewport it is handed, so the
 # viewport is what sets the cost of a read.  The iPhone hands them 375x667
@@ -83,8 +106,10 @@ BALL_AGREE_WINDOW = 1.0
 # center hypotheses at 6px steps, about fifteen times the hypotheses.  One held
 # frame took 45s on the android-one and a single throw took nearly four minutes.
 ANALYSIS_WIDTH = 420
-NANAB_FLICK_MS = 260
+# The berry is tapped, not thrown, so there is no flick duration here at all.
+# See feed_berry.
 NANAB_FEED_SETTLE_SECONDS = 1.6
+NANAB_FEED_TAPS = 2      # the second is for a tap that missed a moving berry
 ADB_BINARY = Path(__file__).resolve().parent.parent / "adb"
 ADB_PATH = str(ADB_BINARY) if ADB_BINARY.exists() else "adb"
 SCREENCAP_TIMEOUT = 10
@@ -609,34 +634,46 @@ async def detect_encounter_ball(
     device: AndroidDevice,
     wait_seconds: float | None,
     artifact_dir: Path,
+    lone_reading_ok: bool = False,
 ) -> excellent_throw_ios.BallDetection:
+    """Confirm ball geometry across captures using this device's read latency.
+
+    Two agreeing detections are required by default. A moving Pokemon can
+    hide the ball between captures, so callers with independent encounter
+    evidence may explicitly allow one high-confidence detection.
+    """
     deadline = time.monotonic() + wait_seconds if wait_seconds is not None else None
     view = analysis_view(device.viewport)
     recent: list[tuple[float, excellent_throw_ios.BallDetection]] = []
     last_score = -1.0
     image: Image.Image | None = None
+    read_seconds = 0.0
     while deadline is None or time.monotonic() < deadline:
+        read_started = time.monotonic()
         image, ts = await capture_frame(device)
         if (ts % 1.0) < 0.1:
             # keep logging throttled and avoid spamming on a 30Hz device.
             pass
         detection = excellent_throw_ios.locate_throw_ball(image, view.viewport)
         score = detection.score if detection is not None else 0.0
+        read_seconds = time.monotonic() - read_started
         if detection is not None and detection.score >= 0.55:
             now = time.monotonic()
             recent = [(seen, ball) for seen, ball in recent
-                      if now - seen <= BALL_AGREE_WINDOW]
+                      if now - seen <= agree_window(read_seconds)]
             agreed = any(
                 excellent_throw_ios.same_encounter_ball(ball, detection, view.viewport)
                 for _seen, ball in recent
             )
             recent.append((now, detection))
-            if agreed:
+            if agreed or lone_reading_ok:
                 image.save(artifact_dir / "encounter.jpg", "JPEG", quality=72)
                 ready = view.grow_ball(detection)
+                alone = "" if agreed else ", on one reading"
                 print(
                     f"[{device.label}] Encounter ready: "
-                    f"ball=({ready.center_x},{ready.center_y}) r={ready.radius} conf={ready.score:.2f}"
+                    f"ball=({ready.center_x},{ready.center_y}) r={ready.radius} "
+                    f"conf={ready.score:.2f}{alone}"
                 )
                 return ready
         # A blank or low-scoring frame ages the history rather than emptying
@@ -817,55 +854,100 @@ def ball_in_hand(image: Image.Image, viewport: tuple[int, int]) -> bool:
     return excellent_throw_ios.ball_in_hand(image, analysis_view(viewport).viewport)
 
 
-def feed_point(
-    device: AndroidDevice,
-    ball: excellent_throw_ios.BallDetection | None,
-    encounter_image: Image.Image,
-) -> list[int]:
-    """Where on the Pokemon the berry should land."""
-    if ball is None:
-        return [device.viewport[0] // 2, round(device.viewport[1] * 0.48)]
-    target = fallback_target(encounter_image, ball, device)
-    return [
-        target.center_x,
-        max(
-            round(device.viewport[1] * 0.34),
-            min(round(device.viewport[1] * 0.58), target.center_y),
-        ),
-    ]
+def item_in_hand(image: Image.Image, viewport: tuple[int, int]) -> bool:
+    """True only when something is held over the throw spot and it is not a ball.
+
+    `ball_in_hand` says no to a frame it cannot read at all, which is not the
+    same answer: a Pokemon standing over its own ball hides the disc, and razr's
+    Fearow on 10 Sep 2026 was read as an item held in the hand every time, sent
+    the throw off to the berry picker, and lost the throw when the picker did
+    not open.  Nothing legible is no reason to put the ball down.
+    """
+    view = analysis_view(viewport).viewport
+    if excellent_throw_ios.locate_throw_ball(image, view) is None:
+        return False
+    return not excellent_throw_ios.ball_in_hand(image, view)
 
 
-async def flick_berry(
+async def locate_held_item(
+    device: AndroidDevice,
+    fallback: excellent_throw_ios.BallDetection | None = None,
+) -> tuple[excellent_throw_ios.BallDetection | None, Image.Image | None]:
+    """Where the held item sits on a frame taken now.
+
+    `detect_encounter_ball` reads the ball as the encounter opens, and several
+    seconds of berry picker go by before anything is thrown.  That reading is
+    not where the item is by then: on a tall foldable the ball is still
+    dropping in when the encounter is first legible, and it was measured at
+    0.794h against the 0.911h it settles at.  A gesture is only a throw if it
+    starts on the thing being thrown, so the position is re-read rather than
+    remembered.
+
+    `locate_throw_ball` matches a held berry as readily as a ball -- it is the
+    disc it finds, and `ball_in_hand` is what tells the two apart -- so this
+    serves the flick and the throw alike.
+    """
+    image, _ts = await capture_frame(device)
+    detection = excellent_throw_ios.locate_throw_ball(
+        image, analysis_view(device.viewport).viewport
+    )
+    if detection is None:
+        return fallback, image
+    return analysis_view(device.viewport).grow_ball(detection), image
+
+
+async def feed_berry(
     device: AndroidDevice,
     ball: excellent_throw_ios.BallDetection | None,
-    encounter_image: Image.Image,
     artifact_dir: Path,
-) -> None:
-    """Throw the held berry at the Pokemon.
+) -> bool:
+    """Feed the held berry to the Pokemon, and say whether it went.
 
-    Selecting a Nanab only puts it in the hand; it has to be thrown with the
-    same gesture as a ball, and a tap feeds nothing.
+    A tap on the berry.  Not a throw -- and this cost two days of runs to
+    settle, because a throw is what a berry looks like it wants.  Selecting a
+    Nanab puts it in the hand where the ball sits, so every version of this
+    swiped it at the Pokemon the way the ball is swiped: from the berry, at
+    the Pokemon's x, then straight up at the proven throw's own speed.  None
+    of them fed anything.  The moto's bag read x9 before and x9 after three
+    of them; the foldable's read x36 either side.
 
-    There is no reading back whether it landed.  A successful feed makes the
-    game select *another* berry, so the hand holds a berry either way -- the
-    only difference is the count printed under it, and 39 -> 37 -> 36 across
-    the runs that "failed" is what showed the flicks were working all along.
-    Flicking twice on that false negative just fed a second berry.  So: one
-    flick, then take the ball back.
+    Tapping fed it first try, 9 -> 8, with the Nanab's swirl drawn over the
+    Swinub (10 Sep 2026).  `berry_android.feed_berry` had already found the
+    same thing on the gym screen and written it down: a press picks the berry
+    up, so a swipe drags it and puts it down again, feeding nothing and
+    consuming nothing.  The encounter screen treats it the same way.
+
+    The feed reads itself back, which the flick could not: a berry that is
+    eaten leaves the hand and the game hands the ball back, so a ball on the
+    next frame is the receipt.  A berry still in the hand means the tap missed
+    and is worth one more.  Bounded at NANAB_FEED_TAPS, because if the game
+    ever does re-select a berry instead, every extra tap is another Nanab.
 
     No BACK key anywhere here.  It does not put the berry away, it runs from
     the encounter: the moto ended up on the map screen and the run counted the
     abandoned Pokemon as caught.
     """
-    feed_x, feed_y = feed_point(device, ball, encounter_image)
-    start = (
-        [ball.center_x, ball.center_y]
-        if ball is not None
-        else [device.viewport[0] // 2, round(device.viewport[1] * 0.82)]
-    )
-    await device.straight_throw(start, [feed_x, feed_y], NANAB_FLICK_MS)
-    print(f"[{device.label}] Berry flicked {start}->({feed_x},{feed_y})")
-    await asyncio.sleep(NANAB_FEED_SETTLE_SECONDS)
+    for attempt in range(1, NANAB_FEED_TAPS + 1):
+        held, held_image = await locate_held_item(device, ball)
+        if held_image is not None:
+            held_image.save(artifact_dir / "berry-in-hand.jpg", "JPEG", quality=72)
+            if ball_in_hand(held_image, device.viewport):
+                print(f"[{device.label}] Berry eaten; ball back in hand")
+                return True
+        point = (
+            [held.center_x, held.center_y]
+            if held is not None
+            else [device.viewport[0] // 2, round(device.viewport[1] * 0.82)]
+        )
+        await device.tap(point)
+        print(f"[{device.label}] Berry fed at {point} (tap {attempt})")
+        await asyncio.sleep(NANAB_FEED_SETTLE_SECONDS)
+    held_image, _ts = await capture_frame(device)
+    if ball_in_hand(held_image, device.viewport):
+        print(f"[{device.label}] Berry eaten; ball back in hand")
+        return True
+    print(f"[{device.label}] Still holding an item after {NANAB_FEED_TAPS} feed taps")
+    return False
 
 
 async def swap_to_ball(device: AndroidDevice, artifact_dir: Path) -> bool:
@@ -938,8 +1020,13 @@ async def use_nanab_berry(
     ball: excellent_throw_ios.BallDetection | None,
     encounter_image: Image.Image,
     artifact_dir: Path,
+    berry: str = "nanab",
 ) -> None:
-    """Select a Nanab by image, then feed it to the current encounter."""
+    """Select a berry by image, then feed it to the current encounter.
+
+    `berry` is a picker kind -- "silver" for a legendary -- and falls back to
+    a Nanab when the bag has none.
+    """
     from . import berry_android
 
     def frame(image: Image.Image) -> tuple[int, int, int, bytes]:
@@ -948,8 +1035,16 @@ async def use_nanab_berry(
 
     if berry_in_hand(encounter_image, device.viewport):
         print(f"[{device.label}] A berry is already in hand; feeding it")
-        await flick_berry(device, ball, encounter_image, artifact_dir)
-        await swap_to_ball(device, artifact_dir)
+        if not await feed_berry(device, ball, artifact_dir):
+            await swap_to_ball(device, artifact_dir)
+        return
+
+    berry = berry_android.berry_to_feed(device.label, berry)
+    if berry_android.pocket_known_empty(device.label, berry):
+        # The picker was read earlier in this run and had none.  Opening it
+        # again buys the same answer at the same four seconds, every throw.
+        if not ball_in_hand(encounter_image, device.viewport):
+            await swap_to_ball(device, artifact_dir)
         return
 
     listed: list[tuple[str, list[int]]] | None = None
@@ -981,8 +1076,8 @@ async def use_nanab_berry(
             f"Nanab picker did not open on {device.label}; no ball was thrown"
         )
     picker_image.save(artifact_dir / "nanab-picker.jpg", "JPEG", quality=72)
-    nanab = next((point for kind, point in listed if kind == "nanab"), None)
-    if nanab is None:
+    chosen = berry_android.pick_from_picker(device.label, listed, berry)
+    if chosen is None:
         # An empty Nanab pocket is not a reason to keep the ball, but it is no
         # reason to throw the Golden Razz the game leaves selected either.
         # Close the picker, make sure a ball is back in the hand, and throw it
@@ -990,7 +1085,7 @@ async def use_nanab_berry(
         names = ", ".join(kind for kind, _point in listed)
         print(
             f"[{device.label}] No Nanab berry in the bag "
-            f"(picker: {names}); throwing without one"
+            f"(picker: {names}); throwing without one, and not looking again"
         )
         await device.tap(
             [round(device.viewport[0] * 0.50), round(device.viewport[1] * 0.45)]
@@ -1000,13 +1095,19 @@ async def use_nanab_berry(
         if not ball_in_hand(held, device.viewport):
             await swap_to_ball(device, artifact_dir)
         return
-    await device.tap(nanab)
+    kind, point = chosen
+    if kind != berry:
+        print(f"[{device.label}] No {berry} berry in the bag; feeding a {kind} instead")
+    await device.tap(point)
     # The picker sheet has to finish closing before the flick, or the gesture
     # lands on the sheet and the berry stays in the hand.
     await asyncio.sleep(1.2)
 
-    await flick_berry(device, ball, encounter_image, artifact_dir)
-    await swap_to_ball(device, artifact_dir)
+    # The feed hands the ball back itself.  `swap_to_ball` is for the feed
+    # that did not take: without a ball in the hand the throw that follows
+    # throws the berry, and a thrown berry never caught anything.
+    if not await feed_berry(device, ball, artifact_dir):
+        await swap_to_ball(device, artifact_dir)
 
 
 def fallback_target(
@@ -1170,8 +1271,12 @@ async def run_once(
     dry_run: bool,
     use_nanab: bool = False,
     ring_hold: bool = False,
+    lone_ball_reading: bool = False,
+    berry: str = "nanab",
 ) -> bool:
-    ball = await detect_encounter_ball(device, wait_seconds, artifact_dir)
+    ball = await detect_encounter_ball(
+        device, wait_seconds, artifact_dir, lone_reading_ok=lone_ball_reading
+    )
     if dry_run:
         print(f"[{device.label}] Dry-run: encounter detected, no touch sent")
         return False
@@ -1182,13 +1287,24 @@ async def run_once(
         image, _ = await capture_frame(device)
         image.save(artifact_dir / "encounter.jpg", "JPEG", quality=72)
 
-    # The berry goes in after the ball is located, not before: the flick needs
-    # somewhere to start and something to aim at, and a fed Nanab keeps the
-    # Pokemon still for the throw that follows.  A berry left over from an
-    # earlier attempt is flicked too -- otherwise the throw below would throw
-    # the berry, which is what the android-one spent a whole run doing.
-    if use_nanab or not ball_in_hand(image, device.viewport):
-        await use_nanab_berry(device, ball, image, artifact_dir)
+    # What is in the hand, and where, both read now.  `image` is the frame the
+    # encounter first became legible in, and on both Androids here the ball is
+    # still dropping into that frame: the moto's mid-drop disc fails the pale
+    # test and reads as an item, so a Nanab went in before every throw -- three
+    # at one Meowth on 10 Sep 2026 -- and the foldable's reading sits 350px
+    # above where the ball comes to rest, which is a swipe that grabs grass.
+    ball, held_image = await locate_held_item(device, ball)
+    if held_image is None:
+        held_image = image
+
+    # The berry goes in after the ball is located, not before: the feed needs
+    # to know where the berry is, and a fed Nanab keeps the Pokemon still for
+    # the throw that follows.  A berry left over from an earlier attempt is fed
+    # too, otherwise the throw below would throw the berry, which is what the
+    # android-one spent a whole run doing.
+    if use_nanab or item_in_hand(held_image, device.viewport):
+        await use_nanab_berry(device, ball, held_image, artifact_dir, berry=berry)
+        ball = (await locate_held_item(device, ball))[0]
 
     config = device.config
     runtime = runtime_config(config)

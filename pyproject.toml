@@ -1,16 +1,16 @@
 [build-system]
 requires = ["setuptools>=77", "wheel"]
 build-backend = "build_backend"
-backend-path = ["."]
+backend-path = ["scripts"]
 
 [project]
 name = "pokemon-go-automation"
 version = "0.1.0"
 description = "Configurable Android and iOS fleet workflows for gifts, friends, battles, trades and transfers"
-readme = "README.md"
+readme = "docs/README.md"
 requires-python = ">=3.10"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["docs/LICENSE"]
 dependencies = ["PyYAML>=6.0.2,<7", "Pillow>=10,<13", "pure-python-adb==0.3.0.dev0", "aiofiles>=23.1,<26"]
 
 [project.optional-dependencies]
@@ -21,10 +21,10 @@ dev = ["build>=1.2,<2"]
 pogo = "pokemon_go_automation.cli:main"
 
 [tool.setuptools]
-py-modules = ["add_friends", "battle", "battle_league", "berry", "excellent_throw", "feed_berries", "fleet", "gbl", "gbl_day", "gbl_evaluator", "gift", "inventory_scanner_ios", "luckytrash", "pokemon_fleet", "send_gifts", "trade", "trade_pokemon", "transfer_pokemon"]
+py-modules = ["add_friends", "catch", "gbl", "gbl_day", "gift", "luckytrash", "play", "remove_friends", "trade"]
 
 [tool.setuptools.packages.find]
-include = ["sources*", "pokemon_go_automation*"]
+include = ["sources*", "scripts*", "pokemon_go_automation*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Public delete command across configured hosts and connected devices."""
+"""Public berries command across configured hosts and connected devices."""
 import sys
+from pathlib import Path
+# `python scripts/berry.py` puts scripts/ on the path, not the checkout root
+# that holds `sources`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sources import fleet_entrypoint, pokemon_fleet
 
 def main(arguments=None):
-    return fleet_entrypoint.run_operation('delete', 'transfer_pokemon.py', arguments)
+    return fleet_entrypoint.run_operation('berries', 'scripts/berry.py', arguments)
 
 if __name__ == "__main__":
     try:

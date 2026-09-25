@@ -7,12 +7,29 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 from typing import Sequence
-from . import config_paths, fleet_watchdog, pokemon_fleet
+from . import config_paths, device_owners, fleet_watchdog, pokemon_fleet
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ALL_MACHINES_FLAG = "--allmachines"
 DEVICE_OPERATIONS = {"gifts", "berries", "gbl", "gbl_day", "delete", "trade", "battle"}
+# `owners` surveys every computer from here; fanning it out would have each host
+# answer for itself and hide the cross-host picture that is the whole point.
+COORDINATOR_COMMANDS = {"owners"}
+
+# A host that idle-sleeps is woken by the ssh config's ProxyCommand, and the
+# wake itself is the slow part: about eleven seconds from magic packet to sshd
+# answering.  Five seconds gave up in the middle of that and reported the Mac
+# unreachable while it was busy coming back, so the fan-out dropped every phone
+# on it.  Thirty clears a wake with room to spare; a host that is genuinely off
+# still fails, just later.  Override per machine with `connect_timeout`.
+SSH_CONNECT_TIMEOUT = 30
+
+# Routing a command surveys the buses once; every device it names then reads the
+# same answer, so a five-phone selection does not enumerate USB five times.
+_DISCOVERY: "device_owners.Discovery | None" = None
+_ANNOUNCED: set[str] = set()
 
 def has_option(arguments: Sequence[str], option: str) -> bool:
     return any(value == option or value.startswith(f"{option}=") for value in arguments)
@@ -135,6 +152,10 @@ def machine_configs() -> dict[str, dict]:
         raise pokemon_fleet.FleetError("No machines are enabled")
     return result
 
+def local_machine(machines: dict[str, dict] | None = None) -> str:
+    """This computer's configured machine name."""
+    return _local_machine(machines)
+
 def _local_machine(machines: dict[str, dict] | None = None) -> str:
     machines = machine_configs() if machines is None else machines
     override = os.environ.get("POGO_MACHINE")
@@ -164,18 +185,43 @@ def apply_local_environment() -> None:
         entries.extend(os.environ.get("PATH", "").split(os.pathsep))
         os.environ["PATH"] = os.pathsep.join(dict.fromkeys(entries))
 
+def _discovery(machines: dict[str, dict]) -> "device_owners.Discovery":
+    """One bus survey per command, shared by every device being routed."""
+    global _DISCOVERY
+    if _DISCOVERY is None or _DISCOVERY.machines is not machines:
+        _DISCOVERY = device_owners.Discovery(machines)
+    return _DISCOVERY
+
+def _announce_route(name: str, machine: str, configured: str) -> None:
+    """Say so when the cable disagrees with the registry, once per device."""
+    if configured and configured != machine and name not in _ANNOUNCED:
+        _ANNOUNCED.add(name)
+        print(f"[route] {name} is attached to {machine}, not the configured {configured}", flush=True)
+
 def _machine_for_device(name: str, machines: dict[str, dict]) -> str:
+    if len(machines) == 1:
+        return next(iter(machines))
+    discovery = _discovery(machines)
     if name.startswith("android:"):
-        return _local_machine(machines)
+        serial = name.split(":", 1)[1].strip()
+        return discovery.machine_holding("android", serial) or _local_machine(machines)
     fleet = pokemon_fleet.load_fleet(config_paths.default_config("pokemon-fleet.yaml"))
     if name not in fleet.devices:
         raise pokemon_fleet.FleetError(f"Unknown configured device: {name}")
-    machine = fleet.devices[name].config.get("machine")
-    if machine in machines:
-        return machine
-    if len(machines) == 1:
-        return next(iter(machines))
-    raise pokemon_fleet.FleetError(f"Device {name} needs a machine field for explicit cross-host selection")
+    spec = fleet.devices[name]
+    configured = spec.config.get("machine")
+    # The cable is the truth; `machine` is what to believe when no bus answered.
+    attached = discovery.machine_for_spec(spec)
+    if attached is not None:
+        _announce_route(name, attached, configured if isinstance(configured, str) else "")
+        return attached
+    if configured in machines:
+        return configured
+    raise pokemon_fleet.FleetError(
+        f"Device {name} is not attached to any configured computer, and has no machine field "
+        "to fall back on. Plug it in, or add `machine:` to its registry entry. "
+        "`fleet.py owners` shows what each computer can see."
+    )
 
 def route_machine_arguments(arguments: Sequence[str], *, dynamic_all: bool = True) -> dict[str, list[str]]:
     machines = machine_configs()
@@ -204,6 +250,41 @@ def route_machine_arguments(arguments: Sequence[str], *, dynamic_all: bool = Tru
             routed[name] = _replace_multi_option(forwarded, "--devices", selected)
     return routed
 
+def connect_timeout(name: str, config: dict) -> int:
+    timeout = config.get("connect_timeout", SSH_CONNECT_TIMEOUT)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise pokemon_fleet.FleetError(f"Machine {name} connect_timeout must be a positive whole number of seconds")
+    return timeout
+
+def remote_shell_command(name: str, config: dict, worker: Sequence[str]) -> list[str]:
+    """The SSH invocation that runs `python <worker>` inside a machine's checkout.
+
+    Shared by the fan-out and by the bus probe, so a host is reached exactly one
+    way: same quoting, same `path_prefix`, same private configuration directory.
+    """
+    ssh_host = config.get("ssh_host")
+    project_dir = config.get("project_dir")
+    if not isinstance(ssh_host, str) or not ssh_host or ssh_host.startswith("-"):
+        raise pokemon_fleet.FleetError(f"Machine {name} needs ssh_host (an SSH config alias is recommended)")
+    if not isinstance(project_dir, str) or not project_dir:
+        raise pokemon_fleet.FleetError(f"Machine {name} needs project_dir pointing to its installed checkout")
+    python = config.get("python", ".venv/bin/python")
+    config_dir = config.get("config_dir", "~/.config/pokemon-go-automation")
+    env = ["env", f"POGO_CONFIG_DIR={config_dir}", f"POGO_MACHINE={name}"]
+    # A leading ~/ is intentionally expanded by the remote shell; all other text is quoted.
+    remote_dir = ('"$HOME"/' + shlex.quote(project_dir[2:])) if project_dir.startswith("~/") else shlex.quote(project_dir)
+    remote = shlex.join([*env, str(python), *worker])
+    prefixes = config.get("path_prefix", [])
+    if not isinstance(prefixes, list) or not all(isinstance(value, str) for value in prefixes):
+        raise pokemon_fleet.FleetError("machine.path_prefix must be a list of directories")
+    remote_prefix = ""
+    if prefixes:
+        encoded = [('"$HOME"/' + shlex.quote(value[2:])) if value.startswith("~/") else shlex.quote(value) for value in prefixes]
+        remote_prefix = "export PATH=" + ":".join(encoded) + ':"$PATH"; '
+    return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={connect_timeout(name, config)}",
+            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+            ssh_host, remote_prefix + f"cd {remote_dir} && exec {remote}"]
+
 def _commands_for_machines(script_name: str, arguments: Sequence[str]) -> dict[str, list[str]]:
     arguments = apply_registry_override(arguments)
     machines = machine_configs()
@@ -211,45 +292,74 @@ def _commands_for_machines(script_name: str, arguments: Sequence[str]) -> dict[s
     routed = route_machine_arguments(arguments)
     commands: dict[str, list[str]] = {}
     for name, forwarded in routed.items():
-        config = machines[name]
-        module = Path(script_name).stem
+        # `scripts/fleet.py` runs as `scripts.fleet`, from the checkout root.
+        module = ".".join(Path(script_name).with_suffix("").parts)
         worker = ["-u", "-m", module, "--local", *forwarded]
-        if name == local:
-            commands[name] = [sys.executable, *worker]
-            continue
-        ssh_host = config.get("ssh_host")
-        project_dir = config.get("project_dir")
-        if not isinstance(ssh_host, str) or not ssh_host or ssh_host.startswith("-"):
-            raise pokemon_fleet.FleetError(f"Machine {name} needs ssh_host (an SSH config alias is recommended)")
-        if not isinstance(project_dir, str) or not project_dir:
-            raise pokemon_fleet.FleetError(f"Machine {name} needs project_dir pointing to its installed checkout")
-        python = config.get("python", ".venv/bin/python")
-        config_dir = config.get("config_dir", "~/.config/pokemon-go-automation")
-        env = ["env", f"POGO_CONFIG_DIR={config_dir}", f"POGO_MACHINE={name}"]
-        # A leading ~/ is intentionally expanded by the remote shell; all other text is quoted.
-        remote_dir = ('"$HOME"/' + shlex.quote(project_dir[2:])) if project_dir.startswith("~/") else shlex.quote(project_dir)
-        remote = shlex.join([*env, str(python), *worker])
-        prefixes = config.get("path_prefix", [])
-        if not isinstance(prefixes, list) or not all(isinstance(value, str) for value in prefixes):
-            raise pokemon_fleet.FleetError("machine.path_prefix must be a list of directories")
-        remote_prefix = ""
-        if prefixes:
-            encoded = [('"$HOME"/' + shlex.quote(value[2:])) if value.startswith("~/") else shlex.quote(value) for value in prefixes]
-            remote_prefix = "export PATH=" + ":".join(encoded) + ':"$PATH"; '
-        commands[name] = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                          "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-                          ssh_host, remote_prefix + f"cd {remote_dir} && exec {remote}"]
+        commands[name] = ([sys.executable, *worker] if name == local
+                          else remote_shell_command(name, machines[name], worker))
     return commands
+
+def label_line(machine: str, line: str) -> str:
+    """One worker's line of output, said so the reader knows whose it is.
+
+    Two computers print into one terminal, and the remote one starts slowest:
+    it wakes, boots and probes its own bus while the local worker is already
+    reporting phones, so its lines land minutes later among battle output with
+    nothing to say where they came from.  A line that already names its machine
+    -- the readout each worker prints for itself -- is left as it is.
+    """
+    text = line.rstrip("\n")
+    return text if text.startswith(f"[{machine}] ") else f"[{machine}] {text}"
+
+
+def _relay(machine: str, process: subprocess.Popen, out=None) -> None:
+    """Echo a worker's output under its machine name until the worker ends."""
+    stream = process.stdout
+    if stream is None:
+        return
+    destination = sys.stdout if out is None else out
+    for line in stream:
+        destination.write(label_line(machine, line) + "\n")
+        destination.flush()
+
 
 def run_all_machines(script_name: str, arguments: Sequence[str]) -> int:
     commands = _commands_for_machines(script_name, arguments)
     apply_local_environment()
     processes: dict[str, subprocess.Popen] = {}
+    relays: list[threading.Thread] = []
+    # A remote worker is handed its machine name in the ssh command; the local
+    # one used to be the only worker that did not know which computer it was,
+    # so its output and the remote's were two unlabelled halves of one readout.
+    local = _local_machine()
     try:
         for machine, command in commands.items():
             print(f"[{machine}] {Path(script_name).stem}", flush=True)
-            processes[machine] = subprocess.Popen(command, cwd=PROJECT_ROOT)
+            environment = (
+                {**os.environ, "POGO_MACHINE": machine} if machine == local else None
+            )
+            processes[machine] = subprocess.Popen(
+                command,
+                cwd=PROJECT_ROOT,
+                env=environment,
+                # Merged, so a worker's errors are labelled with everything
+                # else rather than arriving anonymously on the terminal.
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            relay = threading.Thread(
+                target=_relay,
+                args=(machine, processes[machine]),
+                name=f"relay-{machine}",
+                daemon=True,
+            )
+            relay.start()
+            relays.append(relay)
         statuses = {machine: process.wait() for machine, process in processes.items()}
+        for relay in relays:
+            relay.join(timeout=5)
     except BaseException:
         for process in processes.values():
             if process.poll() is None:
@@ -265,6 +375,10 @@ def run_all_machines(script_name: str, arguments: Sequence[str]) -> int:
     if failed:
         raise pokemon_fleet.FleetError("Host command failed: " + ", ".join(f"{name}={code}" for name, code in failed.items()))
     return 0
+
+def coordinator_only(arguments: Sequence[str]) -> bool:
+    """True for commands that answer for the whole fleet without delegating."""
+    return next((value for value in arguments if not value.startswith("-")), "") in COORDINATOR_COMMANDS
 
 def local_requested(arguments: Sequence[str]) -> bool:
     return "--local" in arguments or os.environ.get("POKEMON_FLEET_CHILD") == "1"

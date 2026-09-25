@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from PIL import Image, ImageDraw
+
 from sources import gift_android as gift
 
 
@@ -108,10 +110,17 @@ class WalkHomeTests(unittest.IsolatedAsyncioTestCase):
     async def walk(self, device, screens):
         """Runs the walk over a scripted sequence of screens, returning the taps."""
         taps: list[list[int]] = []
+        # The walk reads the framebuffer itself and names it, so that the screen
+        # it gives up on can be saved. One stand-in frame per scripted screen.
+        frames = [None if screen is None else ("frame", screen) for screen in screens]
         with (
             mock.patch.object(
-                gift, "current_screen", new=mock.AsyncMock(side_effect=screens)
+                gift, "screencap_raw", new=mock.AsyncMock(side_effect=frames)
             ),
+            mock.patch.object(
+                gift, "name_screen", side_effect=lambda frame, _: frame[1]
+            ),
+            mock.patch.object(gift, "save_frame", return_value=None) as saved,
             mock.patch.object(
                 gift, "tap", new=mock.AsyncMock(side_effect=lambda _, p: taps.append(p))
             ),
@@ -123,7 +132,9 @@ class WalkHomeTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(gift, "asyncio", wraps=gift.asyncio) as loop,
         ):
             loop.sleep = mock.AsyncMock()
-            return await gift.walk_home(device), taps
+            ok = await gift.walk_home(device)
+            self.saved = saved
+            return ok, taps
 
     async def test_already_home_taps_nothing(self) -> None:
         ok, taps = await self.walk(self.device(), [gift.FRIENDS_LIST])
@@ -168,6 +179,30 @@ class WalkHomeTests(unittest.IsolatedAsyncioTestCase):
         ok, taps = await self.walk(device, [gift.SORT_MENU, gift.FRIENDS_LIST])
         self.assertTrue(ok)
         self.assertEqual(taps, [gift.BACK_KEY])
+
+    async def test_a_panel_that_will_not_change_tabs_gets_the_x(self) -> None:
+        # A friend profile headed in a pale buddy colour is named the panel, and
+        # the FRIENDS tab tap lands on nothing there. That stopped an
+        # android-three leg after nine cycles; the X closes it either way.
+        device = self.device()
+        ok, taps = await self.walk(
+            device, [gift.FRIENDS_PANEL, gift.FRIENDS_PANEL, gift.FRIENDS_LIST]
+        )
+        self.assertTrue(ok)
+        self.assertEqual(
+            taps, [device.config["FRIENDS_TAB_BTN"], device.config["CLOSE_BTN"]]
+        )
+
+    async def test_a_walk_that_gives_up_saves_the_screen(self) -> None:
+        # Without the picture, "out of ways off" names a screen nobody can check
+        # afterwards — and being named wrong is what ends the walk.
+        device = self.device()
+        with mock.patch.object(
+            gift, "escape_battle_screen", new=mock.AsyncMock(return_value=False)
+        ):
+            ok, _ = await self.walk(device, [gift.FRIEND_SCREEN] * 8)
+        self.assertFalse(ok)
+        self.assertEqual(self.saved.call_args[0][1], ("frame", gift.FRIEND_SCREEN))
 
     async def test_a_screen_that_never_changes_gives_up(self) -> None:
         # A battle screen: named a friend's screen, and nothing on it answers
@@ -303,6 +338,261 @@ class UntilIdleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed, len(pattern))
 
 
+# --- The friends list, in the colours both phones draw it in ---
+# Measured on the android-one (1316x2560) and the android-three (1224x2992)
+# on 2026-09-14: the rule between rows, the halo just outside an avatar, the
+# orange a pinned remote trade's countdown is printed in, and the grey every
+# other row prints its date in.
+ROW_RULE_GREY = (228, 228, 228)
+AVATAR_HALO = (213, 250, 252)
+TRADE_ORANGE = (245, 140, 50)
+DATE_GREY = (150, 150, 150)
+AVATAR_SKIN = (240, 220, 200)
+# The android-one's own geometry: the header ends at 727 and rows are 419
+# tall, which is why its config carries NEXT_FRIEND_BTN [584, 937].
+LIST_TOP = 727
+ROW_PITCH = 419
+
+
+def friends_list_frame(rows, width=1316, height=2560):
+    """A friends list frame. Each row is (halo, waiting_on_a_trade)."""
+    image = Image.new('RGB', (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    for index, (halo, trade) in enumerate(rows):
+        top = LIST_TOP + index * ROW_PITCH
+        for rule in (top, top + ROW_PITCH):
+            draw.line([(int(width * 0.06), rule), (int(width * 0.72), rule)],
+                      fill=ROW_RULE_GREY, width=3)
+        centre = (int(width * 0.15), top + ROW_PITCH // 2)
+        radius = int(width * 0.062)
+        if halo:
+            glow = int(radius * 1.35)
+            draw.ellipse([centre[0] - glow, centre[1] - glow,
+                          centre[0] + glow, centre[1] + glow], fill=AVATAR_HALO)
+        draw.ellipse([centre[0] - radius, centre[1] - radius,
+                      centre[0] + radius, centre[1] + radius], fill=AVATAR_SKIN)
+        # The countdown, or the date every other row shows in its place.
+        draw.rectangle([int(width * 0.78), top + int(ROW_PITCH * 0.10),
+                        int(width * 0.90), top + int(ROW_PITCH * 0.20)],
+                       fill=TRADE_ORANGE if trade else DATE_GREY)
+    return width, height, 0, image.convert('RGBA').tobytes()
+
+
+class FriendRowTests(unittest.TestCase):
+    """Reading the list before NEXT_FRIEND_BTN is tapped."""
+
+    config = {'NEXT_FRIEND_BTN': [584, 937]}
+
+    def test_rows_are_found_between_the_rules(self) -> None:
+        rows = gift.friend_rows(friends_list_frame([(True, False)] * 4))
+        self.assertEqual(len(rows), 4)
+        first, second = rows[0], rows[1]
+        self.assertAlmostEqual(sum(first) / 2, 937, delta=8)
+        self.assertAlmostEqual(second[0] - first[0], ROW_PITCH, delta=4)
+
+    def test_the_halo_is_read_off_a_row(self) -> None:
+        frame = friends_list_frame([(True, False), (False, False)])
+        rows = gift.friend_rows(frame)
+        self.assertTrue(gift.row_is_highlighted(frame, rows[0]))
+        self.assertFalse(gift.row_is_highlighted(frame, rows[1]))
+
+    def test_a_countdown_is_a_trade_in_flight(self) -> None:
+        frame = friends_list_frame([(False, True), (False, False)])
+        rows = gift.friend_rows(frame)
+        self.assertTrue(gift.row_waits_on_a_trade(frame, rows[0]))
+        self.assertFalse(gift.row_waits_on_a_trade(frame, rows[1]))
+
+    def test_a_plain_top_row_is_opened_and_its_gift_taken(self) -> None:
+        choice = gift.choose_friend_row(
+            friends_list_frame([(False, False)] * 3), self.config
+        )
+        self.assertTrue(choice.open_allowed)
+        self.assertEqual(choice.point[0], 584)
+        self.assertAlmostEqual(choice.point[1], 937, delta=8)
+
+    def test_a_highlighted_friend_keeps_their_gift(self) -> None:
+        choice = gift.choose_friend_row(
+            friends_list_frame([(True, False)] * 3), self.config
+        )
+        self.assertFalse(choice.open_allowed)
+        self.assertAlmostEqual(choice.point[1], 937, delta=8)
+
+    def test_a_row_waiting_on_a_trade_is_stepped_over(self) -> None:
+        """The android-one's pinned Lucky Remote Trade: no gift, cannot receive one,
+        and it sat above the sort for every cycle of the run."""
+        choice = gift.choose_friend_row(
+            friends_list_frame([(False, True), (False, False), (True, False)]),
+            self.config,
+        )
+        self.assertAlmostEqual(choice.point[1], 937 + ROW_PITCH, delta=8)
+        self.assertTrue(choice.open_allowed)
+        self.assertTrue(any('remote trade' in note for note in choice.notes))
+
+    def test_the_row_below_a_trade_is_read_for_itself(self) -> None:
+        choice = gift.choose_friend_row(
+            friends_list_frame([(False, True), (True, False)]), self.config
+        )
+        self.assertAlmostEqual(choice.point[1], 937 + ROW_PITCH, delta=8)
+        self.assertFalse(choice.open_allowed)
+
+    def test_a_list_that_does_not_line_up_falls_back_to_the_config(self) -> None:
+        # A part-drawn or part-scrolled list. Tapping a row worked out from
+        # rules that do not match the configured point is worse than the blind
+        # tap this replaced, so it does the blind tap.
+        choice = gift.choose_friend_row(
+            friends_list_frame([(True, False)] * 3), {'NEXT_FRIEND_BTN': [584, 2200]}
+        )
+        self.assertEqual(choice.point, [584, 2200])
+        self.assertTrue(choice.open_allowed)
+
+    def test_no_rules_at_all_falls_back_to_the_config(self) -> None:
+        choice = gift.choose_friend_row(solid_frame((255, 255, 255)), self.config)
+        self.assertEqual(choice.point, [584, 937])
+        self.assertTrue(choice.open_allowed)
+
+
+class SelectiveOpeningTests(unittest.IsolatedAsyncioTestCase):
+    """Send to everyone who can receive; open only the rows without a halo."""
+
+    def device(self):
+        # A point of its own per step, so the taps can be read back by name.
+        return SimpleNamespace(
+            label='test-phone',
+            config={
+                step.name: [16, 16 + 8 * n]
+                for n, step in enumerate(gift.GIFT_STEPS)
+            },
+        )
+
+    async def cycle(self, *, open_allowed: bool):
+        device = self.device()
+        taps: list[str] = []
+        steps = {tuple(v): k for k, v in device.config.items()}
+        with (
+            mock.patch.object(gift, 'GUARD', False),
+            mock.patch.object(gift, 'SEND_POLL_GAP', 0),
+            # OPEN lit, and the friend can receive a gift.
+            mock.patch.object(
+                gift, 'colored_action_available', new=mock.AsyncMock(return_value=True)
+            ),
+            mock.patch.object(
+                gift, 'screencap_raw', new=mock.AsyncMock(return_value=FRAME)
+            ),
+            mock.patch.object(gift, 'frame_point_saturation', return_value=99),
+            mock.patch.object(gift, 'open_through_bag_full_notice',
+                              new=mock.AsyncMock(return_value=False)),
+            mock.patch.object(
+                gift, 'tap',
+                new=mock.AsyncMock(side_effect=lambda _, p: taps.append(p)),
+            ),
+            mock.patch.object(gift, 'wait', new=mock.AsyncMock()),
+        ):
+            result = await gift.gift_sequence(
+                device, all_mode=True, open_allowed=open_allowed
+            )
+        return result, [steps[tuple(point)] for point in taps]
+
+    async def test_a_plain_friend_has_their_gift_opened(self) -> None:
+        result, taps = await self.cycle(open_allowed=True)
+        self.assertTrue(result.opened)
+        self.assertTrue(result.sent)
+        self.assertEqual(taps, [step.name for step in gift.GIFT_STEPS])
+
+    async def test_a_highlighted_friend_is_sent_to_but_not_opened(self) -> None:
+        result, taps = await self.cycle(open_allowed=False)
+        self.assertFalse(result.opened)
+        self.assertTrue(result.sent)
+        self.assertNotIn('OPEN_BTN', taps)
+        self.assertIn('SEND_BTN', taps)
+
+    async def test_the_unopened_gift_is_closed_off_the_profile(self) -> None:
+        # The postcard covers SEND GIFT, so skipping the open has to close it
+        # before the send half of the cycle taps the profile underneath.
+        _, taps = await self.cycle(open_allowed=False)
+        self.assertEqual(taps.index('CLOSE_BTN'), 0)
+        self.assertEqual(taps.count('CLOSE_BTN'), 2)
+        self.assertLess(taps.index('CLOSE_BTN'), taps.index('SEND_GIFT_BTN'))
+
+    async def test_the_row_read_at_the_end_reaches_the_next_cycle(self) -> None:
+        device = self.device()
+        with (
+            mock.patch.object(gift, 'GUARD', True),
+            mock.patch.object(gift, 'SEND_POLL_GAP', 0),
+            mock.patch.object(
+                gift, 'ensure_screen', new=mock.AsyncMock(return_value=None)
+            ),
+            mock.patch.object(
+                gift, 'open_next_friend', new=mock.AsyncMock(return_value=False)
+            ) as opened_next,
+            mock.patch.object(
+                gift, 'colored_action_available', new=mock.AsyncMock(return_value=True)
+            ),
+            mock.patch.object(
+                gift, 'screencap_raw', new=mock.AsyncMock(return_value=FRAME)
+            ),
+            mock.patch.object(gift, 'frame_point_saturation', return_value=99),
+            mock.patch.object(gift, 'open_through_bag_full_notice',
+                              new=mock.AsyncMock(return_value=False)),
+            mock.patch.object(gift, 'tap', new=mock.AsyncMock()),
+            mock.patch.object(gift, 'wait', new=mock.AsyncMock()),
+        ):
+            result = await gift.gift_sequence(device, all_mode=True)
+        opened_next.assert_awaited_once()
+        self.assertFalse(result.open_next)
+
+    async def test_gift_process_one_carries_it_between_cycles(self) -> None:
+        device = self.device()
+        cycles = [
+            gift.GiftCycleResult(opened=True, sent=True, outgoing_available=True,
+                                 open_next=False),
+            gift.GiftCycleResult(opened=False, sent=True, outgoing_available=True,
+                                 open_next=True),
+        ]
+        sequence = mock.AsyncMock(side_effect=cycles)
+        with (
+            mock.patch.object(gift, 'gift_sequence', new=sequence),
+            mock.patch.object(gift, 'pointer', new=mock.AsyncMock()),
+        ):
+            await gift.gift_process_one(device, 2, all_mode=True)
+        # The first cycle opens whatever the phone was left on; the second is
+        # told what the first read off the list.
+        self.assertTrue(sequence.await_args_list[0].kwargs['open_allowed'])
+        self.assertFalse(sequence.await_args_list[1].kwargs['open_allowed'])
+
+
+class NextFriendTapTests(unittest.IsolatedAsyncioTestCase):
+    def device(self):
+        return SimpleNamespace(
+            label='test-phone', config={'NEXT_FRIEND_BTN': [584, 937]}
+        )
+
+    async def test_an_unreadable_screen_taps_the_configured_point(self) -> None:
+        device = self.device()
+        taps: list[list[int]] = []
+        with (
+            mock.patch.object(gift, 'GUARD', True),
+            mock.patch.object(
+                gift, 'screencap_raw', new=mock.AsyncMock(return_value=None)
+            ),
+            mock.patch.object(
+                gift, 'tap',
+                new=mock.AsyncMock(side_effect=lambda _, p: taps.append(p)),
+            ),
+        ):
+            self.assertTrue(await gift.open_next_friend(device))
+        self.assertEqual(taps, [[584, 937]])
+
+    async def test_the_guard_switched_off_reads_nothing(self) -> None:
+        device = self.device()
+        with (
+            mock.patch.object(gift, 'GUARD', False),
+            mock.patch.object(gift, 'screencap_raw', new=mock.AsyncMock()) as read,
+            mock.patch.object(gift, 'tap', new=mock.AsyncMock()),
+        ):
+            self.assertTrue(await gift.open_next_friend(device))
+        read.assert_not_awaited()
+
+
 class BagFullNoticeTests(unittest.IsolatedAsyncioTestCase):
     """OPEN_BTN raises this instead of opening the gift once the bag is full,
     and it is what a "the gift bag must be empty" stop was really looking at."""
@@ -370,6 +660,18 @@ class BagFullNoticeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(pressed)
         self.assertEqual(taps, [])
+
+
+class AdbBinaryTests(unittest.IsolatedAsyncioTestCase):
+    """Taps go through the adb server, screen reads through the adb binary."""
+
+    async def test_setup_refuses_to_run_without_the_adb_binary(self) -> None:
+        # Otherwise the run is silently blind: every guard stands down, SEND
+        # reads as unlit, and three tapped cycles are reported as an empty bag.
+        with mock.patch.object(gift.shutil, "which", return_value=None):
+            with self.assertRaises(gift.AutoGifterError) as raised:
+                await gift.setup()
+        self.assertIn("tap blind", str(raised.exception))
 
 
 if __name__ == "__main__":

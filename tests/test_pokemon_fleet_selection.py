@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from tests import support as _test_support
 
+import contextlib
+import io
 import json
+import os
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -26,6 +29,28 @@ def device(name: str, platform: str, identifier: str) -> pokemon_fleet.DeviceSpe
         config=config,
         base_dir=Path("/tmp"),
     )
+
+
+class AttachmentSummaryTests(unittest.TestCase):
+    """What each computer has, rather than two lists of what it hasn't."""
+
+    def test_the_machine_and_its_phones_are_both_named(self) -> None:
+        said = pokemon_fleet.attachment_summary("berry", ["moto-g"], 5, "local")
+        self.assertEqual(said, "[local] berry on moto-g (5 of 6 configured not attached)")
+
+    def test_every_phone_present_needs_no_absence_count(self) -> None:
+        said = pokemon_fleet.attachment_summary("berry", ["ph-1", "razr"], 0, "remote")
+        self.assertEqual(said, "[remote] berry on ph-1, razr")
+
+    def test_a_computer_with_nothing_plugged_in_says_so(self) -> None:
+        said = pokemon_fleet.attachment_summary("berry", [], 6, "remote")
+        self.assertIn("nothing attached for berry", said)
+        self.assertIn("6 of 6", said)
+
+    def test_a_run_with_no_machine_name_still_reads(self) -> None:
+        """A hand-run command outside the fan-out has nobody to distinguish."""
+        said = pokemon_fleet.attachment_summary("gbl", ["razr"], 0)
+        self.assertEqual(said, "gbl on razr")
 
 
 class ConnectedDeviceSelectionTests(unittest.TestCase):
@@ -57,6 +82,31 @@ class ConnectedDeviceSelectionTests(unittest.TestCase):
             )
 
         self.assertEqual([spec.name for spec in selected], ["ios-one"])
+
+    def test_selection_says_which_phones_it_found(self) -> None:
+        """The fan-out prints one of these per machine; it has to name both."""
+        with (
+            mock.patch.object(
+                pokemon_fleet,
+                "load_appium_profile",
+                return_value={"device": {"udid": "iphone-udid"}},
+            ),
+            mock.patch.object(
+                pokemon_fleet, "ios_connected_udids", return_value={"iphone-udid"}
+            ),
+            mock.patch.object(pokemon_fleet, "adb_states", return_value={}),
+            mock.patch.object(
+                pokemon_fleet, "operation_readiness", return_value="ready"
+            ),
+            mock.patch.dict(os.environ, {"POGO_MACHINE": "local"}),
+            contextlib.redirect_stdout(io.StringIO()) as printed,
+        ):
+            pokemon_fleet.select_devices(self.fleet, ["all"], "berries")
+
+        said = printed.getvalue()
+        self.assertIn("[local] berries on ios-one", said)
+        self.assertIn("1 of 2 configured not attached", said)
+        self.assertNotIn("Skipping disconnected", said)
 
     def test_explicit_disconnected_device_still_errors(self) -> None:
         with mock.patch.object(

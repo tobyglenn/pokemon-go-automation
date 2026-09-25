@@ -861,7 +861,7 @@ if __name__ == "__main__":
     try:
         if os.environ.get("POKEMON_FLEET_CHILD") == "1" or "--fleet-child" in sys.argv:
             raise SystemExit(main())
-        raise SystemExit(fleet_entrypoint.run_operation('delete', 'transfer_pokemon.py'))
+        raise SystemExit(fleet_entrypoint.run_operation('delete', 'luckytrash.py'))
     except KeyboardInterrupt:
         raise SystemExit(130)
     except (RuntimeError, OSError, ValueError) as exc:

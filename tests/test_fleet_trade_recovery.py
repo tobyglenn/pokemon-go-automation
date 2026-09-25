@@ -66,9 +66,13 @@ class FakeController:
         dialog_button: tuple[int, int] | None = None,
         dialog_label: tuple[int, int] | None = (357, 920),
         in_front: bool | None = True,
+        drift: Sequence[str] = (),
     ):
         self.spec = spec(name)
         self.screens = list(screens)
+        # One screen per look, for a phone whose picture changes without anything
+        # being pressed — which is what a cross-fade is.
+        self.drift = list(drift)
         self.coordinates = (
             self.DEFAULT_COORDINATES if coordinates is None else coordinates
         )
@@ -90,6 +94,8 @@ class FakeController:
         return self.coordinates.get(name)
 
     async def screenshot(self) -> FakeScreen:
+        if self.drift:
+            self.screens[0] = self.drift.pop(0)
         return FakeScreen(self)
 
     def image_point(self, image: object, name: str) -> tuple[int, int]:
@@ -139,12 +145,22 @@ def fake_vision() -> ExitStack:
             side_effect=lambda expected, metrics: metrics["screen"] == expected,
         )
     )
+    # "waiting_lobby" is the trade screen this phone has already confirmed on:
+    # it is named "lobby" like the one before CONFIRM, and what tells them
+    # apart is the amber CANCEL pill under the action point.
     stack.enter_context(
         patch(
             "sources.trade_ios_android.describe_state",
             side_effect=lambda image, action_point: (
-                "dialog" if image.screen == "exit_prompt" else image.screen,
-                {"screen": image.screen},
+                "dialog"
+                if image.screen == "exit_prompt"
+                else "lobby"
+                if image.screen == "waiting_lobby"
+                else image.screen,
+                {
+                    "screen": image.screen,
+                    "action_orange": 1.0 if image.screen == "waiting_lobby" else 0.0,
+                },
             ),
         )
     )
@@ -270,8 +286,13 @@ class RecoverToFriendTests(unittest.IsolatedAsyncioTestCase):
         rounds = pokemon_fleet.FRIEND_RECOVERY_ROUNDS
         self.assertEqual(stuck.taps, ["X_BTN"] + ["BACK"] * (rounds - 1))
 
-    async def test_an_ios_phone_falls_back_to_the_corner_door(self) -> None:
-        """iOS has no BACK key; the door is its only other way out."""
+    async def test_an_iphone_on_the_picker_keeps_pressing_the_disc(self) -> None:
+        """The picker has no door to fall back to.
+
+        Its top-left corner is the search row, and the iphone-second spent two
+        of its four rounds pressing that empty space on 2026-09-13 — the door
+        it had just been given belongs to the lobby below, not to this screen.
+        """
         stuck = FakeController(
             "ios-two",
             ["selection"],
@@ -285,7 +306,133 @@ class RecoverToFriendTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(recovered)
         rounds = pokemon_fleet.FRIEND_RECOVERY_ROUNDS
-        self.assertEqual(stuck.taps, ["X_BTN"] + ["TRADE_EXIT_BTN"] * (rounds - 1))
+        self.assertEqual(stuck.taps, ["X_BTN"] * rounds)
+
+
+class TradeLobbyExitTests(unittest.IsolatedAsyncioTestCase):
+    """The screen that ended run 3 at trade 45 on 2026-09-13, twice over: the
+    iPhone flipping between picker and lobby while the razr waited on it."""
+
+    def ios(self, name: str, screens: Sequence[str]) -> FakeController:
+        controller = FakeController(
+            name, screens, {"X_BTN": [1, 2], "CONFIRM_BTN": [5, 6], "TRADE_EXIT_BTN": [41, 57]}
+        )
+        return controller
+
+    async def test_an_iphone_leaves_a_lobby_by_the_door(self) -> None:
+        """BACK on iOS is X_BTN, and X_BTN here opens the picker — whose own X
+        comes straight back to this screen."""
+        stuck = self.ios("ios-two", ["lobby", "friend"])
+
+        with fake_vision(), patch.object(pokemon_fleet, "FRIEND_RECOVERY_DELAY", 0):
+            recovered = await pokemon_fleet.recover_to_friend([stuck], no_sleep)
+
+        self.assertTrue(recovered)
+        self.assertEqual(stuck.taps, ["TRADE_EXIT_BTN"])
+
+    async def test_a_waiting_lobby_is_cancelled_rather_than_backed_out_of(self) -> None:
+        """Once a phone has confirmed, the pill under CONFIRM_BTN is an amber
+        CANCEL and nothing else on the screen answers — the razr sat through
+        four rounds of BACK at one while the iPhone it waited for stood on the
+        picker."""
+        # An Android phone's trade coordinates come off the handset itself, so
+        # CONFIRM_BTN — the pill this presses — is always among them.
+        waiting = FakeController(
+            "android-two",
+            ["waiting_lobby", "dialog", "friend"],
+            {"X_BTN": [1, 2], "CONFIRM_BTN": [5, 6], "TRADE_CANCEL_YES_BTN": [3, 4]},
+        )
+
+        with fake_vision(), patch.object(pokemon_fleet, "FRIEND_RECOVERY_DELAY", 0):
+            recovered = await pokemon_fleet.recover_to_friend([waiting], no_sleep)
+
+        self.assertTrue(recovered)
+        self.assertEqual(waiting.taps, ["CONFIRM_BTN", "TRADE_CANCEL_YES_BTN"])
+
+    async def test_a_waiting_iphone_presses_the_same_pill(self) -> None:
+        waiting = self.ios("ios-two", ["waiting_lobby", "friend"])
+
+        with fake_vision(), patch.object(pokemon_fleet, "FRIEND_RECOVERY_DELAY", 0):
+            recovered = await pokemon_fleet.recover_to_friend([waiting], no_sleep)
+
+        self.assertTrue(recovered)
+        self.assertEqual(waiting.taps, ["CONFIRM_BTN"])
+
+    async def test_an_android_lobby_still_leaves_with_back(self) -> None:
+        """Android has no door mapped and does not need one."""
+        stuck = FakeController("android-two", ["lobby", "friend"])
+
+        with fake_vision(), patch.object(pokemon_fleet, "FRIEND_RECOVERY_DELAY", 0):
+            recovered = await pokemon_fleet.recover_to_friend([stuck], no_sleep)
+
+        self.assertTrue(recovered)
+        self.assertEqual(stuck.taps, ["BACK"])
+
+
+class MidFadeTests(unittest.IsolatedAsyncioTestCase):
+    """A screen caught between two others is not the screen a press will land on.
+
+    The SE's friend screen, photographed on its way back from a trade, came out
+    tinted end to end; every white measurement read 0.000 and it was named a
+    lobby. The press that answers a lobby is X_BTN, and X_BTN on a friend screen
+    opens a trade nobody is waiting to accept.
+    """
+
+    async def test_a_phone_between_screens_is_not_pressed(self) -> None:
+        # The first look says lobby, the second says friend: a fade, not a phone
+        # sitting on a lobby.
+        drifting = FakeController("tall_device", ["lobby"], drift=["lobby", "friend"])
+
+        with fake_vision(), patch.object(pokemon_fleet, "STATE_CONFIRM_DELAY", 0):
+            recovered = await pokemon_fleet.recover_to_friend([drifting], no_sleep)
+
+        self.assertTrue(recovered)
+        self.assertEqual(drifting.taps, [])
+
+    async def test_a_screen_that_holds_still_is_pressed_as_before(self) -> None:
+        """The confirming look must not cost a phone its recovery."""
+        stuck = FakeController("tall_device", ["lobby", "friend"])
+
+        with fake_vision(), patch.object(pokemon_fleet, "STATE_CONFIRM_DELAY", 0):
+            recovered = await pokemon_fleet.recover_to_friend([stuck], no_sleep)
+
+        self.assertTrue(recovered)
+        self.assertEqual(stuck.taps, ["BACK"])
+
+
+class QueuedDialogTests(unittest.IsolatedAsyncioTestCase):
+    """Pokémon GO stacks one "Trade expired." per lobby that timed out, and
+    shows them one at a time in front of an otherwise identical screen. Six were
+    counted on the SE, five of whose frames matched byte for byte — so a phone
+    part-way down the queue is indistinguishable from a phone whose button is
+    doing nothing, and the four rounds recovery had ran out mid-drain."""
+
+    async def test_a_queue_deeper_than_the_rounds_is_drained(self) -> None:
+        queued = ["dialog"] * (pokemon_fleet.FRIEND_RECOVERY_ROUNDS + 2) + ["friend"]
+        stacked = FakeController("tall_device", queued, dialog_button=(9, 9))
+
+        with fake_vision(), patch.object(pokemon_fleet, "STATE_CONFIRM_DELAY", 0):
+            recovered = await pokemon_fleet.recover_to_friend([stacked], no_sleep)
+
+        self.assertTrue(recovered)
+        self.assertEqual(stacked.taps, ["[9, 9]"] * (pokemon_fleet.FRIEND_RECOVERY_ROUNDS + 2))
+
+    async def test_the_drain_is_not_a_licence_to_press_for_ever(self) -> None:
+        """A pill that really is doing nothing still has to stop the run."""
+        endless = FakeController("tall_device", ["dialog"], dialog_button=(9, 9))
+
+        with (
+            fake_vision(),
+            patch.object(pokemon_fleet, "STATE_CONFIRM_DELAY", 0),
+            patch.object(pokemon_fleet, "save_trade_diagnostics", return_value=Path("/tmp/x")),
+        ):
+            recovered = await pokemon_fleet.recover_to_friend([endless], no_sleep)
+
+        self.assertFalse(recovered)
+        self.assertEqual(
+            len(endless.taps),
+            pokemon_fleet.FRIEND_RECOVERY_ROUNDS + pokemon_fleet.DIALOG_DRAIN_ROUNDS,
+        )
 
 
 class MapTests(unittest.IsolatedAsyncioTestCase):
@@ -871,3 +1018,27 @@ class CycleRetryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(pokemon_fleet.FleetError):
                 await pokemon_fleet.run_trade([spec("tall_device")], self.args(100))
+
+
+class CoordinateListTests(unittest.TestCase):
+    """The fleet's config check and the trade module must know the same names.
+
+    A coordinate the trade module accepts but the fleet does not list is carried
+    through unchecked — that is how the SE ran for weeks with no door mapped and
+    nothing said so. One the fleet lists but the module does not know is worse:
+    the config passes `fleet status` and then every trade run dies on "Unknown
+    iOS coordinate(s)".
+    """
+
+    def test_required_and_optional_match_the_trade_module(self) -> None:
+        from sources import trade_ios_android as cross
+
+        self.assertEqual(pokemon_fleet.TRADE_REQUIRED, cross.REQUIRED_IOS_COORDINATES)
+        self.assertEqual(pokemon_fleet.TRADE_OPTIONAL, cross.OPTIONAL_IOS_COORDINATES)
+
+    def test_the_names_recovery_presses_are_mappable(self) -> None:
+        # Both are read off a config with .point(); a name in neither set can
+        # never be there to read.
+        known = pokemon_fleet.TRADE_REQUIRED | pokemon_fleet.TRADE_OPTIONAL
+        self.assertIn(pokemon_fleet.TRADE_EXIT, known)
+        self.assertIn(pokemon_fleet.TRADE_CANCEL_YES, known)

@@ -39,7 +39,7 @@ import subprocess
 from pathlib import Path
 import sys
 import time
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 import yaml
 from PIL import Image
@@ -47,6 +47,7 @@ from PIL import Image
 from . import config_paths, excellent_throw_ios, ios_wda_cleanup
 from . import gbl_android as android_gbl
 from . import gbl_home_recovery, gbl_meta, gbl_strategy, gbl_vision
+from . import legendary_pokemon
 
 try:
     from selenium.common.exceptions import WebDriverException
@@ -138,9 +139,15 @@ RUN_AWAY_CANCEL_Y = 0.80
 SCROLL_HOLD = 0.25
 SCROLL_STEPS = 8
 
-# Hunting a named league card: down through the list first, then back up, so a
-# card above the fold is found too.  Past this the list does not hold it.
-LEAGUE_SCROLL_LIMIT = 4
+# Hunting a named league card: up to the top of the list first, then down to
+# the bottom.  A fixed count each way is not enough: the list does not always
+# open at the top, and on 24 Sep the SE scrolled down twice, "back up" twice to
+# exactly where it began, never reached the Master League: Mega card above
+# that, and played Retro Cup.  An end is the list not moving across
+# LEAGUE_END_READS scrolls, so one swallowed gesture is not mistaken for it.
+# LEAGUE_SCROLL_LIMIT caps the whole hunt.
+LEAGUE_END_READS = 2
+LEAGUE_SCROLL_LIMIT = 14
 
 # Backing out of a set that was already running takes one close and one
 # BATTLE.  Three rounds of that is enough for a slow screen; more than that
@@ -762,6 +769,29 @@ def save_trace(image: Image.Image, state: str, point: list[int] | None) -> None:
     _TRACE_SEQ += 1
 
 
+def save_reward_screen(image: Image.Image, point: list[int] | None) -> Path | None:
+    """Keep the frame an end-of-set tap was aimed at, and say where it went.
+
+    Unconditional, unlike `save_trace`, because this is the one press on the
+    card that has no second chance: the reward tile and the control that
+    dismisses the whole card sit in the same corner, and pressing the wrong one
+    throws the catch away.  On 10 Sep 2026 the SE did exactly that in a loop --
+    tap, back to the map, walk to the GBL card, tap again -- with nothing kept
+    afterwards to say which control it had actually hit.  A set is five battles,
+    so this is a handful of PNGs a day per phone.
+    """
+    directory = ARTIFACT_ROOT / "reward-screen"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        where = "none" if point is None else f"{point[0]}x{point[1]}"
+        destination = directory / f"{time.strftime('%Y%m%d-%H%M%S')}-{where}.png"
+        image.save(destination)
+    except OSError:
+        # Evidence is never worth ending a set over.
+        return None
+    return destination
+
+
 def log(device: IOSGBLDevice, *parts: Any) -> None:
     print(f"[{device.label}]", *parts, flush=True)
 
@@ -777,18 +807,28 @@ def raw_frame(image: Image.Image) -> tuple[int, int, int, bytes]:
     return rgba.width, rgba.height, 0, rgba.tobytes()
 
 
+# Shared with the Android leg, which hits the same end-of-set card: the two
+# paths must agree on what counts as a control already caught misbehaving.
+DISMISSING_REWARD_RADIUS = gbl_vision.DISMISSING_REWARD_RADIUS
+reward_refused = gbl_vision.reward_refused
+
+
 async def smart_screen_state(
     image: Image.Image,
     profile: gbl_strategy.StrategyProfile,
     *,
     probe_unknown: bool = False,
     allow_row_scroll: bool = True,
+    refused_rewards: Sequence[Sequence[int]] = (),
 ) -> tuple[str, list[int] | None, str | None, list[gbl_vision.OCRBox]]:
     """Layer positioned OCR over the conservative color/shape detector.
 
     The iPhone 17 Pro Max reward panel is a known false ``league`` for the old
     detector.  OCR sees the actual lower BATTLE label, while the y guard in
     ``action_point`` excludes the BATTLE tab at the top of the same screen.
+
+    ``refused_rewards`` are screenshot points a previous end-of-set tap has been
+    caught closing the whole card with.  See ``DISMISSING_REWARD_RADIUS``.
     """
 
     frame = raw_frame(image)
@@ -803,7 +843,11 @@ async def smart_screen_state(
         # stopped the run, four battles into the day, with the set's rewards
         # unclaimed and the next set behind them.
         reward = gbl_vision.reward_point(boxes, image.width, image.height)
-        if reward is not None and gbl_vision.gbl_card_visible(boxes):
+        if (
+            reward is not None
+            and gbl_vision.gbl_card_visible(boxes)
+            and not reward_refused(reward, refused_rewards, image.width)
+        ):
             return "orange", reward, None, boxes
         # OCR cannot always name that reward. The card's teal close X overlaps
         # the SE's SELECT label and only 'CT' survives it, so `reward_point`
@@ -818,8 +862,12 @@ async def smart_screen_state(
             # ones in view: the SE took the locked "3 wins" tile, which opens
             # the rank roster, closed it, and took the same tile again every
             # five seconds until the day ran out.
-            if tile is not None and not gbl_vision.locked_reward_tile(
-                boxes, tile, image.width, image.height
+            if (
+                tile is not None
+                and not gbl_vision.locked_reward_tile(
+                    boxes, tile, image.width, image.height
+                )
+                and not reward_refused(tile, refused_rewards, image.width)
             ):
                 return "orange", tile, None, boxes
             # Locked tiles in view, no earned one found, and a tile cut off
@@ -882,6 +930,12 @@ async def smart_screen_state(
         for b in boxes
     )
     if is_league_screen:
+        # Next week's cards sit below the divider, greyed out and untappable.
+        # Choosing from down there is a day spent tapping nothing.
+        upcoming = gbl_vision.upcoming_league_divider_y(boxes)
+        if upcoming is not None:
+            max_y = min(max_y, upcoming)
+        live_boxes = gbl_vision.live_league_boxes(image, boxes)
         if _wants_named_league(profile):
             # A configured league is the only card worth tapping.  The SE fits
             # two cards on screen, so the wanted one is regularly below the
@@ -889,7 +943,7 @@ async def smart_screen_state(
             # then enters whichever league happens to be scrolled into view.
             # That is how a Master League day was spent in Great League.
             box = _named_league_box(
-                boxes,
+                live_boxes,
                 profile.settings.preferred_league,
                 min_y=min_y,
                 max_y=max_y,
@@ -898,7 +952,7 @@ async def smart_screen_state(
                 return "league", [box.center_x, box.center_y], box.text, boxes
             return "league_scroll", None, None, boxes
         choice = gbl_strategy.choose_easiest_league(
-            boxes,
+            live_boxes,
             profile.settings.preferred_league,
             profile.team,
             min_y=min_y,
@@ -1411,6 +1465,16 @@ async def recover_to_gbl(
     await device.tap(menu)
 
 
+def _league_list_view(boxes: list[gbl_vision.OCRBox]) -> tuple[tuple[str, int], ...]:
+    """What the league list shows, coarsely, to tell a scroll that moved it
+    from one that hit the end.  A scroll moves cards by a third of the screen,
+    far more than the 40-pixel buckets; OCR jitter between reads is far less."""
+    return tuple(sorted(
+        (gbl_strategy.canonical_name(str(box.text)), int(box.center_y) // 40)
+        for box in boxes
+    ))
+
+
 async def scroll_league_list(device: IOSGBLDevice, *, back: bool = False) -> None:
     """Moves the league list by roughly one card, to look for a named league."""
     x = device.viewport["width"] // 2
@@ -1688,6 +1752,15 @@ ENCOUNTER_THROW_STEPS = 10
 ENCOUNTER_THROW_MS = 26         # per step, so the moto's proven ~260ms flick
 ENCOUNTER_THROWS = 4            # Great Balls worth spending on a reward mon
 ENCOUNTER_READS = 24
+# Reads in a row that cost the budget nothing because no ball left the hand.
+# Only a thrown ball counts against ENCOUNTER_THROWS, which on its own lets a
+# cycle that never manages to throw run for as long as the reads last and then
+# be started over by the caller on the same unchanged plate.  That is how one
+# SE spent a whole GBL day on a single Frillish: the excellent routine could
+# not lock its circle, the fallback flick found the Nanab still in hand and
+# returned without throwing, and neither path ever spent a ball.  Six in a row
+# is well past any run of ordinary "the ball is still in flight" reads.
+ENCOUNTER_MISFIRES = 6
 # The reward encounter is already on screen when the excellent routine is asked
 # for it, so this is only how long it will spend confirming the ball is really
 # there before it hands back and lets the plain flick have the throw.
@@ -1715,7 +1788,13 @@ ENCOUNTER_FLEE_Y = 0.081
 ABANDONED_ENCOUNTER_LIMIT = 1
 
 
-async def throw_ball(device: IOSGBLDevice, image: Image.Image) -> bool:
+async def throw_ball(
+    device: IOSGBLDevice,
+    image: Image.Image,
+    *,
+    rise: float = ENCOUNTER_THROW_RISE,
+    step_ms: int = ENCOUNTER_THROW_MS,
+) -> bool:
     """Flick the encounter ball straight up the screen.  Says whether it went.
 
     One ``dragFromToForDuration`` is read as a tap by Pokemon GO -- that is how
@@ -1741,14 +1820,14 @@ async def throw_ball(device: IOSGBLDevice, image: Image.Image) -> bool:
         return False
     end_y = max(
         int(viewport[1] * ENCOUNTER_THROW_CEILING),
-        ball.center_y - int(viewport[1] * ENCOUNTER_THROW_RISE),
+        ball.center_y - int(viewport[1] * rise),
     )
     rise = end_y - ball.center_y
     path = [
         [ball.center_x, ball.center_y + round(rise * step / ENCOUNTER_THROW_STEPS)]
         for step in range(ENCOUNTER_THROW_STEPS + 1)
     ]
-    await device.trace_path(path, ENCOUNTER_THROW_MS)
+    await device.trace_path(path, step_ms)
     return True
 
 
@@ -1844,7 +1923,7 @@ def throw_profile_path(device: IOSGBLDevice) -> Path | None:
 class ExcellentThrower:
     """The excellent-throw routine, driven over this run's own WDA session.
 
-    ``excellent_throw.py`` cannot simply be shelled out to from inside a GBL
+    ``scripts/excellent_throw.py`` cannot simply be shelled out to from inside a GBL
     run: it connects an Appium session of its own and takes the fleet lock on
     the phone, and the run already holds both, so the subprocess would refuse
     with "already controlled by another automation".  Its device wrapper needs
@@ -1856,12 +1935,22 @@ class ExcellentThrower:
     session alone.  Quitting it here would end the GBL run mid-set.
     """
 
+    # The picker kind fed before each throw; "silver" once the plate names a
+    # legendary.
+    berry = "nanab"
+
     def __init__(self, device: IOSGBLDevice, config: Any) -> None:
         self.device = device
         self.thrower = excellent_throw_ios.IOSExcellentThrowDevice(device.driver, config)
         self.stream: excellent_throw_ios.MJPEGStream | None = None
         self.artifacts = ARTIFACT_ROOT / "reward-catch" / time.strftime("%Y%m%d-%H%M%S")
         self.attempts = 0
+        # Set once the routine has declined a throw, so the caller can stop
+        # asking.  Whatever made the circle unreadable -- an off-centre Pokemon,
+        # a phone whose stream will not sit still -- is a property of this
+        # encounter, not of the attempt, so the next attempt pays the same
+        # minute and the same Nanab to arrive at the same refusal.
+        self.refused = False
 
     def start(self) -> None:
         port = self.thrower.config.ios_device.get("mjpeg_server_port")
@@ -1891,6 +1980,7 @@ class ExcellentThrower:
             artifact_dir=directory,
             dry_run=False,
             use_nanab=True,
+            berry=self.berry,
         )
 
     def close(self) -> None:
@@ -1943,12 +2033,14 @@ async def send_throw(
     it does end the encounter, and an encounter that never ends strands every
     remaining set behind it.
     """
-    if thrower is not None:
+    if thrower is not None and not thrower.refused:
         try:
             return await thrower.throw()
         except excellent_throw_ios.ExcellentThrowError as exc:
+            thrower.refused = True
             log(device, f"  Excellent throw refused ({exc}); flicking instead")
         except (OSError, ValueError, WebDriverException) as exc:
+            thrower.refused = True
             log(device, f"  Excellent throw failed ({exc}); flicking instead")
         # Whatever it refused on is still up, and it is usually a bottom sheet
         # sitting over the ball.  Flicking at a ball found on the frame from
@@ -1976,12 +2068,17 @@ async def take_reward_encounter(
     carries POWER UP in the pill slot -- already a blocked label, and it stays
     blocked.  Pressing them is safe only for the routine that just threw a ball.
 
-    The ball itself is thrown by ``excellent_throw.py``'s routine rather than by
+    The ball itself is thrown by ``scripts/excellent_throw.py``'s routine rather than by
     the flick: it locks the shrinking circle before it releases, so a reward
     Pokemon usually costs one Great Ball instead of the four budgeted here.
     """
     throws = 0
+    misfires = 0
     thrower: ExcellentThrower | None = None
+    # Closing a refused thrower is not enough to be rid of it: the open below
+    # fires on any read that finds no thrower, so it would be built again, from
+    # a fresh stream, with nothing remembered about having just given up.
+    flicking = False
     try:
         for _read in range(ENCOUNTER_READS):
             image = await device.screenshot()
@@ -1998,16 +2095,21 @@ async def take_reward_encounter(
 
             plate = gbl_vision.encounter_plate(boxes, image.height)
             if plate is not None:
-                if throws >= ENCOUNTER_THROWS or not spend_balls:
+                if (
+                    throws >= ENCOUNTER_THROWS
+                    or misfires >= ENCOUNTER_MISFIRES
+                    or not spend_balls
+                ):
                     # Returning here is what trapped the SE: the caller sees the
                     # same plate on its next read and calls back in with a fresh
                     # budget. Walk away instead, and let the loop below confirm
                     # the card came back.
-                    reason = (
-                        "will not stay in the ball"
-                        if spend_balls
-                        else "was already given up on"
-                    )
+                    if not spend_balls:
+                        reason = "was already given up on"
+                    elif throws >= ENCOUNTER_THROWS:
+                        reason = "will not stay in the ball"
+                    else:
+                        reason = "cannot be thrown at"
                     log(device, f"  {plate.text.strip()} {reason}; fleeing")
                     flee = encounter_flee_point(device)
                     await device.tap(flee)
@@ -2015,12 +2117,28 @@ async def take_reward_encounter(
                     continue
                 # Opened on the first plate, not up front: most sets pay out in
                 # items, and those runs should not start an MJPEG stream.
-                if thrower is None:
+                if thrower is None and not flicking:
                     thrower = open_excellent_thrower(device)
+                # Every box, not just the plate: the plate box is sometimes
+                # only "CP 2056", with the name read as a box of its own.
+                legendary = legendary_pokemon.legendary_named(box.text for box in boxes)
+                if thrower is not None and legendary is not None and thrower.berry != "silver":
+                    log(device, f"  {legendary} is legendary; feeding it Silver Pinaps")
+                    thrower.berry = "silver"
                 log(device, f"  Set reward is a catch: {plate.text.strip()}, throw {throws + 1}")
-                if not await send_throw(device, thrower, image):
+                thrown = await send_throw(device, thrower, image)
+                if thrower is not None and thrower.refused:
+                    # Drop it for the rest of the encounter rather than pay the
+                    # lock's minute, and a Nanab, to be refused again per throw.
+                    log(device, "  Excellent throw is out for this catch; flicking the rest")
+                    thrower.close()
+                    thrower = None
+                    flicking = True
+                if not thrown:
+                    misfires += 1
                     await wait(device, android_gbl.POLL_GAP, use_modifier=False)
                     continue
+                misfires = 0
                 throws += 1
                 await wait(device, ENCOUNTER_SETTLE, use_modifier=False)
                 continue
@@ -2117,7 +2235,8 @@ async def play_device(
     selected, so a phone that has fallen out to the map stops instead of tapping
     at the map.
     """
-    profile = profile or gbl_strategy.load_strategy_profile(device_name="ios-one")
+    strategy_key = str(device.config.ios_device.get("strategy_key") or "ios-one")
+    profile = profile or gbl_strategy.load_strategy_profile(device_name=strategy_key)
     move = device.scale_point(device.config.coordinates["GBL_MOVE_BTN"])
     # A battle written off partway through is not a battle played.  Counting
     # the two together is what let a leg report a full day it never had: every
@@ -2137,6 +2256,9 @@ async def play_device(
     saw_league = False
     reward_scrolls = 0
     league_attempts = 0
+    league_heading_up = True
+    league_view: tuple[tuple[str, int], ...] | None = None
+    league_still = 0
     league_exits = 0
     # A leg that never sees the league list never chooses one.
     league_confirmed = False
@@ -2165,6 +2287,17 @@ async def play_device(
     pending_outcome: str | None = None
     # Set when the reward row has had its scrolls and stayed put.
     row_scroll_spent = False
+    # The screenshot point of an end-of-set tap that has just been sent, kept
+    # only until the next read says what it opened, and the points that read has
+    # caught closing the card.  See `reward_refused`.
+    reward_tap: list[int] | None = None
+    refused_rewards: list[list[int]] = []
+    # Tiles that turned out to be locked rather than earned.  Kept apart from
+    # `refused_rewards` because that list is about the card's own dismiss
+    # control, which sits in the same place all run, while a locked tile is only
+    # locked where the row happens to be scrolled to: reset the row and the
+    # earned tile can land on a point refused a moment ago.
+    locked_rewards: list[list[int]] = []
 
     while played < count:
         image = await device.screenshot()
@@ -2172,12 +2305,37 @@ async def play_device(
             log(device, "  Screen unreadable twice; stopping")
             break
         frame = raw_frame(image)
+
+        # An outstanding end-of-set tap that did not drop the phone on the map;
+        # the read below gets one chance to say what it did open instead.
+        roster_suspect: list[int] | None = None
+        if reward_tap is not None:
+            # The frame after an end-of-set tap is the only place the difference
+            # between collecting a reward and dismissing the card shows: one
+            # leaves the card up, the other drops the phone on the map.  Asked
+            # before the state read, so the read that follows a dismissal is
+            # already told to leave that point alone, and only while a reward
+            # tap is outstanding, so the map detectors are not run on every read
+            # of the day.
+            if gbl_home_recovery.on_map(image) or gbl_home_recovery.main_menu_open(image):
+                refused_rewards.append(reward_tap)
+                log(
+                    device,
+                    f"  The reward tap at {device.logical_point(reward_tap, image)} "
+                    "closed the GBL card; that point is the card's own dismiss "
+                    "control, not a reward, and will not be taken again this run",
+                )
+            else:
+                roster_suspect = reward_tap
+            reward_tap = None
+
         try:
             state, pixel_point, vision_label, menu_boxes = await smart_screen_state(
                 image,
                 profile,
                 probe_unknown=not armed,
                 allow_row_scroll=not row_scroll_spent,
+                refused_rewards=refused_rewards + locked_rewards,
             )
         except gbl_vision.VisionOCRError as exc:
             if not ocr_failed:
@@ -2245,8 +2403,25 @@ async def play_device(
                 android_gbl.RANK_MODAL_CLOSE_X, android_gbl.RANK_MODAL_CLOSE_Y
             )
             log(device, f"  Rank roster sheet over the card, closing it at {shut}")
-            repeats = 0
-            last_tap = None
+            if roster_suspect is not None:
+                # A locked "N wins" tile opens the roster rather than paying out,
+                # and closing the sheet puts the row back exactly as it was, so
+                # the same tile is taken again on the next read.  That is the
+                # loop the SE sat in from 08:23: tap [162,464], roster, close,
+                # tap [162,464].  Treat it like the dismiss control -- a point
+                # that does not collect is not the reward -- so the row scroll
+                # below gets its turn at bringing the earned tile into view.
+                locked_rewards.append(roster_suspect)
+                log(
+                    device,
+                    f"  The reward tap at {device.logical_point(roster_suspect, image)} "
+                    "only opened the roster, so it is locked, not earned",
+                )
+            else:
+                # Only an unprompted sheet is progress; one the reward tap just
+                # opened has to keep the stall count, or it hides the loop.
+                repeats = 0
+                last_tap = None
             unknown = 0
             teal_reads = 0
             await device.tap(shut)
@@ -2422,24 +2597,44 @@ async def play_device(
                 saw_result = False
                 reward_scrolls = 0
                 row_scroll_spent = False
+                locked_rewards.clear()
                 league_attempts += 1
-                if league_attempts > LEAGUE_SCROLL_LIMIT:
+                view = _league_list_view(menu_boxes)
+                league_still = league_still + 1 if view == league_view else 0
+                league_view = view
+                if league_still >= LEAGUE_END_READS and league_heading_up:
+                    # The top.  Everything from here down is still unseen.
+                    league_heading_up = False
+                    league_still = 0
+                exhausted = league_still >= LEAGUE_END_READS
+                if exhausted or league_attempts > LEAGUE_SCROLL_LIMIT:
                     log(
                         device,
                         f"  {wanted_league} never appeared in the league list; "
                         "falling back to the easiest available league",
                     )
+                    profile = gbl_strategy.adopt_league(profile, "auto")
+                    party_preparation_attempted = False
                     wanted_league = None
                     league_attempts = 0
+                    league_heading_up = True
+                    league_view = None
+                    league_still = 0
+                    await scroll_league_list(device, back=True)
+                    await wait(device, android_gbl.MENU_SETTLE)
                     continue
-                back = league_attempts > LEAGUE_SCROLL_LIMIT // 2
-                heading = "back up" if back else "down"
+                heading = "up" if league_heading_up else "down"
+                seen = ", ".join(
+                    str(box.text) for box in menu_boxes
+                    if "league" in gbl_vision.normalize(box.text)
+                    or "cup" in gbl_vision.normalize(box.text)
+                ) or "no cards"
                 log(
                     device,
-                    f"  {wanted_league} is not on screen; scrolling {heading} the "
-                    f"league list ({league_attempts}/{LEAGUE_SCROLL_LIMIT})",
+                    f"  {wanted_league} is not on screen ({seen}); scrolling "
+                    f"{heading} the league list ({league_attempts}/{LEAGUE_SCROLL_LIMIT})",
                 )
-                await scroll_league_list(device, back=back)
+                await scroll_league_list(device, back=league_heading_up)
                 await wait(device, android_gbl.MENU_SETTLE)
                 continue
             if state == "league":
@@ -2463,11 +2658,18 @@ async def play_device(
                 saw_result = False
                 reward_scrolls = 0
                 row_scroll_spent = False
+                locked_rewards.clear()
                 league_attempts = 0
+                league_heading_up = True
+                league_view = None
+                league_still = 0
+                if vision_label:
+                    profile = gbl_strategy.adopt_league(profile, vision_label)
+                    party_preparation_attempted = False
                 detail = f" ({vision_label})" if vision_label else ""
-                taking = wanted_league if wanted_league is not None else "the easiest"
+                taking = wanted_league if wanted_league is not None else (vision_label or "the easiest")
                 log(device, f"  League list, taking {taking} at {point}{detail}")
-                league_confirmed = wanted_league is not None
+                league_confirmed = True
             elif state == "orange":
                 # End of a set: the rewards have to be taken before the BATTLE
                 # pill comes back.
@@ -2477,6 +2679,10 @@ async def play_device(
                 reward_scrolls = 0
                 row_scroll_spent = False
                 log(device, f"  Set finished, taking the reward button at {point}")
+                reward_tap = list(pixel_point) if pixel_point is not None else None
+                kept = save_reward_screen(image, point)
+                if kept is not None:
+                    log(device, f"  End-of-set frame kept at {kept}")
             elif state == "tiles":
                 # The reward row is scrolled past the tile this set earned.
                 armed = False
@@ -2484,11 +2690,29 @@ async def play_device(
                 saw_result = False
                 reward_scrolls += 1
                 if reward_scrolls > android_gbl.REWARD_SCROLL_LIMIT:
-                    # A row that will not move is not a reason to end the day.
-                    # The card still has a BATTLE pill on it, and the next read
-                    # is told to leave the row alone and press that instead.
+                    # Leaving the row alone and pressing on is only any good if
+                    # something else on the card pays out; with every tile in
+                    # view locked there is nothing to press, and the card comes
+                    # back scrolled the same way every read.  Closing it drops
+                    # the phone on the map, and walking back in rebuilds the
+                    # card with the row at its start, which is where the earned
+                    # tile is.
                     row_scroll_spent = True
-                    log(device, "  Reward row will not move; taking the card as it is")
+                    reward_scrolls = 0
+                    # The row is about to go back to its start, so what was
+                    # locked at these points no longer says anything.
+                    locked_rewards.clear()
+                    shut = [
+                        round(device.viewport["width"] * android_gbl.RANK_MODAL_CLOSE_X),
+                        round(device.viewport["height"] * android_gbl.RANK_MODAL_CLOSE_Y),
+                    ]
+                    log(
+                        device,
+                        "  Reward row will not move; closing the card at "
+                        f"{shut} to come back in with it reset",
+                    )
+                    await device.tap(shut)
+                    await wait(device, android_gbl.MENU_SETTLE)
                     continue
                 log(
                     device,
@@ -2554,15 +2778,28 @@ async def play_device(
                         league_confirmed = True
                     else:
                         league_exits += 1
+                        naming = open_league or "an unnamed league"
                         if league_exits > LEAGUE_EXIT_LIMIT:
+                            # Backing out has stopped working, or every card on
+                            # the list leads back here because the configured
+                            # league is not in today's rotation. Stopping leaves
+                            # the day unplayed; this set is at least battles.
                             log(
                                 device,
-                                "  Could not get back to the league list; stopping "
-                                f"rather than playing a set that is not "
-                                f"{wanted_league}",
+                                f"  Could not get back to the league list after "
+                                f"{league_exits} tries; playing this {naming} set "
+                                f"rather than none at all",
                             )
-                            break
-                        naming = open_league or "an unnamed league"
+                            if open_league is not None:
+                                profile = gbl_strategy.adopt_league(
+                                    profile, open_league
+                                )
+                            # Any party already built was built to the old
+                            # league's CP cap.
+                            party_preparation_attempted = False
+                            wanted_league = None
+                            league_confirmed = True
+                            continue
                         log(
                             device,
                             f"  The open set is {naming}, not {wanted_league}; "
@@ -2594,6 +2831,7 @@ async def play_device(
                 saw_result = not armed and not android_gbl.league_cards(frame)
                 reward_scrolls = 0
                 row_scroll_spent = False
+                locked_rewards.clear()
             if armed:
                 log(device, f"  Party ready, using it at {point}")
             elif saw_result:
@@ -3068,8 +3306,9 @@ async def probe(
     image: Image.Image,
     profile: gbl_strategy.StrategyProfile | None = None,
 ) -> str:
-    """Read-only: prints the numbers behind the verdict without sending a tap."""
-    profile = profile or gbl_strategy.load_strategy_profile(device_name="ios-one")
+    """Read-only: print the detector verdict without sending a tap."""
+    strategy_key = str(device.config.ios_device.get("strategy_key") or "ios-one")
+    profile = profile or gbl_strategy.load_strategy_profile(device_name=strategy_key)
     frame = raw_frame(image)
     state, pixel_point, vision_label, _ = await smart_screen_state(
         image,
@@ -3145,10 +3384,10 @@ def parse_args() -> argparse.Namespace:
 
 
 async def async_main(args: argparse.Namespace, config: RuntimeConfig) -> int:
-    device = await asyncio.to_thread(IOSGBLDevice.connect, config)
-    device_name = "ios-one"
     # Strategy lookup is explicit private profile data, never inferred from hardware identity.
-    device_name = str(config.ios_device.get("strategy_key", "default"))
+    device_name = str(config.ios_device.get("strategy_key") or "ios-one")
+    profile = gbl_strategy.load_strategy_profile(device_name=device_name)
+    device = await asyncio.to_thread(IOSGBLDevice.connect, config)
     normal_exit = False
     try:
         # Result screens animate their button in, so a single frame is not
@@ -3279,7 +3518,7 @@ if __name__ == "__main__":
     try:
         if os.environ.get("POKEMON_FLEET_CHILD") == "1" or "--fleet-child" in sys.argv:
             raise SystemExit(main())
-        raise SystemExit(fleet_entrypoint.run_operation('gbl', 'battle_league.py'))
+        raise SystemExit(fleet_entrypoint.run_operation('gbl', 'gbl.py'))
     except KeyboardInterrupt:
         raise SystemExit(130)
     except (RuntimeError, OSError, ValueError) as exc:

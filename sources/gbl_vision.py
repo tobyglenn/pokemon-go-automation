@@ -16,7 +16,7 @@ import select
 import subprocess
 import tempfile
 import threading
-from typing import Iterable
+from typing import Iterable, Sequence
 import unicodedata
 
 from PIL import Image
@@ -90,6 +90,14 @@ SWIFT_SOURCE = SWIFT_SOURCE.replace("SERVER_TERMINATOR", f'"{OCR_TERMINATOR}"')
 # A hung Vision call has never been seen; this only stops one taking a leg
 # down with it. It is the same bound the one-shot call has always used.
 OCR_FIRST_LINE_TIMEOUT = 12.0
+# The first recognition any given helper binary runs also pays for Vision's
+# text model being compiled for the Neural Engine, and that compiled model is
+# cached per binary. A macOS upgrade throws the cache away, so on an upgraded
+# Mac every leg paid it again: 14.4 s measured on both Macs after macOS 27,
+# which is over the bound above. Each leg was killed mid-compile, cached
+# nothing, and the next leg started the same compile from scratch -- no phone
+# ever got a read. A warm call costs 0.17 s. Paid once per helper per machine.
+OCR_COLD_START_TIMEOUT = 180.0
 
 
 class VisionOCRError(RuntimeError):
@@ -164,6 +172,7 @@ def ensure_ocr_binary() -> Path:
 # come from `asyncio.to_thread`, so they must not interleave on the pipe.
 _server_lock = threading.Lock()
 _server: subprocess.Popen | None = None
+_ocr_warmed = False
 
 
 def _start_server() -> subprocess.Popen:
@@ -193,7 +202,7 @@ def _stop_server() -> None:
 atexit.register(_stop_server)
 
 
-def _server_read(process: subprocess.Popen) -> str:
+def _server_read(process: subprocess.Popen, timeout: float) -> str:
     """Everything the server says about one image, up to its terminator.
 
     The wait for the *first* line is bounded, because that is where a stuck
@@ -202,7 +211,7 @@ def _server_read(process: subprocess.Popen) -> str:
     sitting in this end's buffer.
     """
     assert process.stdout is not None
-    if not select.select([process.stdout], [], [], OCR_FIRST_LINE_TIMEOUT)[0]:
+    if not select.select([process.stdout], [], [], timeout)[0]:
         raise VisionOCRError("Vision OCR server stopped answering")
     lines: list[str] = []
     while True:
@@ -221,7 +230,8 @@ def _recognize_file(path: str) -> str:
     so the worst case is the cost this had before it existed rather than a
     failed read in the middle of a battle.
     """
-    global _server
+    global _server, _ocr_warmed
+    budget = OCR_FIRST_LINE_TIMEOUT if _ocr_warmed else OCR_COLD_START_TIMEOUT
     if os.environ.get("GBL_OCR_SERVER") != "0":
         with _server_lock:
             for _ in range(2):
@@ -231,18 +241,21 @@ def _recognize_file(path: str) -> str:
                     assert _server.stdin is not None
                     _server.stdin.write(path + "\n")
                     _server.stdin.flush()
-                    return _server_read(_server)
+                    answer = _server_read(_server, budget)
+                    _ocr_warmed = True
+                    return answer
                 except (OSError, ValueError, AssertionError, VisionOCRError):
                     _stop_server()
     result = subprocess.run(
         [str(ensure_ocr_binary()), path],
         capture_output=True,
         text=True,
-        timeout=12,
+        timeout=budget,
         check=False,
     )
     if result.returncode:
         raise VisionOCRError(result.stderr.strip() or "Vision OCR failed")
+    _ocr_warmed = True
     return result.stdout
 
 
@@ -375,6 +388,19 @@ GBL_CARD_MARKERS = (
 )
 
 
+def season_info_visible(boxes: Iterable[OCRBox]) -> bool:
+    """Recognize season article prose without depending on the season name."""
+    seen = " ".join(normalize(box.text) for box in sorted(
+        boxes, key=lambda box: (box.y, box.x)) if box.confidence >= 0.25)
+    return (
+        "dates and times below are listed in local" in seen
+        or ("go battle league" in seen and any(marker in seen for marker in (
+            "season schedule", "battle league schedule",
+            "leagues will begin and end",
+        )))
+    )
+
+
 def gbl_card_visible(boxes: Iterable[OCRBox]) -> bool:
     """Whether the GBL menu card is on screen.
 
@@ -382,6 +408,9 @@ def gbl_card_visible(boxes: Iterable[OCRBox]) -> bool:
     as the post-battle checkmark drawn over the battlefield. Only the text
     behind them tells the two apart, and pressing the wrong one leaves GBL.
     """
+    boxes = list(boxes)
+    if season_info_visible(boxes):
+        return False
     seen = " | ".join(labels(boxes))
     return any(marker in seen for marker in GBL_CARD_MARKERS)
 
@@ -434,6 +463,73 @@ def reward_tier_prompt_visible(boxes: Iterable[OCRBox]) -> bool:
     """Whether the reward-tier chooser named itself on screen."""
     seen = " | ".join(labels(boxes))
     return any(marker in seen for marker in REWARD_TIER_MARKERS)
+
+
+# Under the week's playable cards the chooser draws a divider -- "SEE WHAT'S
+# COMING NEXT ON SEPTEMBER 22!" -- and beneath it next week's line-up, greyed
+# out and inert.  Those previews read like ordinary cards to OCR, and a
+# configured league that is out of rotation is usually sitting in exactly that
+# section: on 16 Sep the SE scrolled past Great League to the Master League:
+# Mega Edition preview and tapped it every five seconds all day, 0 battles.
+UPCOMING_LEAGUE_MARKERS = ("coming next", "coming up next", "available next")
+
+
+# A card the week is actually offering sits on an opaque white panel.  The
+# previews below the divider are drawn over the map at roughly half opacity, so
+# the same band reads about 145 instead of about 245.  Measured on the SE on
+# 16 Sep: live cards 242-252 with 4% of their band below 200, previews 142-155
+# with all of it below.  The divider itself scrolls off the top of the list, so
+# its absence proves nothing -- this does not scroll away.
+LIVE_CARD_LEVEL = 200
+LIVE_CARD_SHARE = 0.5
+
+
+def league_card_live(image, box: OCRBox) -> bool:
+    """Whether this card is one of today's leagues rather than a preview."""
+    top = max(0, box.y - box.height // 2)
+    bottom = min(image.height, box.y + box.height + box.height // 2)
+    # Right of the league emblem, inside the panel: the emblem is dark on every
+    # card, live or not, and the margins either side of the panel are map.
+    left = int(image.width * 0.40)
+    right = int(image.width * 0.92)
+    if bottom <= top or right <= left:
+        return True
+    band = image.crop((left, top, right, bottom)).convert("L")
+    pixels = getattr(band, "get_flattened_data", band.getdata)()
+    total = len(pixels)
+    if not total:
+        return True
+    bright = sum(1 for value in pixels if value >= LIVE_CARD_LEVEL)
+    return bright >= total * LIVE_CARD_SHARE
+
+
+def live_league_boxes(image, boxes: Iterable[OCRBox]) -> list[OCRBox]:
+    """The cards worth tapping, or all of them if none look like cards at all.
+
+    In synthetic test environments with flat mock images (no bright pixels
+    anywhere), preserve all boxes so unit tests can evaluate geometry without
+    pixel rendering. On real screens, return only cards with opaque white panels
+    to prevent untappable preview cards from ever being tapped.
+    """
+    box_list = list(boxes)
+    extrema = image.convert("L").getextrema()
+    if extrema[1] < LIVE_CARD_LEVEL:
+        return box_list
+    return [box for box in box_list if league_card_live(image, box)]
+
+
+def upcoming_league_divider_y(boxes: Iterable[OCRBox]) -> int | None:
+    """Top of the "what's coming next" divider, if the chooser is showing it.
+
+    Cards below this line are previews of the next rotation.  They cannot be
+    tapped, so nothing under it is worth choosing.
+    """
+    tops = [
+        box.y
+        for box in boxes
+        if any(marker in normalize(box.text) for marker in UPCOMING_LEAGUE_MARKERS)
+    ]
+    return min(tops) if tops else None
 
 
 def main_menu_visible(boxes: Iterable[OCRBox]) -> bool:
@@ -574,6 +670,40 @@ def locked_tile_captions(boxes: Iterable[OCRBox]) -> list[OCRBox]:
     return [box for box in boxes if LOCKED_TILE_CAPTION.search(normalize(box.text))]
 
 
+# How near a reward point has to be to one that closed the GO BATTLE LEAGUE card
+# to count as the same control, as a fraction of the screenshot's width.  The
+# tiles in the reward row sit 0.22w apart on the SE, so this is loose enough to
+# absorb the few pixels OCR moves a label between reads and still far too tight
+# to write off the tile next door.
+DISMISSING_REWARD_RADIUS = 0.05
+
+
+def reward_refused(
+    point: Sequence[int],
+    refused: Sequence[Sequence[int]],
+    image_width: int,
+) -> bool:
+    """Whether this end-of-set point has already been caught closing the card.
+
+    The card's dismiss control is drawn over the reward row, so a point picked
+    off that row can be the thing that throws the set away rather than the thing
+    that collects it.  Which one it is cannot be settled from the picture -- the
+    SE's teal X sits within a tile's width of tiles the loop is right to press,
+    and the row scrolls, so no fixed exclusion zone tells them apart.  What does
+    settle it is what happened last time: on 10 Sep 2026 the SE tapped [214, 596]
+    on a finished set, landed on the map, walked back through the pokeball and
+    the BATTLE disc, and tapped the same point again, over and over, until its
+    leg was written off with the set unclaimed.  A point that put the phone on
+    the map is not a reward, and this run does not spend a second set finding
+    that out again.
+    """
+    limit = image_width * DISMISSING_REWARD_RADIUS
+    return any(
+        abs(point[0] - other[0]) <= limit and abs(point[1] - other[1]) <= limit
+        for other in refused
+    )
+
+
 def locked_reward_tile(
     boxes: Iterable[OCRBox],
     point: list[int],
@@ -650,6 +780,73 @@ def dismiss_point(boxes: Iterable[OCRBox]) -> list[int] | None:
         if normalize(box.text) == "ok":
             return [box.center_x, box.center_y]
     return None
+
+
+# Pokemon GO draws a safety warning before the map on every cold start: a white
+# card, a yellow hazard triangle, and one OK.  Two markers are wanted rather
+# than one because a single word is a thin reason to press a dialog.
+SAFETY_NOTICE_MARKERS = ("stay aware", "surroundings", "dangerous areas")
+
+
+def safety_notice_visible(boxes: Iterable[OCRBox]) -> bool:
+    """Whether the start-up safety warning is covering the game."""
+    seen = " | ".join(labels(boxes))
+    return sum(marker in seen for marker in SAFETY_NOTICE_MARKERS) >= 2
+
+
+def _notice_button(pixel) -> bool:
+    """Whether this pixel belongs to the warning's green-to-teal OK pill."""
+    red, green, blue = pixel[:3]
+    return green > 180 and green > red + 30 and green > blue + 10
+
+
+def safety_notice_point(boxes: Iterable[OCRBox], image=None) -> list[int] | None:
+    """The OK on the start-up safety warning, or None when it is not up.
+
+    Pressed by name rather than through `dismiss_point`, which finds any OK at
+    all: this one is only safe to press because the words behind it say what
+    the dialog is.  Nothing gets past it on its own, so a relaunched game waits
+    here indefinitely -- the moto-g spent a whole leg's reads tapping map
+    coordinates through this card on 22 Sep 2026.
+
+    Vision often cannot read the button: its letters are spaced so widely that
+    the moto-g's OCR returned the title and the body and nothing else.  So the
+    text is tried first, and then the pill is found by its own colour, below
+    the writing, in the middle of the card where it is always drawn.
+    """
+    boxes = list(boxes)
+    if not safety_notice_visible(boxes):
+        return None
+    for box in boxes:
+        # "O K" as often as "OK", for the same letter spacing.
+        if normalize(box.text).replace(" ", "") == "ok":
+            return [box.center_x, box.center_y]
+    if image is None:
+        return None
+    return _notice_button_point(image, boxes)
+
+
+def _notice_button_point(image, boxes: Sequence[OCRBox]) -> list[int] | None:
+    written = [box.y + box.height for box in boxes if box.center_y > image.height * 0.3]
+    top = max(written) if written else int(image.height * 0.6)
+    pixels = image.convert("RGB").load()
+    x = image.width // 2
+    rows = [y for y in range(top, int(image.height * 0.95))
+            if _notice_button(pixels[x, y])]
+    if not rows:
+        return None
+    # The pill is one solid band; anything shorter is a stray pixel or an edge.
+    band: list[int] = [rows[0]]
+    best: list[int] = []
+    for y in rows[1:]:
+        if y - band[-1] <= 3:
+            band.append(y)
+        else:
+            best, band = (max(best, band, key=len)), [y]
+    best = max(best, band, key=len)
+    if len(best) < image.height * 0.02:
+        return None
+    return [x, (best[0] + best[-1]) // 2]
 
 
 # The highest a real action label can sit, as a fraction of screen height.

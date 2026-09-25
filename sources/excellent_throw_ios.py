@@ -637,9 +637,10 @@ def berry_in_hand(
 # A ball's disc against every berry's, measured off the fleet's own captures:
 # pale pixels are 0.36-0.39 of a Great Ball on both platforms and 0.00-0.10 of a
 # held berry, and a ball carries its white below the middle while a berry is
-# brightest on top.
-BALL_PALE_FRACTION = 0.20
-BALL_LOWER_LIFT = 15
+# brightest on top.  A Great Ball over grass on the SE read as low as 0.165
+# pale and 11.9 lift (24 Sep 2026), so the lines sit under that.
+BALL_PALE_FRACTION = 0.14
+BALL_LOWER_LIFT = 8
 
 
 def ball_in_hand(image: Image.Image, analysis_viewport: tuple[int, int]) -> bool:
@@ -2095,10 +2096,16 @@ async def use_nanab_berry(
     ball: BallDetection,
     encounter_image: Image.Image,
     artifact_dir: Path,
+    berry: str = "nanab",
 ) -> None:
-    """Select a Nanab by image, then feed it to the current encounter."""
+    """Select a berry by image, then feed it to the current encounter.
+
+    `berry` is a picker kind -- "silver" for a legendary -- and falls back to
+    a Nanab when the bag has none.
+    """
     from . import berry_android
 
+    berry = berry_android.berry_to_feed(device.label, berry)
     if berry_in_hand(encounter_image, device.viewport):
         # The last attempt left one in the hand; opening the picker again would
         # only select a second. Throw the one that is already there.
@@ -2141,8 +2148,8 @@ async def use_nanab_berry(
             f"Nanab picker did not open on {device.label}; no ball was thrown"
         )
     picker_image.save(artifact_dir / "nanab-picker.png")
-    nanab_pixel = next((point for kind, point in listed if kind == "nanab"), None)
-    if nanab_pixel is None:
+    chosen = berry_android.pick_from_picker(device.label, listed, berry)
+    if chosen is None:
         # An empty berry pocket is not a reason to keep the ball -- the Android
         # routine has always thrown without one.  Raising here left the picker
         # open over the encounter, so the caller's fallback flick went into the
@@ -2165,11 +2172,17 @@ async def use_nanab_berry(
             # thrown berry never catches anything.
             await swap_to_ball(device, artifact_dir)
         return
-    nanab_logical = [
-        round(nanab_pixel[0] * device.viewport[0] / picker_image.width),
-        round(nanab_pixel[1] * device.viewport[1] / picker_image.height),
+    kind, pixel = chosen
+    if kind != berry:
+        print(
+            f"[{device.label}] No {berry} berry in the bag; feeding a {kind} instead",
+            flush=True,
+        )
+    logical = [
+        round(pixel[0] * device.viewport[0] / picker_image.width),
+        round(pixel[1] * device.viewport[1] / picker_image.height),
     ]
-    await device.tap(nanab_logical)
+    await device.tap(logical)
     # The picker sheet takes about a second to slide away; flicking through it
     # feeds nothing and leaves the berry in hand for the throw.
     await asyncio.sleep(1.2)
@@ -2287,6 +2300,7 @@ async def run_once(
     dry_run: bool,
     use_nanab: bool = False,
     timed_mode: bool = False,
+    berry: str = "nanab",
 ) -> bool:
     ball = await wait_for_encounter(device, wait_seconds, artifact_dir, stream=stream)
     if dry_run:
@@ -2299,7 +2313,9 @@ async def run_once(
     # Anything but a ball left in hand has to be dealt with even when this
     # attempt did not ask for a berry -- otherwise the throw throws it.
     if use_nanab or not ball_in_hand(encounter_image, device.viewport):
-        await use_nanab_berry(device, ball, encounter_image, artifact_dir)
+        await use_nanab_berry(
+            device, ball, encounter_image, artifact_dir, berry=berry
+        )
         ball = await wait_for_encounter(device, 8.0, artifact_dir, stream=stream)
     straight_mode = bool(device.config.ios_device.get("straight_throw", False))
     single_shot = timed_mode or bool(

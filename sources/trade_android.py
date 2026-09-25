@@ -22,7 +22,7 @@ try:
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
-    print('Run "pip install -r requirements.txt" to install required packages.')
+    print('Run "pip install -r docs/requirements.txt" to install required packages.')
     exit(1)
 
 CONFIG_FILE_DIR  = '/storage/self/primary/'
@@ -451,7 +451,7 @@ def main():
 
 if __name__ == "__main__":
     from . import fleet_entrypoint
-    public_result = fleet_entrypoint.direct_module_operation('trade', 'trade_pokemon.py')
+    public_result = fleet_entrypoint.direct_module_operation('trade', 'trade.py')
     if public_result is not None:
         raise SystemExit(public_result)
 

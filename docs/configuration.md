@@ -27,7 +27,9 @@ Keep device-specific facts out of Python source: serials, UDIDs, trainer names a
 
 ## Multiple computers
 
-Set `POGO_MACHINE` to the current computer's configured machine name, or provide exactly one matching `hostnames` entry (or `local: true`). With multiple computers, each device profile must include its owning `machine`. The machine names are configuration aliases; they are not hardcoded hardware models.
+Set `POGO_MACHINE` to the current computer's configured machine name, or provide exactly one matching `hostnames` entry (or `local: true`). The machine names are configuration aliases; they are not hardcoded hardware models.
+
+A device profile's `machine` field is a fallback, not the routing decision. Before delegating an explicitly named device, the coordinator enumerates its own USB buses: a phone attached here runs here, whatever the field says. A phone this computer demonstrably does not have goes to the only other configured computer, or, with more than two, to the one whose probe reports it; peers are probed only when that is genuinely ambiguous, so a two-computer fleet never wakes a sleeping host to route. The `machine` field decides only what a probe could not: a bus that failed to answer, an unplugged phone, or discovery turned off with `POGO_DEVICE_DISCOVERY=off`. A device with neither an answer nor a `machine` field is an error naming both. `fleet.py owners` prints the whole picture and marks every field that disagrees with a cable. Trade and battle pairs are judged by where the phones actually are, so two phones on one computer pair even if their fields say otherwise.
 
 The optional `machines` map records each computer's local hostnames or SSH destination, its checkout directory, Python executable, and private configuration directory. The coordinator uses this information to route work. All configured computers participate by default; `--local` limits a command to the current computer. Worker mode prevents recursive delegation.
 

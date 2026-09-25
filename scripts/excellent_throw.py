@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Wait on manually opened Pokémon GO encounters and throw an Excellent curve."""
+"""Wait on manually opened Pokémon GO encounters and throw an Excellent curve.
+
+The day-to-day route is `catch.py --mode encounter` (or `play.py`), which uses
+the same throwers and feeds the Nanab; this stays for calibration flags such as
+--check and --probe-ring.
+"""
 
 from __future__ import annotations
 
@@ -11,12 +16,16 @@ import sys
 import threading
 from pathlib import Path
 
+# `python scripts/excellent_throw.py` puts scripts/ on the path, not the
+# checkout root that holds `sources`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from sources import excellent_throw_android, excellent_throw_ios, fleet_entrypoint
 
 
 def _has_android_devices() -> bool:
     """Return True when adb currently reports at least one connected Android."""
-    adb = Path(__file__).resolve().parent / "adb"
+    adb = Path(__file__).resolve().parent.parent / "adb"
     if not (adb.exists() and os.access(adb, os.X_OK)):
         adb_in_path = shutil.which("adb")
         if adb_in_path is None:
@@ -152,7 +161,7 @@ def main(arguments: list[str] | None = None) -> int:
         fleet_forwarded.insert(0, "--ios")
 
     if parsed.allmachines:
-        return fleet_entrypoint.run_all_machines("excellent_throw.py", fleet_forwarded)
+        return fleet_entrypoint.run_all_machines("scripts/excellent_throw.py", fleet_forwarded)
 
     if parsed.android and parsed.ios:
         print("Use only one platform selector: --android or --ios", file=sys.stderr)

@@ -538,7 +538,7 @@ class PreinstalledWDAFallbackTests(unittest.TestCase):
 
 
 class ExcellentRewardThrowTests(unittest.IsolatedAsyncioTestCase):
-    """The reward catch is thrown by excellent_throw.py's routine, not the flick.
+    """The reward catch is thrown by scripts/excellent_throw.py's routine, not the flick.
 
     The flick ends an encounter but catches almost nothing, so a set that paid
     out in a Pokemon used to spend four Great Balls and usually lose it anyway.
@@ -613,7 +613,9 @@ class ExcellentRewardThrowTests(unittest.IsolatedAsyncioTestCase):
         device.screenshot = AsyncMock(return_value=image)
         catch = [gbl_vision.OCRBox("CP 1219", 1.0, 300, int(1334 * 0.30), 120, 30)]
         card = [gbl_vision.OCRBox("GO BATTLE LEAGUE", 1.0, 235, 680, 246, 21)]
-        thrower = SimpleNamespace(throw=AsyncMock(return_value=True), close=MagicMock())
+        thrower = SimpleNamespace(
+            throw=AsyncMock(return_value=True), close=MagicMock(), refused=False
+        )
         with (
             patch.object(gbl_ios.gbl_vision, "recognize", side_effect=[catch, card]),
             patch.object(gbl_ios, "wait", new=AsyncMock()),
@@ -639,7 +641,9 @@ class ExcellentRewardThrowTests(unittest.IsolatedAsyncioTestCase):
         refused = gbl_ios.excellent_throw_ios.ExcellentThrowError(
             "The catch circle never entered the Excellent lock band; no throw was sent"
         )
-        thrower = SimpleNamespace(throw=AsyncMock(side_effect=refused), close=MagicMock())
+        thrower = SimpleNamespace(
+            throw=AsyncMock(side_effect=refused), close=MagicMock(), refused=False
+        )
         with (
             patch.object(gbl_ios.gbl_vision, "recognize", side_effect=[catch, card]),
             patch.object(gbl_ios, "wait", new=AsyncMock()),
@@ -655,6 +659,36 @@ class ExcellentRewardThrowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(done)
         device.trace_path.assert_awaited_once()
         thrower.close.assert_called_once()
+
+    async def test_a_catch_that_never_throws_is_walked_away_from(self) -> None:
+        # The SE's whole GBL day went on one Frillish: the circle would not lock
+        # and the fallback flick kept finding the Nanab still in hand, so no ball
+        # ever went, nothing counted against the budget, and the caller restarted
+        # the same plate for as long as the run lasted.  A cycle that throws
+        # nothing has to cost something, or the encounter cannot end.
+        device = self.device()
+        image = type("FakeImage", (), {"width": 750, "height": 1334})()
+        device.screenshot = AsyncMock(return_value=image)
+        catch = [gbl_vision.OCRBox("CP 685", 1.0, 300, int(1334 * 0.30), 120, 30)]
+        refused = gbl_ios.excellent_throw_ios.ExcellentThrowError(
+            "No catch circle was readable in 4 holds"
+        )
+        thrower = SimpleNamespace(
+            throw=AsyncMock(side_effect=refused), close=MagicMock(), refused=False
+        )
+        with (
+            patch.object(gbl_ios.gbl_vision, "recognize", return_value=catch),
+            patch.object(gbl_ios, "wait", new=AsyncMock()),
+            patch.object(gbl_ios, "open_excellent_thrower", return_value=thrower),
+            patch.object(gbl_ios, "throw_ball", new=AsyncMock(return_value=False)),
+        ):
+            done = await gbl_ios.take_reward_encounter(device)
+        self.assertFalse(done)
+        # Asked once, not once per read: the refusal is about this encounter.
+        thrower.throw.assert_awaited_once()
+        thrower.close.assert_called_once()
+        flee = gbl_ios.encounter_flee_point(device)
+        self.assertIn(flee, [call.args[0] for call in device.tap.await_args_list])
 
     async def test_a_set_paid_out_in_items_starts_no_stream(self) -> None:
         # Most sets pay out in dust and stardust.  Opening an MJPEG stream on
@@ -958,7 +992,10 @@ class LockedRewardTileTests(unittest.IsolatedAsyncioTestCase):
         for source in (Path(gbl.__file__).read_text(),
                        Path(gbl_ios.__file__).read_text()):
             start = source.index("Reward row will not move")
-            self.assertIn("row_scroll_spent = True", source[start - 400:start])
+            # Anywhere inside the branch will do. Measuring the gap in
+            # characters instead only says how much comment sits in between.
+            branch = source.rindex("REWARD_SCROLL_LIMIT", 0, start)
+            self.assertIn("row_scroll_spent = True", source[branch:start])
 
     async def test_android_scrolls_the_row_back_instead_of_pressing(self) -> None:
         f = self.screen()
@@ -2026,6 +2063,61 @@ class WalkBackFromTheMapTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn([360, 1412], taps)
 
 
+class AndroidLockedRewardTileTests(unittest.IsolatedAsyncioTestCase):
+    """The moto-g hit the SE's stall on the Android path, same day.
+
+    The row was scrolled past the tile the set earned, `locked_reward_tile` did
+    not catch the caption, so the leg took a locked tile, got the rank roster,
+    closed it, and took the same tile again until it was scrolled back by hand.
+    Closing the roster is not progress when the reward tap is what opened it.
+    """
+
+    async def test_a_reward_tap_that_only_opens_the_roster_is_not_taken_again(self):
+        tile = [360, 928]
+        messages: list[str] = []
+        profile = gbl_strategy.StrategyProfile(
+            gbl_strategy.BattleTeam(
+                (team_member('Noctowl'), team_member('Lanturn'),
+                 team_member('Whiscash'))
+            )
+        )
+        device = SimpleNamespace(
+            config={'GBL_MOVE_BTN': [360, 800]}, label='moto-g')
+        reads = [
+            ('orange', tile, None, []),
+            ('orange', tile, None, self.boxes('Pokemon available at your rank')),
+        ]
+        stop = RuntimeError('enough reads')
+
+        async def states(*_args, **_kwargs):
+            if not reads:
+                raise stop
+            return reads.pop(0)
+
+        with patch.object(gbl, 'read_screen',
+                          AsyncMock(return_value=as_frame(frame()))), \
+                patch.object(gbl, 'smart_screen_state', states), \
+                patch.object(gbl, 'rank_modal_visible', return_value=True), \
+                patch.object(gbl, 'tap', AsyncMock()), \
+                patch.object(gbl, 'wait', AsyncMock()), \
+                patch.object(gbl, 'log',
+                             lambda _device, *parts: messages.append(' '.join(
+                                 str(part) for part in parts))), \
+                patch.object(gbl_strategy, 'load_strategy_profile',
+                             lambda **kwargs: profile):
+            with self.assertRaises(RuntimeError):
+                await gbl.play_device(device, 1)
+        self.assertTrue(
+            any('only opened' in line for line in messages), messages)
+
+    @staticmethod
+    def boxes(*lines):
+        return [
+            gbl_vision.OCRBox(line, 1.0, 200, 600 + index * 40, 240, 24)
+            for index, line in enumerate(lines)
+        ]
+
+
 class OpenSetLeagueTests(unittest.IsolatedAsyncioTestCase):
     """A set that is already running is judged by the name on its party screen.
 
@@ -2279,6 +2371,25 @@ class IOSBattleStartingTests(unittest.IsolatedAsyncioTestCase):
             ("pill", [284, 1192], None, party),
             ("pill", [284, 1192], None, party),
         ]
+
+    async def test_a_reward_tap_that_only_opens_the_roster_is_not_taken_again(self):
+        # The SE's stall from 08:23: the row was scrolled so that only locked
+        # "N wins" tiles were whole, the colour scan took one, it opened the
+        # roster instead of paying out, closing the sheet left the row exactly
+        # as it was, and the same tile went again five seconds later.  Closing
+        # the sheet is not progress, so the point has to be remembered.
+        tile = [324, 928]
+        messages, _taps = await self.run_reads([
+            ("orange", tile, None, []),
+            ("orange", tile, None, self.boxes("Pokemon available at your rank")),
+        ])
+        with self.subTest("the roster is closed"):
+            self.assertTrue(any("Rank roster sheet" in line for line in messages))
+        with self.subTest("and the tile it came from is written off"):
+            self.assertTrue(
+                any("only opened the roster" in line for line in messages),
+                messages,
+            )
 
     async def test_the_frame_after_matchmaking_is_not_tapped_as_a_result(self):
         messages, taps = await self.run_reads(self.party_reads + [
@@ -2724,6 +2835,8 @@ class ChargedStaleFrameTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(gbl, 'shield_prompt_text',
                              lambda _boxes: reads == 1), \
                 patch.object(gbl, 'charged_prompt_from_frame',
+                             AsyncMock(return_value=None)), \
+                patch.object(gbl, 'encounter_behind_battle',
                              AsyncMock(return_value=None)), \
                 patch.object(gbl, 'ready_charged_discs', lambda _f: list(stale)), \
                 patch.object(gbl, 'fresh_charged_discs',
@@ -3181,7 +3294,7 @@ class RankModalTests(unittest.TestCase):
 
 
 class RewardThrowTests(unittest.IsolatedAsyncioTestCase):
-    """The reward catch is thrown by `excellent_throw.py`, berry and all.
+    """The reward catch is thrown by `scripts/excellent_throw.py`, berry and all.
 
     It used to be a second implementation of throwing that borrowed a few of
     that routine's helpers and reinvented the rest, and it inherited none of
@@ -3215,7 +3328,7 @@ class RewardThrowTests(unittest.IsolatedAsyncioTestCase):
         ended, run_once = await self.throw([True])
         self.assertTrue(ended)
         self.assertEqual(run_once.await_count, 1)
-        self.assertIs(run_once.await_args.kwargs["ring_hold"], True)
+        self.assertIs(run_once.await_args.kwargs["ring_hold"], False)
         self.assertIs(run_once.await_args.kwargs["dry_run"], False)
 
     async def test_every_throw_is_fed_a_nanab(self) -> None:
@@ -3511,3 +3624,132 @@ class MonkeyTransportTests(unittest.IsolatedAsyncioTestCase):
         # ppadb hands back plain devices and the tests hand back fakes; neither
         # should raise its way out of setup.
         self.assertIsNone(await gbl.open_monkey(SimpleNamespace(label='fake')))
+
+
+class DismissingRewardTapTests(unittest.IsolatedAsyncioTestCase):
+    """An end-of-set point that closes the card instead of paying the set out.
+
+    The GO BATTLE LEAGUE card's own dismiss control is drawn over the reward
+    row, so the tap that takes a reward and the tap that throws the whole set
+    away come off the same strip of screen.  On 10 Sep 2026 the SE picked the
+    wrong one and could not tell: it tapped [214, 596], landed on the map,
+    walked back through the pokeball and the BATTLE disc, read the same card,
+    picked the same point, and went round again -- eight times, then a stall
+    recovery, then eight more, for the whole of two legs with the set unclaimed.
+    Nothing in the picture separates the two controls, so the separation is what
+    the tap did: a point that put the phone on the map is not a reward.
+    """
+
+    REWARD = [428, 1192]      # the SE's [214, 596], in screenshot pixels
+
+    def test_the_same_point_is_refused_next_time(self) -> None:
+        self.assertTrue(
+            gbl_ios.reward_refused(self.REWARD, [self.REWARD], 750))
+
+    def test_a_read_that_moves_a_little_is_the_same_button(self) -> None:
+        """OCR does not put a label back in exactly the same place twice."""
+        moved = [self.REWARD[0] + 9, self.REWARD[1] - 7]
+        self.assertTrue(gbl_ios.reward_refused(moved, [self.REWARD], 750))
+
+    def test_the_tile_next_door_is_still_pressed(self) -> None:
+        """Refusing one control must not write off the row it sits on.
+
+        The SE's tiles are 0.22w apart, measured off its own card at 750x1334:
+        checkmarks at x=155, 318, 480, 634.
+        """
+        for x in (155, 318, 480, 634):
+            if abs(x - self.REWARD[0]) <= 750 * gbl_ios.DISMISSING_REWARD_RADIUS:
+                continue
+            with self.subTest(x=x):
+                self.assertFalse(
+                    gbl_ios.reward_refused([x, 1192], [self.REWARD], 750))
+
+    def test_nothing_is_refused_before_anything_has_gone_wrong(self) -> None:
+        self.assertFalse(gbl_ios.reward_refused(self.REWARD, [], 750))
+
+    async def test_a_refused_point_is_not_named_a_reward(self) -> None:
+        """The state read hands the card on rather than pressing it again."""
+        width, height = 750, 1334
+        boxes = [
+            gbl_vision.OCRBox("GO BATTLE LEAGUE", 1.0, 235, 530, 246, 21),
+            gbl_vision.OCRBox("COLLECT", 1.0, 391, 1250, 74, 24),
+        ]
+        reward = gbl_vision.reward_point(boxes, width, height)
+        self.assertIsNotNone(reward)
+        image = gbl.frame_image(as_frame(frame(width, height)))
+        profile = gbl_strategy.StrategyProfile(
+            gbl_strategy.BattleTeam(
+                (team_member('Noctowl'), team_member('Lanturn'),
+                 team_member('Whiscash'))
+            )
+        )
+        with patch.object(gbl_ios.gbl_vision, "recognize", return_value=boxes):
+            state, _point, _label, _boxes = await gbl_ios.smart_screen_state(
+                image, profile, probe_unknown=True, refused_rewards=[reward])
+        self.assertNotEqual(state, "orange")
+
+    async def test_a_reward_that_lands_on_the_map_is_never_taken_again(self) -> None:
+        """The loop's half: notice the map, remember the point, pass it on."""
+        seen: list[list[list[int]]] = []
+        taps: list[list[int]] = []
+        stop = RuntimeError("enough reads")
+
+        async def fake_state(_image, _profile, **kwargs):
+            # Stands in for the reward branches of `smart_screen_state`, which
+            # apply the same filter; the loop's job here is to fill the list
+            # they read, and to do it before the next read asks.
+            refused = [list(point) for point in kwargs["refused_rewards"]]
+            seen.append(refused)
+            if gbl_ios.reward_refused(self.REWARD, refused, 750):
+                raise stop
+            self.assertLess(len(seen), 5, "the card was offered forever")
+            return "orange", list(self.REWARD), None, []
+
+        class FakeDevice:
+            label = "Second iPhone (SE)"
+            viewport = {"width": 375, "height": 667}
+            config = SimpleNamespace(
+                ios_device={},
+                coordinates={"GBL_MOVE_BTN": [142, 391]},
+                delay_modifier=0.0,
+            )
+
+            def scale_point(self, point, baseline=(375, 667)):
+                return list(point)
+
+            def logical_point(self, pixel, image):
+                return [pixel[0] * 375 // image.width,
+                        pixel[1] * 667 // image.height]
+
+            def fraction_point(self, x, y):
+                return [int(375 * x), int(667 * y)]
+
+            async def screenshot(self):
+                return gbl.frame_image(as_frame(frame(750, 1334)))
+
+            async def tap(self, point):
+                taps.append(point)
+
+        profile = gbl_strategy.StrategyProfile(
+            gbl_strategy.BattleTeam(
+                (team_member('Noctowl'), team_member('Lanturn'),
+                 team_member('Whiscash'))
+            )
+        )
+        with (
+            patch.object(gbl_ios, "smart_screen_state", fake_state),
+            patch.object(gbl_ios, "wait", AsyncMock()),
+            patch.object(gbl_ios, "save_reward_screen", return_value=None),
+            patch.object(gbl_ios.gbl_home_recovery, "on_map", return_value=True),
+            patch.object(gbl_ios.gbl_home_recovery, "main_menu_open",
+                         return_value=False),
+        ):
+            with self.assertRaises(RuntimeError):
+                await gbl_ios.play_device(FakeDevice(), 1, profile)
+
+        # The first read knows nothing; the read straight after the tap that
+        # closed the card already knows not to offer that point again.
+        self.assertEqual(seen, [[], [self.REWARD]])
+        # And it was pressed the once, rather than every five seconds until the
+        # leg was written off.
+        self.assertEqual(taps.count([214, 596]), 1)

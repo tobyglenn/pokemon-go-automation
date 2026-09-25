@@ -12,6 +12,10 @@ import argparse
 import sys
 from typing import Sequence
 
+from pathlib import Path
+# `python scripts/inventory_scanner_ios.py` puts scripts/ on the path, not the checkout root
+# that holds `sources`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sources import gbl_evaluator, inventory_scanner_ios
 
 

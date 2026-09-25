@@ -7,9 +7,9 @@ import os
 from pathlib import Path
 import sys
 
-COMMANDS = {"gifts": "send_gifts", "friends": "add_friends", "gbl": "battle_league",
-            "trades": "trade_pokemon", "transfers": "transfer_pokemon", "berries": "feed_berries",
-            "gbl-day": "gbl_day", "status": "fleet"}
+COMMANDS = {"gifts": "gift", "friends": "add_friends", "gbl": "gbl",
+            "trades": "trade", "transfers": "luckytrash", "berries": "scripts.berry",
+            "gbl-day": "gbl_day", "catch": "catch", "play": "play", "status": "scripts.fleet", "owners": "scripts.fleet"}
 
 def init_config(directory: Path | None = None) -> int:
     from sources.config_paths import private_config_dir
@@ -48,7 +48,8 @@ def main(arguments=None) -> int:
             setup.add_argument("--directory", type=Path)
             return init_config(setup.parse_args(args.arguments).directory)
         module = importlib.import_module(COMMANDS[args.command])
-        forwarded = (["status"] if args.command == "status" else []) + args.arguments
+        # The fleet dispatcher takes its own subcommand name first.
+        forwarded = ([args.command] if COMMANDS[args.command] == "scripts.fleet" else []) + args.arguments
         return module.main(forwarded)
     except KeyboardInterrupt:
         print("Automation cancelled", file=sys.stderr)

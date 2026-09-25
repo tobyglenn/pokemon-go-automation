@@ -40,6 +40,8 @@ class HealthTests(unittest.TestCase):
                         ios_wda_cleanup, "read_wda_status", return_value=status()),
                     mock.patch.object(
                         ios_wda_cleanup, "host_runner_alive", return_value=alive),
+                    mock.patch.object(
+                        ios_wda_cleanup, "wda_screenshot_authorized", return_value=True),
                 ):
                     self.assertEqual(
                         ios_wda_cleanup.wda_health("PHONE-A", 8100), expected)
@@ -65,6 +67,24 @@ class HealthTests(unittest.TestCase):
             mock.patch.object(ios_wda_cleanup, "read_wda_status_payload", return_value=payload),
             mock.patch.object(ios_wda_cleanup, "host_runner_alive", return_value=True),
             mock.patch.object(ios_wda_cleanup, "wda_session_alive", return_value=True),
+        ):
+            self.assertEqual(ios_wda_cleanup.wda_health("PHONE-A", 8100), "live")
+
+    def test_unauthorized_screenshot_is_detached_without_session(self) -> None:
+        payload = {"value": status()}
+        with (
+            mock.patch.object(ios_wda_cleanup, "read_wda_status_payload", return_value=payload),
+            mock.patch.object(ios_wda_cleanup, "host_runner_alive", return_value=True),
+            mock.patch.object(ios_wda_cleanup, "wda_screenshot_authorized", return_value=False),
+        ):
+            self.assertEqual(ios_wda_cleanup.wda_health("PHONE-A", 8100), "detached")
+
+    def test_authorized_screenshot_is_live_without_session(self) -> None:
+        payload = {"value": status()}
+        with (
+            mock.patch.object(ios_wda_cleanup, "read_wda_status_payload", return_value=payload),
+            mock.patch.object(ios_wda_cleanup, "host_runner_alive", return_value=True),
+            mock.patch.object(ios_wda_cleanup, "wda_screenshot_authorized", return_value=True),
         ):
             self.assertEqual(ios_wda_cleanup.wda_health("PHONE-A", 8100), "live")
 

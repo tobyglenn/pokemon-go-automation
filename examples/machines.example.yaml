@@ -1,4 +1,6 @@
 # Copy to your private POGO_CONFIG_DIR and calibrate before running.
+# A device's own `machine` field is only the fallback: the coordinator probes the
+# USB buses and sends each named phone to the computer it is really plugged into.
 machines:
   controller:
     hostnames:

@@ -34,6 +34,9 @@ DEFAULT_CHECK_SCREENSHOT = ARTIFACT_ROOT / "ios-berry-check.png"
 LOCK_DIR = Path("/tmp/pokemon-go-fleet")
 REQUIRED_COORDINATES = {"BERRY_BTN", "NEXT_MON_FROM", "NEXT_MON_TO"}
 REQUIRED_BANDS = {"CARD_BAND_Y", "BERRY_DISC_Y"}
+# `--if-feed-screen` exits with this, untouched, when the phone is parked on
+# something else, so `gift.py` can hand the phone to the gift worker instead.
+NOT_A_FEED_SCREEN = 3
 
 
 class IOSBerryError(RuntimeError):
@@ -713,6 +716,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="connect and validate without tapping")
     parser.add_argument("--screenshot", type=Path, default=DEFAULT_CHECK_SCREENSHOT)
     parser.add_argument("--fleet-child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--if-feed-screen", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -734,6 +738,10 @@ async def async_main(args: argparse.Namespace, config: RuntimeConfig) -> int:
             f"name_ink={ink}; feed_screen={matched}; berry={found}; gold_share={share}",
             flush=True,
         )
+        if args.if_feed_screen and (not matched or android_berry.encounter_showing(*raw_frame(image))):
+            print("Not a gym feeding screen; leaving this phone to the gifts", flush=True)
+            normal_exit = True
+            return NOT_A_FEED_SCREEN
         if args.carousel_check:
             if await card_fingerprint(device) is None:
                 raise IOSBerryError("Defender card could not be read; carousel was not moved")
@@ -805,7 +813,7 @@ if __name__ == "__main__":
     try:
         if os.environ.get("POKEMON_FLEET_CHILD") == "1" or "--fleet-child" in sys.argv:
             raise SystemExit(main())
-        raise SystemExit(fleet_entrypoint.run_operation('berries', 'feed_berries.py'))
+        raise SystemExit(fleet_entrypoint.run_operation('berries', 'scripts/berry.py'))
     except KeyboardInterrupt:
         raise SystemExit(130)
     except (RuntimeError, OSError, ValueError) as exc:

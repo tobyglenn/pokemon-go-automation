@@ -4,6 +4,7 @@ from tests import support as _test_support
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -48,6 +49,11 @@ class ParsePlayedTests(unittest.TestCase):
     def test_a_leg_that_says_nothing_played_nothing(self) -> None:
         self.assertEqual(gbl_day.parse_played(""), {})
 
+    def test_daily_cap_reached_is_detected(self) -> None:
+        output = "[Second iPhone (SE)] Daily battle cap reached; stopping after 28 battle(s)\n[Second iPhone (SE)] Finished: 28 battle(s)"
+        self.assertTrue(gbl_day.parse_cap_reached(output))
+        self.assertFalse(gbl_day.parse_cap_reached("[android-two] Finished: 5 battle(s)"))
+
 
 class LegCommandTests(unittest.TestCase):
     def test_leg_runs_the_public_command_for_one_phone(self) -> None:
@@ -60,6 +66,30 @@ class LegCommandTests(unittest.TestCase):
     def test_trace_directory_is_forwarded(self) -> None:
         command = gbl_day.leg_command("android-two", 5, Path("/tmp/t"))
         self.assertEqual(command[-2:], ["--trace", "/tmp/t"])
+
+
+class SupervisedLegTests(unittest.TestCase):
+    """A leg is told who it answers to, so it cannot outlive this supervisor.
+
+    The 2026-09-21 razr orphan: `start_new_session=True` keeps a closed
+    terminal from reaching the leg, and that also keeps a dead supervisor from
+    reaching it.  The leg checks the pid itself -- see `fleet_watchdog`.
+    """
+
+    def test_the_leg_is_handed_this_process_id(self) -> None:
+        environment = gbl_day.supervised_environment({"PATH": "/usr/bin"}, pid=4242)
+        self.assertEqual(environment["POKEMON_SUPERVISOR_PID"], "4242")
+
+    def test_the_rest_of_the_environment_survives(self) -> None:
+        """The leg needs PATH for adb; overwriting the environment blinds it."""
+        environment = gbl_day.supervised_environment({"PATH": "/usr/bin"}, pid=1)
+        self.assertEqual(environment["PATH"], "/usr/bin")
+
+    def test_the_default_is_the_running_supervisor(self) -> None:
+        self.assertEqual(
+            gbl_day.supervised_environment()["POKEMON_SUPERVISOR_PID"],
+            str(os.getpid()),
+        )
 
 
 class DayLoopTests(unittest.IsolatedAsyncioTestCase):
@@ -92,6 +122,21 @@ class DayLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress.played, 4)
         self.assertEqual(progress.legs, 3)
         self.assertIn("played nothing", progress.stopped)
+
+    async def test_daily_cap_reached_completes_the_day(self) -> None:
+        async def run(device: str, count: int) -> gbl_day.LegResult:
+            return gbl_day.LegResult(
+                played={device: 25},
+                last_line="Finished: 25 battle(s)",
+                cap_reached=True,
+            )
+
+        progress = gbl_day.DeviceProgress(name="android-two", allotment=40)
+        await gbl_day.play_device_day(progress, run)
+        self.assertEqual(progress.played, 25)
+        self.assertEqual(progress.legs, 1)
+        self.assertTrue(progress.done)
+        self.assertEqual(progress.stopped, "daily battle cap reached")
 
     async def test_one_good_leg_clears_an_earlier_stall(self) -> None:
         progress = gbl_day.DeviceProgress(name="android-two", allotment=10)

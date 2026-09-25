@@ -14,6 +14,10 @@ Gift cycle (start on an opened friend's gift screen, or on the friends list):
   4. Tap SORT_BTN twice to re-sort the friends list
   5. Tap NEXT_FRIEND_BTN to open the next friend, back to 1.
 
+Sending is the half that runs for every friend, for as long as the gift bag
+holds gifts. Opening is selective: step 1 is skipped unless the friend's row
+on the list was one of the plain ones — see "Choosing the row" below.
+
 The cycle is defined by GIFT_STEPS below; reorder that list to match the
 order the buttons appear in on your device.
 
@@ -25,6 +29,7 @@ from . import config_paths
 import argparse
 import asyncio
 import re
+import shutil
 import struct
 import sys
 import time
@@ -41,7 +46,7 @@ try:
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
-    print('Run "pip install -r requirements.txt" to install required packages.')
+    print('Run "pip install -r docs/requirements.txt" to install required packages.')
     exit(1)
 
 # The map and the main menu are two of the screens a lost cycle ends up on, and
@@ -71,6 +76,17 @@ class GiftCycleResult:
     opened: bool
     sent: bool
     outgoing_available: bool
+    # Read off the row NEXT_FRIEND_BTN opened at the end of this cycle, and
+    # used by the next one: the row is on the friends list, and the gift is
+    # opened a cycle later, so the answer has to be carried across.
+    open_next: bool = True
+
+
+@dataclass(frozen=True)
+class FriendRowChoice:
+    point: list[int]
+    open_allowed: bool
+    notes: tuple[str, ...] = ()
 
 
 # One full gift cycle, in order. Waits for the game server get
@@ -194,6 +210,69 @@ SEND_GIFT_SAMPLE_KEYS = (
     'SEND_GIFT_3_BUTTON_SAMPLE',
 )
 
+# --- Choosing the row ---
+# NEXT_FRIEND_BTN is the top row of the freshly re-sorted list, and the cycle
+# used to tap its configured point without looking. Two things on the list are
+# worth reading first, so the row is picked from a screenshot instead:
+#
+#   * A friend with a remote trade in flight is pinned above the sort. The
+#     android-one has had "Waiting for response to Lucky Remote Trade." at the
+#     top for two days: it has no gift to open and cannot receive one, so every
+#     cycle opened it, found nothing to do and closed it again, and the run
+#     burned its idle cycles on the same friend. Those rows are stepped over.
+#   * The pale blue halo around a friend's avatar. Gifts are only opened from
+#     rows without it.
+#
+# Both are measured as fractions of the picture, never of the screen, so the
+# same numbers hold on the android-one (1316x2560, rows 420px tall) and on
+# the android-three (1224x2992, rows 391px).
+
+# Rows are separated by a pale grey rule across the list. Measured on both
+# phones: the rule reads 217-234 as a mean of the three channels with every
+# channel within 12 of the others, and the picture 12px above it is white.
+# Finding the rules beats assuming a pitch — the two phones do not share one.
+ROW_RULE_X          = (0.10, 0.70)   # of the width; clear of dates and avatars
+ROW_RULE_LEVEL      = (200, 240)
+ROW_RULE_MAX_SPREAD = 12
+ROW_RULE_WHITE_GAP  = 12             # how far above a rule to test for white
+ROW_RULE_MIN_WHITE  = 245
+ROW_RULE_MIN_GAP    = 20             # an anti-aliased rule covers two lines
+ROW_SCAN_TOP        = 0.08           # below the ME/FRIENDS/SOCIAL header
+ROW_MIN_HEIGHT      = 0.08           # of the picture; real rows are 0.14-0.16
+# The configured point is the first row's centre, so a first row that lands
+# somewhere else means the rules were misread — a part-scrolled list, a phone
+# whose panel is drawn differently. The whole read is dropped rather than
+# trusted, and the configured point is tapped exactly as before.
+ROW_MATCH_TOLERANCE = 0.5            # of a row height
+
+# The halo. Sampled in the two strips either side of the avatar, and both must
+# glow: an avatar photo with a blue background can fill one of them on its own.
+# Measured over a row — haloed 0.11-0.19 of the pixels in each strip, plain
+# 0.000-0.012.
+HALO_X = ((0.04, 0.09), (0.21, 0.26))
+HALO_INSET = 0.1            # of the row height, off each end, to clear the rules
+HALO_MIN_FRACTION = 0.05
+# Which half of the list gifts are taken from. The halo is the cue, not the
+# meaning: this is "the blue hue around their name", and the friends without it
+# are the ones whose gifts get opened. One constant because it is the one thing
+# here that is a choice rather than a measurement — flip it and the halo picks
+# the friends to open from instead, with everything else unchanged.
+OPEN_FROM_HALOED_ROWS = False
+
+# A gift left unopened is a postcard sitting over the friend's profile, so it
+# is closed before the send half of the cycle reaches the profile underneath.
+POSTCARD_CLOSE_DELAY = 2
+
+# The countdown a row waiting on a remote trade carries where the other rows
+# print a grey "Today"/"Yesterday"/"2+ days ago". Orange there is the whole
+# test: measured 0.033 of the box on the android-one's pinned Lucky Remote
+# Trade row and 0.0000 on all nine other rows across both phones. The box stops short of
+# x 0.70 because a Lucky Friend's orange sparkles sit just after their name, at
+# 0.61-0.64, and those say nothing about a trade being in flight.
+TRADE_TIMER_X = (0.70, 0.99)
+TRADE_TIMER_Y = (0.03, 0.32)         # of the row height
+TRADE_TIMER_MIN_FRACTION = 0.010
+
 # Steps that are only correct on the friends list. Tapping these anywhere else
 # is what starts a battle, so they are never sent blind.
 NEEDS_FRIENDS_LIST = {'SORT_BTN', 'NEXT_FRIEND_BTN'}
@@ -238,8 +317,16 @@ MAP           = 'the map'
 # unusable — so a half-mapped phone still gets the part of the step it can make.
 STEP_HOME: dict[str, tuple[tuple[tuple[str, ...], ...], ...]] = {
     # The panel is up on ME or SOCIAL. One tap on the FRIENDS tab.
+    #
+    # The X is here because this name is not certain: the panel test is a bright,
+    # unsaturated top band, and a friend profile headed in a pale buddy colour
+    # passes it. That happened on android-three, whose leg stopped at nine cycles
+    # with the tab tap landing on nothing. The X closes whichever of the two it
+    # really is — the profile to the list, the panel to the map — and the map
+    # knows its own way back, so neither is a dead end.
     FRIENDS_PANEL: (
         (('FRIENDS_TAB_BTN',),),
+        (('CLOSE_BTN',),),
     ),
     # "A friend's screen" is really a stack, and every screen in it closes with
     # the same X: NEXT_FRIEND_BTN opens the *gift* over the profile, and the
@@ -684,6 +771,155 @@ async def current_screen(device: DeviceAsyncWrapper) -> str | None:
     return None if frame is None else name_screen(frame, device.config)
 
 
+def _row_rule(frame: tuple[int, int, int, bytes], y: int) -> bool:
+    """True if line `y` is one of the pale rules between friends list rows."""
+    width, height, offset, data = frame
+    x0, x1 = (int(width * f) for f in ROW_RULE_X)
+    low, high = ROW_RULE_LEVEL
+    total = count = 0
+    for x in range(x0, x1, 8):
+        i = offset + (y * width + x) * 4
+        red, green, blue = data[i], data[i + 1], data[i + 2]
+        if max(red, green, blue) - min(red, green, blue) > ROW_RULE_MAX_SPREAD:
+            return False
+        total += (red + green + blue) / 3
+        count += 1
+    if not count or not low <= total / count <= high:
+        return False
+    # The rule is the *bottom* of a row, and what is above it is the row's white
+    # background. Without this the dark teal tab underline and any pale band in
+    # an avatar would be read as rules.
+    above = max(y - ROW_RULE_WHITE_GAP, 0)
+    total = count = 0
+    for x in range(x0, x1, 8):
+        i = offset + (above * width + x) * 4
+        total += (data[i] + data[i + 1] + data[i + 2]) / 3
+        count += 1
+    return bool(count) and total / count > ROW_RULE_MIN_WHITE
+
+
+def friend_rows(frame: tuple[int, int, int, bytes]) -> list[tuple[int, int]]:
+    """The top and bottom line of each whole friend row on the list, top first.
+
+    From the picture rather than the screen, so a letterboxed phone measures
+    the same as one that fills its panel — the same reason the header guard
+    above works that way.
+    """
+    width, height, offset, data = frame
+    top, bottom = picture_rows(width, height, offset, data)
+    span = bottom - top
+    rules: list[int] = []
+    for y in range(top + int(span * ROW_SCAN_TOP), bottom):
+        if rules and y - rules[-1] < ROW_RULE_MIN_GAP:
+            continue
+        if _row_rule(frame, y):
+            rules.append(y)
+    least = int(span * ROW_MIN_HEIGHT)
+    return [(a, b) for a, b in zip(rules, rules[1:]) if b - a >= least]
+
+
+def _band_fraction(frame, x_range, y_range, test) -> float:
+    """How much of a box matches `test`, as a fraction of the pixels sampled."""
+    width, _, offset, data = frame
+    x0, x1 = (int(width * f) for f in x_range)
+    matched = total = 0
+    for y in range(*y_range, 2):
+        for x in range(x0, x1, 2):
+            i = offset + (y * width + x) * 4
+            total += 1
+            matched += test(data[i], data[i + 1], data[i + 2])
+    return matched / total if total else 0.0
+
+
+def _halo_pixel(red: int, green: int, blue: int) -> bool:
+    """The pale blue of the glow, measured at (213,250,252) on both phones."""
+    return blue >= 200 and blue - red >= 18 and abs(green - blue) <= 30 and red >= 140
+
+
+def _trade_orange(red: int, green: int, blue: int) -> bool:
+    """The orange the game prints a remote trade's countdown in."""
+    return red >= 200 and 80 <= green <= 200 and blue <= 130 and red - blue >= 90
+
+
+def row_is_highlighted(frame, row: tuple[int, int]) -> bool:
+    """True when the friend's avatar is ringed by the pale blue halo."""
+    top, bottom = row
+    inset = int((bottom - top) * HALO_INSET)
+    band = (top + inset, bottom - inset)
+    # Both strips, and the weaker one decides: an avatar photo on a blue
+    # background fills the strip beside it on its own, and a halo never
+    # reaches only one side.
+    return min(
+        _band_fraction(frame, strip, band, _halo_pixel) for strip in HALO_X
+    ) >= HALO_MIN_FRACTION
+
+
+def row_waits_on_a_trade(frame, row: tuple[int, int]) -> bool:
+    """True for a row pinned above the sort by a remote trade in flight."""
+    top, bottom = row
+    height = bottom - top
+    band = (top + int(height * TRADE_TIMER_Y[0]), top + int(height * TRADE_TIMER_Y[1]))
+    fraction = _band_fraction(frame, TRADE_TIMER_X, band, _trade_orange)
+    return fraction >= TRADE_TIMER_MIN_FRACTION
+
+
+def choose_friend_row(frame, config: CONFIG) -> FriendRowChoice:
+    """Which row NEXT_FRIEND_BTN should open, and whether to open its gift.
+
+    Falls back to the configured point — the behaviour before any of this —
+    whenever the list does not read the way it should, rather than tapping a
+    row worked out from rules it may have misread.
+    """
+    point = config['NEXT_FRIEND_BTN']
+    rows = friend_rows(frame)
+    if not rows:
+        return FriendRowChoice(point, True)
+    top, bottom = rows[0]
+    if abs((top + bottom) / 2 - point[1]) > (bottom - top) * ROW_MATCH_TOLERANCE:
+        return FriendRowChoice(
+            point, True,
+            ('The list did not read as rows under NEXT_FRIEND_BTN; '
+             'tapping the configured point',),
+        )
+    notes: list[str] = []
+    for row in rows:
+        if row_waits_on_a_trade(frame, row):
+            notes.append('Stepping over a row waiting on a remote trade')
+            continue
+        highlighted = row_is_highlighted(frame, row)
+        open_allowed = highlighted == OPEN_FROM_HALOED_ROWS
+        if not open_allowed:
+            notes.append(
+                "Leaving this friend's gift: their row is "
+                + ('highlighted' if highlighted else 'plain')
+            )
+        return FriendRowChoice(
+            [point[0], (row[0] + row[1]) // 2], open_allowed, tuple(notes)
+        )
+    # Every row on screen is waiting on a trade. Two pinned rows has not been
+    # seen; a whole screen of them is a screen this cannot read, so it goes
+    # back to the configured point rather than inventing a row below the fold.
+    notes.append('Every visible row is waiting on a trade; tapping the top one')
+    return FriendRowChoice(point, True, tuple(notes))
+
+
+async def open_next_friend(device: DeviceAsyncWrapper) -> bool:
+    """Opens the next friend, and says whether their gift may be opened.
+
+    An unreadable screen, or the guard switched off, taps the configured point
+    and allows the open: standing down has to leave the cycle exactly as it was.
+    """
+    frame = await screencap_raw(device) if GUARD else None
+    choice = (
+        choose_friend_row(frame, device.config) if frame is not None
+        else FriendRowChoice(device.config['NEXT_FRIEND_BTN'], True)
+    )
+    for note in choice.notes:
+        log(device, f'  {note}')
+    await tap(device, choice.point)
+    return choice.open_allowed
+
+
 def is_challenge_modal(width: int, height: int, offset: int, data: bytes) -> bool:
     """True if a white "Challenge ... to a battle?" panel covers the league list."""
     x0, x1 = MODAL_SAMPLE_X
@@ -782,7 +1018,10 @@ async def walk_home(device: DeviceAsyncWrapper) -> bool:
     tried_battle_exit = False
     attempts: dict[str, int] = {}
     for _ in range(WALK_HOME_STEPS):
-        screen = await current_screen(device)
+        # Read once and keep the picture: a walk that gives up is the one screen
+        # nobody can see afterwards, and naming it wrong is how it gives up.
+        frame = await screencap_raw(device)
+        screen = None if frame is None else name_screen(frame, device.config)
         if screen is None:
             # Unreadable screen: the guard stands down here exactly as it does
             # in ensure_screen, rather than tapping on a picture it cannot see.
@@ -811,6 +1050,7 @@ async def walk_home(device: DeviceAsyncWrapper) -> bool:
                     continue
             missing = ' or '.join(
                 key for step in steps[start:] for keys in step for key in keys)
+            save_frame(device, frame, 'walk-home-stuck')
             log(device, f'  Out of ways off {screen}'
                         + (f' (no {missing} in the config)' if missing else ''))
             return False
@@ -824,7 +1064,9 @@ async def walk_home(device: DeviceAsyncWrapper) -> bool:
     return False
 
 
-async def ensure_screen(device: DeviceAsyncWrapper, step_name: str):
+async def ensure_screen(
+    device: DeviceAsyncWrapper, step_name: str
+) -> bool | None:
     """Gets the right screen up before `step_name` is tapped.
 
     Both of the guarded steps are reached from the friends list — SORT_BTN and
@@ -832,23 +1074,28 @@ async def ensure_screen(device: DeviceAsyncWrapper, step_name: str):
     NEXT_FRIEND_BTN opens — so recovery is one walk home, plus that one tap for
     the steps that want a friend's screen. Raises rather than tapping a button
     on the wrong screen.
+
+    Returns whether the friend it opened may have their gift opened, or None
+    when it opened nobody: the friend this walks back to is not the one the
+    cycle read off the list, so the cycle takes the answer from here instead.
     """
     want_list = step_name in NEEDS_FRIENDS_LIST
     screen = await current_screen(device)
     if screen is None:
-        return
+        return None
     if screen == (FRIENDS_LIST if want_list else FRIEND_SCREEN):
-        return
+        return None
     where = FRIENDS_LIST if want_list else FRIEND_SCREEN
     log(device, f'  Not on {where} for {step_name} — walking back')
     if await walk_home(device):
+        opened = None
         if not want_list:
             # Home is the friends list either way; a friend's screen is one tap
             # further on, and it is the tap the cycle would have made anyway.
-            await tap(device, device.config['NEXT_FRIEND_BTN'])
+            opened = await open_next_friend(device)
             await asyncio.sleep(GUARD_RECOVER_DELAY)
         log(device, f'  Back on {where}')
-        return
+        return opened
     # Refusing here is the whole point: SORT_BTN on a friend's screen is BATTLE.
     raise AutoGifterError(
         f'Could not get back to {where} for {step_name} — stopping instead of '
@@ -866,16 +1113,37 @@ async def gift_sequence(
     *,
     all_mode: bool = False,
     outgoing_available: bool = True,
+    open_allowed: bool = True,
 ) -> GiftCycleResult:
-    """Run one cycle, detecting the same active actions as the iPhone runner."""
+    """Run one cycle, detecting the same active actions as the iPhone runner.
+
+    `open_allowed` is last cycle's read of this friend's row on the list. The
+    send half of the cycle does not consult it: gifts go out to every friend
+    who can receive one, for as long as the bag has gifts in it.
+    """
     opened = False
     sent = False
     skip_send = False
+    open_next = True
     for step in GIFT_STEPS:
         if GUARD and step.name in NEEDS_FRIENDS_LIST | NEEDS_FRIEND_SCREEN:
-            await ensure_screen(device, step.name)
+            reopened = await ensure_screen(device, step.name)
+            if reopened is not None:
+                open_allowed = reopened
 
-        if all_mode and step.name == 'OPEN_BTN':
+        if step.name == 'NEXT_FRIEND_BTN' and GUARD:
+            # The one step that picks its own point: it steps over a friend
+            # pinned by a remote trade, and reads the halo off the row it does
+            # open for the next cycle's OPEN_BTN.
+            log(device, 'Sending', step.name)
+            open_next = await open_next_friend(device)
+            await wait(step.delay_after, step.use_delay_modifier)
+            continue
+
+        if step.name == 'OPEN_BTN' and (all_mode or not open_allowed):
+            # Read for two reasons: whether there is a gift worth opening, and
+            # whether the gift screen is in the way when the row said to leave
+            # the gift alone.
             available = await colored_action_available(device, device.config[step.name])
             if available is None:
                 await asyncio.sleep(0.5)
@@ -885,7 +1153,20 @@ async def gift_sequence(
             if not available:
                 log(device, 'No incoming gift on friend; continuing Send Gift')
                 continue
-            opened = True
+            if not open_allowed:
+                # Tapping the row opens the unopened gift full screen -- the
+                # postcard and its OPEN button, not the friend's profile. Just
+                # walking past the open leaves that screen up, so SEND_GIFT_BTN
+                # lands on the postcard photo and SEND is read off the wrong
+                # screen as unlit, which is how android-one called its full gift
+                # bag empty. Its X drops to the profile, where SEND GIFT is, and
+                # the gift stays unopened -- checked on android-one.
+                log(device, 'Leaving this gift unopened; closing it')
+                await tap(device, device.config['CLOSE_BTN'])
+                await wait(POSTCARD_CLOSE_DELAY, True)
+                continue
+            if all_mode:
+                opened = True
 
         if all_mode and step.name == 'SEND_GIFT_BTN':
             available = await send_gift_action_available(device)
@@ -922,7 +1203,7 @@ async def gift_sequence(
 
         if all_mode and step.name == 'OPEN_BTN':
             await open_through_bag_full_notice(device)
-    return GiftCycleResult(opened, sent, outgoing_available)
+    return GiftCycleResult(opened, sent, outgoing_available, open_next)
 
 
 async def gift_process_one(
@@ -932,6 +1213,9 @@ async def gift_process_one(
     done = 0
     idle_cycles = 0
     unlit_cycles = 0
+    # The first cycle starts on a friend nobody read off the list — whoever the
+    # phone was left on — so it opens whatever it finds, as it always has.
+    open_allowed = True
     await pointer(device, True)
     try:
         for i in range(1, n + 1):
@@ -941,7 +1225,10 @@ async def gift_process_one(
             # answer forward. A cycle that found SEND unlit is the one that has
             # to be repeated to find out why, and skipping the send in it would
             # guarantee the same answer.
-            result = await gift_sequence(device, all_mode=all_mode)
+            result = await gift_sequence(
+                device, all_mode=all_mode, open_allowed=open_allowed
+            )
+            open_allowed = result.open_next
             done += 1
             if all_mode:
                 unlit_cycles = 0 if result.outgoing_available else unlit_cycles + 1
@@ -1032,6 +1319,16 @@ async def setup() -> list[DeviceAsyncWrapper]:
     is reported and dropped rather than aborting the rest — one phone with a
     stale config should not stop the others from running.
     """
+    # Taps go through the adb *server*, screen reads through the adb *binary*,
+    # so a missing binary costs the run every picture and nothing else: guards
+    # stand down, SEND is read as unlit, and a leg reports an empty gift bag
+    # after tapping its way blind through three cycles. That happened on
+    # android-three, launched over ssh without the platform-tools directory on
+    # PATH. It is worth one look up front to say so instead.
+    if shutil.which(ADB_BINARY) is None:
+        raise AutoGifterError(
+            f'No adb binary at {ADB_BINARY} — every screen read would fail and '
+            'the run would tap blind. Put platform-tools on PATH.')
     client = ClientAsync()
     devices: list[DeviceAsyncWrapper] = await client.devices()
     if not devices:
@@ -1169,7 +1466,7 @@ def main():
 
 if __name__ == "__main__":
     from . import fleet_entrypoint
-    public_result = fleet_entrypoint.direct_module_operation('gifts', 'send_gifts.py')
+    public_result = fleet_entrypoint.direct_module_operation('gifts', 'gift.py')
     if public_result is not None:
         raise SystemExit(public_result)
 

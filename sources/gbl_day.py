@@ -69,6 +69,12 @@ FINISHED_LINE = re.compile(
     r"^\[([^\]]+)\]\s*Finished:\s*(\d+)\s*battle(?:\(s\))?"
     r"(?:\s*\((\d+) of them interrupted\))?"
 )
+DAILY_CAP_LINE = re.compile(r"Daily battle cap reached")
+
+
+def parse_cap_reached(output: str) -> bool:
+    """Whether any runner reported hitting the game's daily battle allowance."""
+    return bool(DAILY_CAP_LINE.search(output))
 
 
 class GBLDayError(Exception):
@@ -87,14 +93,15 @@ class DeviceProgress:
     recoveries: int = 0
     last_line: str = ""
     stopped: str = ""
+    cap_reached: bool = False
 
     @property
     def remaining(self) -> int:
-        return max(self.allotment - self.played, 0)
+        return 0 if self.cap_reached else max(self.allotment - self.played, 0)
 
     @property
     def done(self) -> bool:
-        return self.remaining == 0
+        return self.cap_reached or self.remaining == 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -106,6 +113,7 @@ class DeviceProgress:
             "recoveries": self.recoveries,
             "last_line": self.last_line,
             "stopped": self.stopped,
+            "cap_reached": self.cap_reached,
         }
 
 
@@ -118,6 +126,7 @@ class LegResult:
     last_line: str = ""
     # Set when the watchdog stopped this leg rather than the leg ending itself.
     abandoned: str = ""
+    cap_reached: bool = False
 
 
 def parse_played(output: str) -> dict[str, int]:
@@ -160,6 +169,16 @@ def leg_command(device: str, count: int, trace: Path | None) -> list[str]:
     if trace is not None:
         command.extend(["--trace", str(trace)])
     return command
+
+
+def supervised_environment(
+    environ: dict[str, str] | None = None, pid: int | None = None
+) -> dict[str, str]:
+    """The leg's environment, naming this process as the one it answers to."""
+    return {
+        **(os.environ if environ is None else environ),
+        "POKEMON_SUPERVISOR_PID": str(os.getpid() if pid is None else pid),
+    }
 
 
 LEG_INTERRUPT_SECONDS = 20.0
@@ -283,6 +302,12 @@ async def run_leg(
         stderr=asyncio.subprocess.STDOUT,
         # Nothing here is going to answer a prompt.
         stdin=asyncio.subprocess.DEVNULL,
+        # Who to outlive, and no longer than.  `stop_leg` below is the orderly
+        # way a leg ends, and it is skipped whenever this supervisor dies
+        # without getting to run it -- a SIGKILL, a closed terminal, a Mac that
+        # slept.  The leg then taps on alone, holding the phone's fleet lock
+        # against the next run; the pid here is how it finds that out.
+        env=supervised_environment(),
         # A leg is `gbl.py`, which spawns the runner that actually holds
         # the phone.  Left in this terminal's process group, Ctrl-C reached
         # all three at once and each started its own shutdown, so the runner
@@ -350,6 +375,7 @@ async def run_leg(
         status=status,
         last_line=lines[-1] if lines else "",
         abandoned=abandoned,
+        cap_reached=parse_cap_reached(output),
     )
 
 
@@ -453,6 +479,11 @@ async def play_device_day(
         played = played or 0
         progress.played += played
         progress.last_line = result.last_line
+        if result.cap_reached:
+            progress.cap_reached = True
+            progress.stopped = "daily battle cap reached"
+            on_update()
+            break
         if played:
             progress.stalls = 0
         else:

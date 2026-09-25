@@ -72,7 +72,11 @@ class MachineRoutingTests(unittest.TestCase):
             "android-two": {"platform": "android", "serial": "TEST_SERIAL_B", "machine": "worker", "operations": {"gifts": {}}},
         }}
         (root / "pokemon-fleet.yaml").write_text(yaml.safe_dump(registry))
-        env = patch.dict(os.environ, {"POGO_CONFIG_DIR": str(root), "POGO_MACHINE": "controller"})
+        # These cover the configured-tag fallback on its own; bus discovery, which
+        # overrides the tags when a phone has moved, is covered in
+        # tests/test_device_owners.py with synthetic buses.
+        env = patch.dict(os.environ, {"POGO_CONFIG_DIR": str(root), "POGO_MACHINE": "controller",
+                                      "POGO_DEVICE_DISCOVERY": "off"})
         env.start(); self.addCleanup(env.stop)
         os.environ.pop("POGO_FLEET_CONFIG", None)
 
@@ -95,17 +99,78 @@ class MachineRoutingTests(unittest.TestCase):
             fleet_entrypoint.route_machine_arguments(["--pair", "android-one", "android-two", "--plan"])
 
     def test_remote_command_preserves_spaces_and_prevents_recursive_fanout(self):
-        commands = fleet_entrypoint._commands_for_machines("send_gifts.py", ["--devices", "all", "--plan"])
+        commands = fleet_entrypoint._commands_for_machines("gift.py", ["--devices", "all", "--plan"])
         self.assertIn("--local", commands["controller"])
         self.assertIn("worker.example", commands["worker"])
         shell = commands["worker"][-1]
         self.assertIn('"$HOME"/\'a folder/pogo\'', shell)
-        self.assertIn("-m send_gifts --local", shell)
+        self.assertIn("-m gift --local", shell)
         self.assertIn("POGO_CONFIG_DIR=~/.config/pogo", shell)
+
+    def test_every_workers_line_says_which_computer_it_came_from(self):
+        """The remote worker wakes, boots and probes while the local one is
+        already reporting phones, so its lines land late among battle output."""
+        self.assertEqual(
+            fleet_entrypoint.label_line("remote", "[gbl-day] Target devices (2): moto-g\n"),
+            "[remote] [gbl-day] Target devices (2): moto-g",
+        )
+
+    def test_a_line_that_already_names_its_machine_is_left_alone(self):
+        """Each worker labels its own readout; two labels would read worse."""
+        self.assertEqual(
+            fleet_entrypoint.label_line("remote", "[remote] gbl on moto-g\n"),
+            "[remote] gbl on moto-g",
+        )
+
+    def test_relaying_labels_a_workers_whole_output(self):
+        import io
+
+        class FakeProcess:
+            stdout = io.StringIO("first\n[remote] second\n")
+
+        printed = io.StringIO()
+        fleet_entrypoint._relay("remote", FakeProcess(), printed)
+        self.assertEqual(printed.getvalue(), "[remote] first\n[remote] second\n")
+
+    def test_a_worker_with_nothing_to_say_relays_nothing(self):
+        class Silent:
+            stdout = None
+
+        fleet_entrypoint._relay("remote", Silent())  # must not raise
+
+    def test_the_local_worker_is_told_which_computer_it_is(self):
+        """Both halves of the fan-out print; only one knew its own name."""
+        started = {}
+
+        import io
+
+        class FakeProcess:
+            def __init__(self, machine):
+                self.machine = machine
+                self.stdout = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+        def fake_popen(command, cwd=None, env=None, **_spawn):
+            machine = "controller" if "--local" in command else "worker"
+            started[machine] = env
+            return FakeProcess(machine)
+
+        with patch.object(fleet_entrypoint.subprocess, "Popen", fake_popen):
+            fleet_entrypoint.run_all_machines("gift.py", ["--devices", "all", "--plan"])
+
+        self.assertEqual(started["controller"]["POGO_MACHINE"], "controller")
+        # The remote worker gets its name inside the ssh command instead, and
+        # the ssh client itself has no business carrying one.
+        self.assertIsNone(started["worker"])
 
     def test_coordinator_registry_override_is_not_forwarded_as_remote_path(self):
         config = config_paths.default_config("pokemon-fleet.yaml")
-        commands = fleet_entrypoint._commands_for_machines("send_gifts.py", ["--config", str(config), "--devices", "all", "--plan"])
+        commands = fleet_entrypoint._commands_for_machines("gift.py", ["--config", str(config), "--devices", "all", "--plan"])
         self.assertNotIn(str(config), commands["worker"][-1])
 
 if __name__ == "__main__":

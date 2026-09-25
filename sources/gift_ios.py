@@ -40,6 +40,13 @@ class Step:
     use_delay_modifier: bool = False
 
 
+@dataclass(frozen=True)
+class FriendRowChoice:
+    point: list[int]
+    open_allowed: bool
+    notes: tuple[str, ...] = ()
+
+
 GIFT_STEPS = (
     Step("OPEN_BTN", 3.0, True),
     Step("CLOSE_BTN", 2.0, True),
@@ -71,6 +78,13 @@ GUARD_MIN_BRIGHTNESS = 200
 GUARD_MAX_SATURATION = 20
 GUARD_RECOVER_ATTEMPTS = 3
 GUARD_RECOVER_DELAY = 3
+# Consecutive friends whose cycle failed before the whole run gives up. A friend
+# whose gift screen will not resolve is skipped rather than taking the other 398
+# down with it: on 2026-09-14 the SE raised on friend 1 of 399 on every run and
+# so sent nothing at all, while the friends behind it were never even tried. A
+# run that cannot get through this many friends in a row is wedged, not unlucky,
+# and stopping is then the honest answer.
+GIFT_CYCLE_RETRIES = 3
 # A flung profile keeps moving after the drag returns; tap before it settles
 # and the close X is still travelling under the finger.
 SCROLL_SETTLE = 1.5
@@ -98,6 +112,52 @@ PRE_SCROLL_SETTLE = 4
 CLOSE_PROBE_MIN_BRIGHTNESS = 245
 CLOSE_PROBE_MAX_SATURATION = 15
 MAP_RECOVERY_KEYS = ("AVATAR_BTN", "FRIENDS_TAB_BTN")
+
+# --- Choosing the row ---
+# The iOS counterpart of the friends list read in gift_android.py, and the same
+# two rules: a friend pinned above the sort by a remote trade waiting for an
+# answer is stepped over, and a gift is only opened from a row drawn without
+# the pale blue halo around the avatar. Sending is not affected by either --
+# every friend who can receive a gift gets one while the bag holds any.
+#
+# Fractions of the screenshot, so the numbers do not care that iOS hands over
+# 750x1334 pixels for a 375x667 point viewport. Measured on the SE's own
+# friends list: rows are 239px on a 1334px screenshot, and the rules between
+# them read 207-234 as a mean of the three channels.
+ROW_RULE_X = (0.10, 0.70)  # of the width; clear of the dates and the avatars
+ROW_RULE_LEVEL = (200, 240)
+# The one number that had to move from the Android worker: iOS draws a softer
+# rule, and the SE's measure 13 apart across the channels where the Android
+# phones stay inside 12.
+ROW_RULE_MAX_SPREAD = 16
+ROW_RULE_WHITE_GAP = 12  # how far above a rule to test for the row's white
+ROW_RULE_MIN_WHITE = 245
+ROW_RULE_MIN_GAP = 20  # an anti-aliased rule covers more than one line
+ROW_SCAN_TOP = 0.08  # below the ME/FRIENDS/SOCIAL header
+ROW_MIN_HEIGHT = 0.08  # of the screenshot; the SE's rows are 0.18
+# NEXT_FRIEND_BTN is configured on the first row, so a first row that lands
+# anywhere else means the rules were misread. The whole read is then dropped
+# and the configured point tapped exactly as before.
+ROW_MATCH_TOLERANCE = 0.5  # of a row height
+
+# The halo, sampled in the strips either side of the avatar. Both must glow: an
+# avatar photo on a blue background fills the strip beside it on its own.
+# The Android numbers came over unchanged and still separate cleanly on the SE
+# -- haloed row 0.122 and 0.182, plain rows 0.000 and 0.016.
+HALO_X = ((0.04, 0.09), (0.21, 0.26))
+HALO_INSET = 0.1  # of the row height, off each end, to clear the rules
+HALO_MIN_FRACTION = 0.05
+# Which half of the list gifts are taken from; the halo is the cue, not the
+# meaning. Flip it and gifts are opened from the haloed rows instead.
+OPEN_FROM_HALOED_ROWS = False
+
+# The countdown a row waiting on a remote trade carries where the other rows
+# print a grey "Today"/"Yesterday". Orange there is the whole test. Measured
+# 0.0000 on every row of the SE's list; the positive case has only been seen on
+# Android, where a pinned Lucky Remote Trade row reads 0.033.
+TRADE_TIMER_X = (0.70, 0.99)
+TRADE_TIMER_Y = (0.03, 0.32)  # of the row height
+TRADE_TIMER_MIN_FRACTION = 0.010
 
 
 class GifterError(RuntimeError):
@@ -484,6 +544,128 @@ def is_friends_list(driver: webdriver.Remote) -> bool:
     return brightness / count >= GUARD_MIN_BRIGHTNESS and saturation / count <= GUARD_MAX_SATURATION
 
 
+def _row_rule(image: Image.Image, y: int) -> bool:
+    """True if line `y` is one of the pale rules between friends list rows."""
+    width = image.width
+    x0, x1 = (int(width * f) for f in ROW_RULE_X)
+    low, high = ROW_RULE_LEVEL
+    total = count = 0
+    for x in range(x0, x1, 8):
+        red, green, blue = image.getpixel((x, y))
+        if max(red, green, blue) - min(red, green, blue) > ROW_RULE_MAX_SPREAD:
+            return False
+        total += (red + green + blue) / 3
+        count += 1
+    if not count or not low <= total / count <= high:
+        return False
+    # The rule is the *bottom* of a row, and what sits above it is that row's
+    # white background. Without this the tab underline and any pale band in an
+    # avatar would be read as rules.
+    above = max(y - ROW_RULE_WHITE_GAP, 0)
+    total = count = 0
+    for x in range(x0, x1, 8):
+        red, green, blue = image.getpixel((x, above))
+        total += (red + green + blue) / 3
+        count += 1
+    return bool(count) and total / count > ROW_RULE_MIN_WHITE
+
+
+def friend_rows(image: Image.Image) -> list[tuple[int, int]]:
+    """The top and bottom line of each whole friend row, top of the list first."""
+    height = image.height
+    rules: list[int] = []
+    for y in range(int(height * ROW_SCAN_TOP), height):
+        if rules and y - rules[-1] < ROW_RULE_MIN_GAP:
+            continue
+        if _row_rule(image, y):
+            rules.append(y)
+    least = int(height * ROW_MIN_HEIGHT)
+    return [(a, b) for a, b in zip(rules, rules[1:]) if b - a >= least]
+
+
+def _band_fraction(image: Image.Image, x_range, y_range, test) -> float:
+    """How much of a box matches `test`, as a fraction of the pixels sampled."""
+    x0, x1 = (int(image.width * f) for f in x_range)
+    matched = total = 0
+    for y in range(*y_range, 2):
+        for x in range(x0, x1, 2):
+            total += 1
+            matched += test(*image.getpixel((x, y)))
+    return matched / total if total else 0.0
+
+
+def _halo_pixel(red: int, green: int, blue: int) -> bool:
+    """The pale blue of the glow around a highlighted friend's avatar."""
+    return blue >= 200 and blue - red >= 18 and abs(green - blue) <= 30 and red >= 140
+
+
+def _trade_orange(red: int, green: int, blue: int) -> bool:
+    """The orange the game prints a remote trade's countdown in."""
+    return red >= 200 and 80 <= green <= 200 and blue <= 130 and red - blue >= 90
+
+
+def row_is_highlighted(image: Image.Image, row: tuple[int, int]) -> bool:
+    """True when the friend's avatar is ringed by the pale blue halo."""
+    top, bottom = row
+    inset = int((bottom - top) * HALO_INSET)
+    band = (top + inset, bottom - inset)
+    return min(
+        _band_fraction(image, strip, band, _halo_pixel) for strip in HALO_X
+    ) >= HALO_MIN_FRACTION
+
+
+def row_waits_on_a_trade(image: Image.Image, row: tuple[int, int]) -> bool:
+    """True for a row pinned above the sort by a remote trade in flight."""
+    top, bottom = row
+    height = bottom - top
+    band = (top + int(height * TRADE_TIMER_Y[0]), top + int(height * TRADE_TIMER_Y[1]))
+    return _band_fraction(image, TRADE_TIMER_X, band, _trade_orange) >= TRADE_TIMER_MIN_FRACTION
+
+
+def choose_friend_row(
+    image: Image.Image, point: list[int], scale_y: float
+) -> FriendRowChoice:
+    """Which row NEXT_FRIEND_BTN should open, and whether to open its gift.
+
+    `point` is in logical points and `scale_y` converts those to screenshot
+    pixels, which is the only real difference from the Android reader. Falls
+    back to the configured point -- the behaviour before any of this -- whenever
+    the list does not read the way it should.
+    """
+    rows = friend_rows(image)
+    if not rows:
+        return FriendRowChoice(point, True)
+    top, bottom = rows[0]
+    wanted = point[1] * scale_y
+    if abs((top + bottom) / 2 - wanted) > (bottom - top) * ROW_MATCH_TOLERANCE:
+        return FriendRowChoice(
+            point,
+            True,
+            (
+                "The list did not read as rows under NEXT_FRIEND_BTN; "
+                "tapping the configured point",
+            ),
+        )
+    notes: list[str] = []
+    for row in rows:
+        if row_waits_on_a_trade(image, row):
+            notes.append("Stepping over a row waiting on a remote trade")
+            continue
+        highlighted = row_is_highlighted(image, row)
+        open_allowed = highlighted == OPEN_FROM_HALOED_ROWS
+        if not open_allowed:
+            notes.append(
+                "Leaving this friend's gift: their row is "
+                + ("highlighted" if highlighted else "plain")
+            )
+        middle = int((row[0] + row[1]) / 2 / scale_y)
+        return FriendRowChoice([point[0], middle], open_allowed, tuple(notes))
+    # Every row on screen is waiting on a trade, which is a screen this cannot
+    # read rather than a row to invent below the fold.
+    notes.append("Every visible row is waiting on a trade; tapping the top one")
+    return FriendRowChoice(point, True, tuple(notes))
+
+
 def wait_for_screen_state(
     driver: webdriver.Remote,
     want_list: bool,
@@ -796,7 +978,10 @@ def run_gifts_v3(
     delay_modifier = float(config.get("delay_modifier", 0))
     send_min_saturation = float(config.get("send_button_min_saturation", 60))
     completed = 0
+    failures = 0
     outgoing_available = True
+    # Last cycle's read of this friend's row. The send half never consults it.
+    open_allowed = True
 
     def pause(seconds: float, modified: bool = False) -> None:
         extra = delay_modifier if modified else 0
@@ -830,6 +1015,26 @@ def run_gifts_v3(
                 time.sleep(SEND_CONFIRM_PAUSE)
         return False
 
+    def open_next_friend() -> bool:
+        """Open the next friend, and say whether their gift may be opened.
+
+        An unreadable list, --no-guard or --dry-run taps the configured point
+        and allows the open: standing down leaves the cycle as it was.
+        """
+        point = points["NEXT_FRIEND_BTN"]
+        choice = FriendRowChoice(point, True)
+        if guard and not dry_run:
+            image = screenshot_image(driver)
+            rect = driver.get_window_rect()
+            choice = choose_friend_row(image, point, image.height / rect["height"])
+        for note in choice.notes:
+            print(f"  {note}", flush=True)
+        x, y = choice.point
+        print(f"  NEXT_FRIEND_BTN: ({x}, {y})", flush=True)
+        if not dry_run:
+            tap(driver, choice.point)
+        return choice.open_allowed
+
     def open_incoming_gift() -> bool:
         """Open a waiting gift and land on the friend profile; False if none."""
         if not colored_action_available(driver, points["OPEN_BTN"]):
@@ -853,135 +1058,169 @@ def run_gifts_v3(
         return True
 
     for gift_number in range(1, count + 1):
-        label = str(gift_number) if all_mode else f"{gift_number}/{count}"
-        print(f"Gift {label}", flush=True)
-        opened = False
-        sent = False
+        try:
+            label = str(gift_number) if all_mode else f"{gift_number}/{count}"
+            print(f"Gift {label}", flush=True)
+            opened = False
+            sent = False
 
-        if guard and not dry_run:
-            ensure_screen(driver, points, "OPEN_BTN", scroll, probe)
+            if guard and not dry_run:
+                ensure_screen(driver, points, "OPEN_BTN", scroll, probe)
 
-        if dry_run:
-            for name in (
-                "OPEN_BTN",
-                "SEND_GIFT_BTN",
-                "FIRST_GIFT_BTN",
-                "SEND_BTN",
-                "FRIEND_CLOSE_BTN",
-                "SORT_BTN",
-                "CAN_RECEIVE_GIFT_BTN",
-                "SORT_BTN",
-                "CAN_RECEIVE_GIFT_BTN",
-                "NEXT_FRIEND_BTN",
-            ):
-                log_tap(FALLBACK_KEYS.get(name, name))
-            completed += 1
-            continue
+            if dry_run:
+                for name in (
+                    "OPEN_BTN",
+                    "SEND_GIFT_BTN",
+                    "FIRST_GIFT_BTN",
+                    "SEND_BTN",
+                    "FRIEND_CLOSE_BTN",
+                    "SORT_BTN",
+                    "CAN_RECEIVE_GIFT_BTN",
+                    "SORT_BTN",
+                    "CAN_RECEIVE_GIFT_BTN",
+                    "NEXT_FRIEND_BTN",
+                ):
+                    log_tap(FALLBACK_KEYS.get(name, name))
+                completed += 1
+                continue
 
-        opened = open_incoming_gift()
-        if not opened:
-            print("  No incoming gift to open; continuing Send Gift", flush=True)
-            if not friend_profile_visible():
-                # The card was still painting when OPEN_BTN was sampled, so it
-                # read grey. The screen has settled by the time we get here:
-                # open it rather than refuse a friend who does have one waiting.
-                print("  Incoming gift painted late; opening it now", flush=True)
+            if open_allowed:
                 opened = open_incoming_gift()
+                if not opened:
+                    print("  No incoming gift to open; continuing Send Gift", flush=True)
+                    if not friend_profile_visible():
+                        # The card was still painting when OPEN_BTN was sampled, so it
+                        # read grey. The screen has settled by the time we get here:
+                        # open it rather than refuse a friend who does have one waiting.
+                        print("  Incoming gift painted late; opening it now", flush=True)
+                        opened = open_incoming_gift()
+            else:
+                print("  Leaving this gift unopened; the row is highlighted", flush=True)
+                if not friend_profile_visible():
+                    # An unopened gift is a screen of its own in front of the
+                    # profile, and SEND GIFT is on the profile behind it.
+                    print("  Closing the unopened gift", flush=True)
+                    log_tap("CLOSE_BTN")
+                    pause(2, modified=True)
 
-        if not friend_profile_visible():
-            raise GifterError(
-                "Not on the friend profile before Send Gift; stopped without "
-                "tapping another control"
-            )
+            if not friend_profile_visible():
+                raise GifterError(
+                    "Not on the friend profile before Send Gift; stopped without "
+                    "tapping another control"
+                )
 
-        if colored_action_available(driver, points["SEND_GIFT_BTN"]):
-            log_tap("SEND_GIFT_BTN")
+            if colored_action_available(driver, points["SEND_GIFT_BTN"]):
+                log_tap("SEND_GIFT_BTN")
+                pause(2, modified=True)
+
+                log_tap("FIRST_GIFT_BTN")
+                pause(1.5)
+
+                send_active, send_saturation = selected_gift_visible()
+                if not send_active:
+                    outgoing_available = False
+                    print(
+                        "  No selected outgoing gift: "
+                        f"SEND_BTN saturation {send_saturation:.1f} "
+                        f"(< {send_min_saturation:.1f})",
+                        flush=True,
+                    )
+                    # On the picker/detail screen this coordinate is the real X.
+                    log_tap("CLOSE_BTN")
+                    pause(2, modified=True)
+                    if not friend_profile_visible():
+                        raise GifterError(
+                            "Could not leave the outgoing-gift picker after no gift "
+                            "was selected"
+                        )
+                    print("Stopping: no selectable outgoing gift remains", flush=True)
+                else:
+                    print(
+                        f"  SEND_BTN active (saturation {send_saturation:.1f})",
+                        flush=True,
+                    )
+                    log_tap("SEND_BTN")
+                    if not sent_is_confirmed():
+                        retry_active, retry_saturation = selected_gift_visible()
+                        if retry_active:
+                            print(
+                                "  Send not yet confirmed; retrying the still-visible "
+                                f"SEND_BTN (saturation {retry_saturation:.1f})",
+                                flush=True,
+                            )
+                            log_tap("SEND_BTN")
+                        if not sent_is_confirmed():
+                            raise GifterError(
+                                "Gift send was not confirmed; stopped without "
+                                "reporting a false send"
+                            )
+                    sent = True
+                    print("  Gift send confirmed", flush=True)
+            else:
+                print("  Friend cannot receive a gift; advancing", flush=True)
+
+            if scroll is not None:
+                print(
+                    f"  scrolling the friend screen clear of its close button: {scroll}",
+                    flush=True,
+                )
+                if not scroll_to_close(driver, scroll, probe):
+                    raise GifterError(
+                        "Friend screen did not scroll clear of its close button; "
+                        "stopped instead of tapping the action row"
+                    )
+            log_tap("CLOSE_BTN")
+            pause(2, modified=True)
+            if not wait_for_screen_state(driver, True):
+                raise GifterError(
+                    "Friend close did not return to the friends list; stopped before "
+                    "sorting"
+                )
+
+            completed += 1
+            failures = 0
+            if not outgoing_available:
+                return completed
+            if not sent and not colored_action_available(
+                driver, points["SORT_BTN"]
+            ):
+                raise GifterError("Friends list controls are not active after closing friend")
+
+            for name in (
+                "SORT_BTN",
+                "CAN_RECEIVE_GIFT_BTN",
+                "SORT_BTN",
+                "CAN_RECEIVE_GIFT_BTN",
+            ):
+                log_tap(name)
+                pause(1.5)
+            # The one step that picks its own point: it steps over a friend pinned
+            # by a remote trade, and reads the halo off the row it does open.
+            open_allowed = open_next_friend()
             pause(2, modified=True)
 
-            log_tap("FIRST_GIFT_BTN")
-            pause(1.5)
-
-            send_active, send_saturation = selected_gift_visible()
-            if not send_active:
-                outgoing_available = False
-                print(
-                    "  No selected outgoing gift: "
-                    f"SEND_BTN saturation {send_saturation:.1f} "
-                    f"(< {send_min_saturation:.1f})",
-                    flush=True,
-                )
-                # On the picker/detail screen this coordinate is the real X.
-                log_tap("CLOSE_BTN")
-                pause(2, modified=True)
-                if not friend_profile_visible():
-                    raise GifterError(
-                        "Could not leave the outgoing-gift picker after no gift "
-                        "was selected"
-                    )
-                print("Stopping: no selectable outgoing gift remains", flush=True)
-            else:
-                print(
-                    f"  SEND_BTN active (saturation {send_saturation:.1f})",
-                    flush=True,
-                )
-                log_tap("SEND_BTN")
-                if not sent_is_confirmed():
-                    retry_active, retry_saturation = selected_gift_visible()
-                    if retry_active:
-                        print(
-                            "  Send not yet confirmed; retrying the still-visible "
-                            f"SEND_BTN (saturation {retry_saturation:.1f})",
-                            flush=True,
-                        )
-                        log_tap("SEND_BTN")
-                    if not sent_is_confirmed():
-                        raise GifterError(
-                            "Gift send was not confirmed; stopped without "
-                            "reporting a false send"
-                        )
-                sent = True
-                print("  Gift send confirmed", flush=True)
-        else:
-            print("  Friend cannot receive a gift; advancing", flush=True)
-
-        if scroll is not None:
-            print(
-                f"  scrolling the friend screen clear of its close button: {scroll}",
-                flush=True,
-            )
-            if not scroll_to_close(driver, scroll, probe):
-                raise GifterError(
-                    "Friend screen did not scroll clear of its close button; "
-                    "stopped instead of tapping the action row"
-                )
-        log_tap("CLOSE_BTN")
-        pause(2, modified=True)
-        if not wait_for_screen_state(driver, True):
-            raise GifterError(
-                "Friend close did not return to the friends list; stopped before "
-                "sorting"
-            )
-
-        completed += 1
-        if not outgoing_available:
-            return completed
-        if not sent and not colored_action_available(
-            driver, points["SORT_BTN"]
-        ):
-            raise GifterError("Friends list controls are not active after closing friend")
-
-        for name in (
-            "SORT_BTN",
-            "CAN_RECEIVE_GIFT_BTN",
-            "SORT_BTN",
-            "CAN_RECEIVE_GIFT_BTN",
-            "NEXT_FRIEND_BTN",
-        ):
-            log_tap(name)
-            pause(1.5 if name != "NEXT_FRIEND_BTN" else 2, modified=name == "NEXT_FRIEND_BTN")
-
-        if opened or sent:
-            continue
+            if opened or sent:
+                continue
+        except GifterError as exc:
+            failures += 1
+            print(f"  Skipping this friend: {exc}", flush=True)
+            # Skipping costs taps to get back to the friends list, and under
+            # --no-guard there is no sanctioned way to check what is on screen
+            # first. So without the guard a failed cycle stays fatal, as it was
+            # before, rather than tapping a screen nobody has identified.
+            if failures >= GIFT_CYCLE_RETRIES or not guard:
+                raise
+            # The friends list is the screen every cycle starts from, so
+            # getting back to it is what lets the next friend be tried at all.
+            try:
+                ensure_screen(driver, points, "SORT_BTN", scroll, probe)
+            except GifterError:
+                # Recovery failing means the phone is wedged rather than this
+                # friend being awkward, so the run still stops here. Report
+                # what actually went wrong, not the cleanup that then failed.
+                raise exc from None
+            open_allowed = open_next_friend()
+            pause(2, modified=True)
 
     return completed
 
@@ -1054,7 +1293,7 @@ if __name__ == "__main__":
     try:
         if os.environ.get("POKEMON_FLEET_CHILD") == "1" or "--fleet-child" in sys.argv:
             raise SystemExit(main())
-        raise SystemExit(fleet_entrypoint.run_operation('gifts', 'send_gifts.py'))
+        raise SystemExit(fleet_entrypoint.run_operation('gifts', 'gift.py'))
     except KeyboardInterrupt:
         raise SystemExit(130)
     except (RuntimeError, OSError, ValueError) as exc:

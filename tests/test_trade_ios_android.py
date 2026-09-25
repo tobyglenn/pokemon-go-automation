@@ -977,6 +977,59 @@ class EmptyHandedTradeScreenTests(unittest.TestCase):
         )
 
 
+class FriendshipSheetTests(unittest.TestCase):
+    """The sheet behind the heart bar. It is not a trade screen, so nothing
+    named it, and a screen with no name is one recovery walks away from."""
+
+    def sheet(self) -> Image.Image:
+        """Pale header, then the bonus list as one full-bleed white card —
+        which is the part that tells it from every other screen."""
+        image = Image.new("RGB", (750, 1334), (251, 221, 217))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 560, 750, 1334), fill=(255, 255, 255))
+        # The five hearts, which sit clear of the columns card_edges samples.
+        for index in range(5):
+            draw.ellipse((120 + index * 105, 620, 200 + index * 105, 700), fill=(244, 98, 47))
+        # The close disc, drawn where the friend screen puts its own X_BTN.
+        draw.ellipse((335, 1196, 415, 1276), fill=(26, 138, 138))
+        return image
+
+    def metrics(self, image: Image.Image) -> dict:
+        # TRADE_BTN [143, 638] on the SE, in pixels on a 2x capture.
+        return cross_trade.screen_metrics(image, (286, 1276))
+
+    def test_the_sheet_is_named(self) -> None:
+        image = self.sheet()
+        self.assertTrue(cross_trade.is_friendship_sheet(image, self.metrics(image)))
+
+    def test_describe_state_calls_it_friendship_rather_than_unknown(self) -> None:
+        image = self.sheet()
+        state, _ = cross_trade.describe_state(
+            image, lambda name: (286, 1276) if name == "TRADE_BTN" else None
+        )
+        self.assertEqual(state, "friendship")
+
+    def test_the_picker_is_not_it(self) -> None:
+        """The picker's card is white too, but its search bar is pale and its
+        outer columns measured 0.908 against this sheet's 1.000."""
+        image = self.sheet()
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((150, 186, 638, 320), fill=(238, 242, 228))
+        self.assertFalse(cross_trade.is_friendship_sheet(image, self.metrics(image)))
+
+    def test_the_friend_screen_is_not_it(self) -> None:
+        """Green under TRADE_BTN is the friend screen's LOCAL TRADE label, and
+        closing that screen would walk the phone off the trade it needs."""
+        image = self.sheet()
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((240, 1240, 340, 1310), fill=(56, 190, 150))
+        self.assertFalse(cross_trade.is_friendship_sheet(image, self.metrics(image)))
+
+    def test_a_dark_trade_screen_is_not_it(self) -> None:
+        image = Image.new("RGB", (750, 1334), (30, 32, 36))
+        self.assertFalse(cross_trade.is_friendship_sheet(image, self.metrics(image)))
+
+
 class IOSPointConversionTests(unittest.TestCase):
     def test_a_pixel_found_by_looking_comes_back_as_a_tappable_point(self) -> None:
         """A screenshot is in device pixels and `mobile: tap` wants logical

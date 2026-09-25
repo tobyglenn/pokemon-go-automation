@@ -77,6 +77,7 @@ class HoldLengthTests(unittest.TestCase):
 @dataclass
 class FakeConfig:
     calibration_hold_seconds: float = 0.02
+    throw_duration_ms: int = 140
 
 
 class FakeDevice:
@@ -484,12 +485,14 @@ class FeedingDevice(FakeDevice):
 
 
 class NanabFeedTests(unittest.IsolatedAsyncioTestCase):
-    """A berry is thrown at the Pokemon, never tapped onto it.
+    """A berry is tapped onto the Pokemon, never thrown at it.
 
-    Selecting a Nanab only puts it in the hand.  The shipped code tapped the
-    Pokemon and moved on, so the berry stayed in the hand and the throw that
-    followed threw the berry -- confirmed on the android-one, whose held frame shows
-    the Nanab, not a ball.
+    Every throwing version of this fed nothing.  The berry sits where the ball
+    sits, so the swipe that throws a ball looks like the way to send it, and
+    the moto's bag read x9 before and after three of them while the foldable's
+    read x36 either side.  A tap fed one first try, 9 -> 8.  The gym feeder in
+    `berry_android` had the same finding written down already: a press picks
+    the berry up, so a swipe drags it and sets it down again.
     """
 
     def setUp(self) -> None:
@@ -516,27 +519,78 @@ class NanabFeedTests(unittest.IsolatedAsyncioTestCase):
     async def nosleep(_seconds) -> None:
         return None
 
-    async def test_the_berry_is_flicked_at_the_pokemon(self) -> None:
-        device = await self.feed([held_item(pink=True), held_item(pink=False)])
-        self.assertEqual(len(device.throws), 1, "the berry was not thrown")
-        start, end, _ms = device.throws[0]
-        self.assertEqual(start, [self.ball.center_x, self.ball.center_y])
-        self.assertLess(end[1], start[1], "the flick did not go up at the Pokemon")
+    @staticmethod
+    def fed_frames() -> list[Image.Image]:
+        """The frames a feed that takes walks through.
+
+        The fake serves one frame per gesture: the picker's own frame, the
+        berry it puts in the hand, then the ball the game hands back once the
+        berry is eaten.
+        """
+        return [held_item(pink=True), held_item(pink=True), held_item(pink=False)]
+
+    async def test_the_berry_is_tapped_not_thrown(self) -> None:
+        device = await self.feed(self.fed_frames())
+        self.assertEqual(device.throws, [], "the berry was thrown, which feeds nothing")
         self.assertEqual(
             device.taps[0], [100, 1400], "the picker was not the first tap"
         )
 
-    async def test_the_berry_is_only_flicked_once(self) -> None:
-        """A fed berry is replaced in the hand, so a second flick feeds a second.
+    async def test_the_tap_lands_where_the_berry_is_now(self) -> None:
+        """Not where the ball was read as the encounter opened.
 
-        The count went 39 -> 37 across two flicks the run reported as failures.
+        A foldable's ball is still dropping into place during that read: it
+        measured 0.794h against the 0.911h it settles at, and the seconds the
+        berry picker costs are all spent in between.  A tap 350px above the
+        berry lands on bare grass.
         """
-        device = await self.feed([held_item(pink=True)])
-        self.assertEqual(len(device.throws), 1, "a second berry was fed")
+        self.ball = excellent_throw_ios.BallDetection(1.0, 360, 980, 110)
+        device = await self.feed(self.fed_frames())
+        self.assertEqual(device.taps[1][0], 360)
+        self.assertAlmostEqual(
+            device.taps[1][1], 1330, delta=4, msg="tapped the stale reading"
+        )
 
-    async def test_the_ball_is_taken_back_after_the_feed(self) -> None:
+    async def test_the_returned_ball_ends_the_feed(self) -> None:
+        """An eaten berry leaves the hand and the game hands the ball back.
+
+        That is the whole readback the flick never had, and it is what keeps
+        the second tap from feeding a second Nanab.
+        """
+        device = await self.feed(self.fed_frames())
+        self.assertEqual(len(device.taps), 2, "the picker, then one feed tap")
+
+    async def test_a_missed_tap_is_tried_again(self) -> None:
+        """A berry still in the hand is a tap that missed, not a feed."""
+        device = await self.feed([held_item(pink=True)])
+        berry = device.taps[1]
+        self.assertEqual(
+            device.taps[1:1 + throw.NANAB_FEED_TAPS],
+            [berry] * throw.NANAB_FEED_TAPS,
+            "the missed tap was not tried again",
+        )
+        self.assertNotIn(
+            berry,
+            device.taps[1 + throw.NANAB_FEED_TAPS:],
+            "an unbounded retry feeds a Nanab per tap",
+        )
+
+    async def test_the_feed_that_took_does_not_re_pick_the_ball(self) -> None:
+        """The game hands the ball back itself; asking again costs a chooser."""
+        device = await self.feed(self.fed_frames())
+        width, height = device.viewport
+        self.assertNotIn(
+            [
+                round(width * throw.BALL_SWITCH_POINT[0]),
+                round(height * throw.BALL_SWITCH_POINT[1]),
+            ],
+            device.taps,
+            "the held-item chooser was opened over a ball already in hand",
+        )
+
+    async def test_a_feed_that_never_took_still_gets_the_ball_back(self) -> None:
         """Otherwise the throw throws the berry, which never catches anything."""
-        device = await self.feed([held_item(pink=True), held_item(pink=False)])
+        device = await self.feed([held_item(pink=True)])
         width, height = device.viewport
         self.assertIn(
             [
@@ -575,7 +629,7 @@ class EncounterLockTests(unittest.IsolatedAsyncioTestCase):
     def device(self) -> FakeDevice:
         return FakeDevice(0.0)
 
-    async def lock(self, detections):
+    async def lock(self, detections, lone_reading_ok: bool = False):
         """Runs the wait over a scripted sequence of per-frame detections."""
         frames = iter(detections)
 
@@ -593,7 +647,7 @@ class EncounterLockTests(unittest.IsolatedAsyncioTestCase):
             TemporaryDirectory() as artifacts,
         ):
             return await throw.detect_encounter_ball(
-                self.device(), 5.0, Path(artifacts)
+                self.device(), 5.0, Path(artifacts), lone_reading_ok=lone_reading_ok
             )
 
     def ball(self, x: int, y: int):
@@ -616,6 +670,19 @@ class EncounterLockTests(unittest.IsolatedAsyncioTestCase):
         # unrelated blobs must still time out rather than throw at one.
         with self.assertRaises(throw.NoEncounterError):
             await self.lock([self.ball(100 + 90 * n, 200 + 300 * n) for n in range(6)])
+
+    async def test_one_reading_is_enough_when_the_caller_saw_the_pokemon(self) -> None:
+        # A Pokemon that stands over its own ball hides it in most frames, so
+        # the pair never arrives: razr's Fearow on 10 Sep 2026 gave one clean
+        # reading every few seconds and the claim run could not throw at all.
+        # The claim worker reads the CP plate before it throws, so the second
+        # reading is buying a safeguard it already has.
+        ready = await self.lock([None, self.ball(180, 1000)], lone_reading_ok=True)
+        self.assertAlmostEqual(ready.score, 1.0)
+
+    async def test_the_lone_reading_still_has_to_be_a_ball(self) -> None:
+        with self.assertRaises(throw.NoEncounterError):
+            await self.lock([None, None, None], lone_reading_ok=True)
 
 
 class ThrowGestureTests(unittest.IsolatedAsyncioTestCase):
@@ -672,11 +739,23 @@ class ThrowGestureTests(unittest.IsolatedAsyncioTestCase):
             await self.run_once(held_item(pink=False), use_nanab=False)
         calibrate.assert_not_awaited()
 
+    async def test_an_unreadable_hand_is_not_a_berry_and_still_throws(self) -> None:
+        """A Pokemon standing over the ball hides the disc, and hiding is not holding.
+
+        razr's Fearow on 10 Sep 2026 read as nothing in the hand on every frame,
+        so every throw was sent to the berry picker first; the picker never
+        opened on that phone and the encounter got no ball at all.
+        """
+        empty = Image.new("RGB", (720, 1600), (70, 110, 60))
+        device = await self.run_once(empty, use_nanab=False)
+        self.assertEqual(len(device.throws), 1, "the ball was not thrown")
+        self.assertNotIn([100, 1400], device.taps, "the berry picker was opened")
+
     async def test_a_leftover_berry_is_fed_before_the_ball_is_thrown(self) -> None:
         """Otherwise the throw throws the berry, which is what the android-one did."""
         device = await self.run_once(held_item(pink=True), use_nanab=False)
-        self.assertEqual(len(device.throws), 2, "the berry was not flicked first")
-        self.assertTrue(device.taps, "the ball was never taken back")
+        self.assertEqual(len(device.throws), 1, "the ball was not the only throw")
+        self.assertTrue(device.taps, "the berry was never fed")
         self.assertNotIn(
             [100, 1400], device.taps, "the picker is not needed for a held berry"
         )
@@ -807,3 +886,79 @@ class ThrowGeometryTests(unittest.TestCase):
         run_once = source[source.index("async def run_once("):]
         throw_block = run_once[: run_once.index("straight_throw(")]
         self.assertNotIn("fallback_target(image, ball, device)", throw_block)
+
+
+class EmptyNanabPocketTests(unittest.IsolatedAsyncioTestCase):
+    """A bag with no Nanab in it is read once, not once per throw.
+
+    Opening the picker, waiting for the sheet, reading it, closing it and
+    putting the ball back costs about four seconds, and a reward catch throws
+    until the Pokemon is caught or the budget runs out.  Live on 10 Sep 2026
+    that was most of every catch on all three phones, each throw logging the
+    same `No Nanab berry in the bag (picker: golden, silver)`.  Nothing
+    restocks a bag mid-run, so the answer is worth keeping.
+    """
+
+    def setUp(self) -> None:
+        from sources import berry_android
+
+        self.berry_android = berry_android
+        berry_android.forget_empty_pockets()
+        self.addCleanup(berry_android.forget_empty_pockets)
+        self.ball = excellent_throw_ios.BallDetection(1.0, 360, 1330, 110)
+        self.encounter = held_item(pink=False)
+
+    async def ask(self, device: FeedingDevice, reader) -> None:
+        """One `use_nanab_berry`, with the picker read by `reader`."""
+        with TemporaryDirectory() as tmp, patch.object(
+            throw, "capture_frame", NanabFeedTests.capture(device)
+        ), patch("sources.berry_android.picker_read", reader), patch(
+            "asyncio.sleep", NanabFeedTests.nosleep
+        ):
+            await throw.use_nanab_berry(device, self.ball, self.encounter, Path(tmp))
+
+    @staticmethod
+    def counting_reader(kinds: list[str]) -> tuple:
+        """A picker listing `kinds`, and the tally of how often it was read."""
+        reads: list[int] = []
+
+        def _read(_frame):
+            reads.append(1)
+            return [(kind, [100, 1400 + index]) for index, kind in enumerate(kinds)]
+
+        return _read, reads
+
+    async def test_an_empty_pocket_is_read_once_then_remembered(self) -> None:
+        device = FeedingDevice([held_item(pink=False)] * 3)
+        reader, reads = self.counting_reader(["golden", "silver"])
+        await self.ask(device, reader)
+        self.assertEqual(len(reads), 1, "the first throw has to look in the bag")
+        self.assertTrue(
+            self.berry_android.pocket_known_empty(device.label, "nanab"),
+            "an empty pocket was read but not remembered",
+        )
+        await self.ask(device, reader)
+        self.assertEqual(
+            len(reads), 1, "the second throw opened the picker again for nothing"
+        )
+
+    async def test_a_stocked_pocket_is_not_remembered_as_empty(self) -> None:
+        device = FeedingDevice(NanabFeedTests.fed_frames())
+        reader, _reads = self.counting_reader(["nanab", "golden"])
+        with patch.object(
+            throw,
+            "fallback_target",
+            lambda *_a: excellent_throw_ios.RingLock(360, 700, 90, 90, 1.0),
+        ):
+            await self.ask(device, reader)
+        self.assertFalse(
+            self.berry_android.pocket_known_empty(device.label, "nanab"),
+            "a bag that had a Nanab was written off as empty",
+        )
+
+    async def test_one_phone_running_out_does_not_silence_another(self) -> None:
+        self.berry_android.note_empty_pocket("fake-g", "nanab")
+        self.assertFalse(
+            self.berry_android.pocket_known_empty("other-phone", "nanab"),
+            "an empty bag on one phone was read onto the whole fleet",
+        )

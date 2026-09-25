@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Public berries command across configured hosts and connected devices."""
+"""Public trade command across configured hosts and connected devices."""
 import sys
+from pathlib import Path
+# `python scripts/trade_pokemon.py` puts scripts/ on the path, not the checkout root
+# that holds `sources`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sources import fleet_entrypoint, pokemon_fleet
 
 def main(arguments=None):
-    return fleet_entrypoint.run_operation('berries', 'berry.py', arguments)
+    return fleet_entrypoint.run_operation('trade', 'scripts/trade_pokemon.py', arguments)
 
 if __name__ == "__main__":
     try:

@@ -38,7 +38,7 @@ try:
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
-    print('Run "pip install -r requirements.txt" to install required packages.')
+    print('Run "pip install -r docs/requirements.txt" to install required packages.')
     exit(1)
 
 CONFIG_FILE_DIR  = '/storage/self/primary/'
@@ -535,6 +535,25 @@ async def on_feed_screen(device: DeviceAsyncWrapper) -> bool:
     return matched
 
 
+def encounter_showing(width: int, height: int, offset: int, data: bytes) -> bool:
+    """Whether a catch encounter's ball is in hand on this frame.
+
+    The feeding-screen guard passes an encounter: its berry button sits in the
+    gym's berry disc band and its name plate inks the card band.  Measured on
+    seven saved SE reward-catch frames, 2026-09-24, all seven matched.  The
+    ball in hand is what a gym never shows, so `gift.py` reads it before
+    handing a phone to the berries.
+    """
+    from PIL import Image
+    from . import excellent_throw_android
+
+    image = Image.frombuffer(
+        'RGBA', (width, height), data[offset:offset + width * height * 4], 'raw', 'RGBA', 0, 1
+    ).convert('RGB')
+    view = excellent_throw_android.analysis_view((width, height))
+    return excellent_throw_android.excellent_throw_ios.locate_throw_ball(image, view.viewport) is not None
+
+
 def disc_hue(width: int, height: int, offset: int, data: bytes,
              band: tuple[float, float]) -> float:
     """Which berry the item disc is showing, as green-minus-blue across its icon.
@@ -992,6 +1011,59 @@ def picker_read(frame: tuple) -> list[tuple[str, list[int]]] | None:
     if -1 in rank or any(a >= b for a, b in zip(rank, rank[1:])):
         return None
     return found
+
+
+# A bag does not grow a Nanab in the middle of a run.  Reading the picker to be
+# told so again costs about four seconds every throw -- open the item chooser,
+# wait for the sheet, read it, close it, put the ball back -- and the reward
+# catch throws until the Pokemon is caught or the budget runs out.  Live, all
+# three phones spent most of a catch that way.  So the answer is remembered per
+# phone and per berry for the life of the process; only a run that ends, which
+# is also the only chance the bag has to be restocked, asks again.
+_EMPTY_POCKETS: set[tuple[str, str]] = set()
+
+
+def note_empty_pocket(label: str, kind: str) -> None:
+    """Remember that this phone's picker listed no `kind` berry."""
+    _EMPTY_POCKETS.add((label, kind))
+
+
+def pocket_known_empty(label: str, kind: str) -> bool:
+    """Whether this phone has already been shown to be out of `kind` berries."""
+    return (label, kind) in _EMPTY_POCKETS
+
+
+def forget_empty_pockets() -> None:
+    """Drop what the picker taught us, so a later read starts from nothing."""
+    _EMPTY_POCKETS.clear()
+
+
+def berry_to_feed(label: str, wanted: str) -> str:
+    """`wanted`, or a Nanab once this phone is known to be out of `wanted`.
+
+    A Silver Pinap for a legendary is a bonus, not a condition of the throw:
+    with none in the bag the legendary still gets the Nanab everything else
+    gets.
+    """
+    if wanted != 'nanab' and pocket_known_empty(label, wanted):
+        return 'nanab'
+    return wanted
+
+
+def pick_from_picker(
+    label: str, listed: list[tuple[str, list[int]]], wanted: str
+) -> tuple[str, list[int]] | None:
+    """The picker slot to tap for `wanted`, falling back to a Nanab.
+
+    A missing `wanted` is remembered, like a missing Nanab, so the next
+    throw goes straight to the fallback. None when neither is listed.
+    """
+    for kind in dict.fromkeys((wanted, 'nanab')):
+        point = next((p for k, p in listed if k == kind), None)
+        if point is not None:
+            return kind, point
+        note_empty_pocket(label, kind)
+    return None
 
 
 def disc_point(device: DeviceAsyncWrapper, width: int, height: int) -> list[int]:
@@ -1677,7 +1749,7 @@ def main():
 
 if __name__ == "__main__":
     from . import fleet_entrypoint
-    public_result = fleet_entrypoint.direct_module_operation('berries', 'feed_berries.py')
+    public_result = fleet_entrypoint.direct_module_operation('berries', 'scripts/berry.py')
     if public_result is not None:
         raise SystemExit(public_result)
 
