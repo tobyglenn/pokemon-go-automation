@@ -642,7 +642,11 @@ class ExcellentRewardThrowTests(unittest.IsolatedAsyncioTestCase):
             "The catch circle never entered the Excellent lock band; no throw was sent"
         )
         thrower = SimpleNamespace(
-            throw=AsyncMock(side_effect=refused), close=MagicMock(), refused=False
+            throw=AsyncMock(side_effect=refused),
+            close=MagicMock(),
+            refused=False,
+            thrower=MagicMock(),
+            artifacts=Path("reward-catch"),
         )
         with (
             patch.object(gbl_ios.gbl_vision, "recognize", side_effect=[catch, card]),
@@ -660,6 +664,45 @@ class ExcellentRewardThrowTests(unittest.IsolatedAsyncioTestCase):
         device.trace_path.assert_awaited_once()
         thrower.close.assert_called_once()
 
+    async def test_a_legendary_is_fed_before_the_flicks_after_a_refused_lock(self) -> None:
+        # The SE refuses the lock on nearly every reward.  A Cresselia's three
+        # flicks after that went out with no berry until 25 Sep 2026.
+        device = self.device()
+        image = type("FakeImage", (), {"width": 750, "height": 1334})()
+        device.screenshot = AsyncMock(return_value=image)
+        catch = [
+            gbl_vision.OCRBox("Cresselia / CP 1581", 1.0, 300, int(1334 * 0.30), 120, 30)
+        ]
+        card = [gbl_vision.OCRBox("GO BATTLE LEAGUE", 1.0, 235, 680, 246, 21)]
+        refused = gbl_ios.excellent_throw_ios.ExcellentThrowError("No catch circle")
+        thrower = SimpleNamespace(
+            throw=AsyncMock(side_effect=refused),
+            close=MagicMock(),
+            refused=False,
+            berry="nanab",
+            thrower=MagicMock(),
+            artifacts=Path("reward-catch"),
+        )
+        with (
+            patch.object(
+                gbl_ios.gbl_vision, "recognize", side_effect=[catch, catch, card]
+            ),
+            patch.object(gbl_ios, "wait", new=AsyncMock()),
+            patch.object(gbl_ios, "open_excellent_thrower", return_value=thrower),
+            patch.object(gbl_ios, "throw_ball", new=AsyncMock(return_value=True)),
+            patch.object(
+                gbl_ios, "feed_before_flick", new=AsyncMock(return_value=image)
+            ) as feed,
+        ):
+            done = await gbl_ios.take_reward_encounter(device)
+        self.assertTrue(done)
+        self.assertEqual(thrower.berry, "silver")
+        # The first throw is the lock's, which feeds for itself; only the
+        # flick after it is fed here.
+        feed.assert_awaited_once_with(
+            device, thrower.thrower, thrower.artifacts, image, 2
+        )
+
     async def test_a_catch_that_never_throws_is_walked_away_from(self) -> None:
         # The SE's whole GBL day went on one Frillish: the circle would not lock
         # and the fallback flick kept finding the Nanab still in hand, so no ball
@@ -674,7 +717,11 @@ class ExcellentRewardThrowTests(unittest.IsolatedAsyncioTestCase):
             "No catch circle was readable in 4 holds"
         )
         thrower = SimpleNamespace(
-            throw=AsyncMock(side_effect=refused), close=MagicMock(), refused=False
+            throw=AsyncMock(side_effect=refused),
+            close=MagicMock(),
+            refused=False,
+            thrower=MagicMock(),
+            artifacts=Path("reward-catch"),
         )
         with (
             patch.object(gbl_ios.gbl_vision, "recognize", return_value=catch),
@@ -1369,6 +1416,32 @@ class CombatTacticsTests(unittest.TestCase):
     def test_teal_result_tick_is_a_single_result_action(self) -> None:
         self.assertTrue(gbl.teal_result_ready(self.button((28, 133, 148))))
 
+    def test_edge_to_edge_result_tick_one_nav_bar_lower(self) -> None:
+        # 30 Sep, ph-1 on PoGO 0.431: the tick sat at 0.903-0.959h, below
+        # every calibrated sample row, and the leg attacked GOOD EFFORT!.
+        f = frame(width=1316, height=2560, background=(60, 90, 50))
+        put(f, 0.444, 0.556, 0.903, 0.959, (28, 133, 148))
+        put(f, 0.47, 0.53, 0.930, 0.936, (105, 233, 205))   # the tick glyph
+        self.assertFalse(gbl.teal_result_ready(as_frame(f)))
+        self.assertTrue(gbl.teal_result_ready(as_frame(f), low_disc=True))
+        y = gbl.result_tap_point(as_frame(f), low_disc=True)[1]
+        self.assertTrue(0.903 * 2560 < y < 0.959 * 2560)
+
+    def test_low_disc_search_ignores_shaded_or_wide_teal(self) -> None:
+        # Ice Burn's minigame bubbles are teal but shaded; a teal band is not
+        # a disc. Either one ended a live battle on ph-1 as a LOSS.
+        f = frame(width=1316, height=2560, background=(60, 90, 50))
+        put(f, 0.444, 0.556, 0.903, 0.959, (60, 170, 185))
+        self.assertIsNone(gbl.low_result_disc_y(as_frame(f)))
+        f = frame(width=1316, height=2560, background=(60, 90, 50))
+        put(f, 0.20, 0.80, 0.903, 0.959, (28, 133, 148))
+        self.assertIsNone(gbl.low_result_disc_y(as_frame(f)))
+
+    def test_low_disc_search_leaves_the_charged_button_band_alone(self) -> None:
+        f = frame(width=1316, height=2560, background=(60, 90, 50))
+        put(f, 0.444, 0.556, 0.845, 0.890, (28, 133, 148))
+        self.assertIsNone(gbl.low_result_disc_y(as_frame(f)))
+
     def test_grey_charged_move_is_not_a_result_action(self) -> None:
         self.assertFalse(gbl.teal_result_ready(self.button((133, 133, 128))))
 
@@ -1644,6 +1717,18 @@ class ScreenStateTests(unittest.TestCase):
         self.assertEqual(state, 'league')
         # The bottom card, which is the current cup.
         self.assertGreater(point[1], f[1] * 0.65)
+
+    def test_card_text_in_the_right_band_does_not_split_the_cards(self) -> None:
+        # 30 Sep: "No limit" and "Great League Edition" ran into the right-hand
+        # scan band, each card split into slivers, and the list read as a
+        # battlefield -- so a leg that landed on it mid-battle attacked it.
+        f = frame()
+        put(f, 0.05, 0.95, 0.38, 0.52, (255, 255, 255))
+        put(f, 0.05, 0.95, 0.53, 0.67, (255, 255, 255))
+        put(f, 0.38, 0.90, 0.44, 0.46, (40, 70, 90))
+        put(f, 0.38, 0.90, 0.57, 0.60, (40, 70, 90))
+        self.assertEqual(len(gbl.league_cards(as_frame(f))), 2)
+        self.assertEqual(gbl.read_screen_state(as_frame(f))[0], 'league')
 
     def test_pill_wins_over_cards(self) -> None:
         """The GO BATTLE LEAGUE screen shows both; only the pill is actionable."""
@@ -3753,3 +3838,67 @@ class DismissingRewardTapTests(unittest.IsolatedAsyncioTestCase):
         # And it was pressed the once, rather than every five seconds until the
         # leg was written off.
         self.assertEqual(taps.count([214, 596]), 1)
+
+
+class HighFlyingEncounterTests(unittest.IsolatedAsyncioTestCase):
+    """A Lugia flies its plate out of the moto's band; the encounter still reads.
+
+    Box geometry is copied from the SE's own 750x1334 OCR of a Lugia reward on
+    1 Oct 2026, which a leg lost after its first throw and stood on for two
+    minutes before quitting.
+    """
+
+    W, H = 750, 1334
+
+    def box(self, text, cx, cy, width=200, height=40):
+        return gbl_vision.OCRBox(text, 1.0, cx - width // 2, cy - height // 2, width, height)
+
+    def test_a_centred_plate_above_the_band_is_the_encounter(self) -> None:
+        for y in (0.033, 0.158, 0.225):
+            plate = self.box("Lugia / CP 2091", 375, round(self.H * y))
+            self.assertIs(gbl_vision.encounter_plate([plate], self.H, self.W), plate)
+
+    def test_the_band_alone_still_needs_the_width(self) -> None:
+        plate = self.box("Lugia / CP 2091", 375, round(self.H * 0.158))
+        self.assertIsNone(gbl_vision.encounter_plate([plate], self.H))
+
+    def test_a_battle_header_up_there_is_not_a_plate(self) -> None:
+        # "Mega Mewtwo X CP 7034" and "CP 4446 Groudon" off a saved SE battle.
+        boxes = [
+            self.box("Mega Mewtwo X CP 7034", 158, 125),
+            self.box("CP 4446 Groudon", 592, 125),
+        ]
+        self.assertIsNone(gbl_vision.encounter_plate(boxes, self.H, self.W))
+
+    def test_the_ball_count_names_an_encounter_with_no_plate(self) -> None:
+        count = self.box("416", 488, 1277, width=60, height=26)
+        image = Image.new("RGB", (self.W, self.H))
+        self.assertIs(gbl_ios.encounter_marker([count], image), count)
+
+    def test_the_card_battle_count_is_not_a_ball_count(self) -> None:
+        # "Battles: 335" on the GBL card reads as "35" at 0.54w.
+        stray = self.box("35", 405, 1281, width=40, height=26)
+        image = Image.new("RGB", (self.W, self.H))
+        self.assertIsNone(gbl_ios.encounter_marker([stray], image))
+
+    async def test_a_plateless_read_keeps_throwing(self) -> None:
+        image = Image.new("RGB", (self.W, self.H))
+        device = SimpleNamespace(
+            screenshot=AsyncMock(return_value=image), tap=AsyncMock(),
+            config=SimpleNamespace(coordinates={}),
+            fraction_point=lambda x, y: [round(375 * x), round(667 * y)],
+            scale_point=lambda point: point,
+            label="SE",
+        )
+        reads = iter(
+            [[self.box("Lugia / CP 2091", 375, 211)]]
+            + [[self.box("416", 488, 1277, width=60, height=26)]] * 40
+        )
+        with (
+            patch.object(gbl_ios.gbl_vision, "recognize", side_effect=lambda _i: next(reads)),
+            patch.object(gbl_ios, "wait", AsyncMock()),
+            patch.object(gbl_ios, "open_excellent_thrower", MagicMock(return_value=None)),
+            patch.object(gbl_ios, "send_throw", AsyncMock(return_value=True)) as throw,
+        ):
+            await gbl_ios.take_reward_encounter(device)
+        self.assertEqual(throw.await_count, gbl_ios.ENCOUNTER_THROWS)

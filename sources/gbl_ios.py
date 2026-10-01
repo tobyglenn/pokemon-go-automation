@@ -2052,6 +2052,50 @@ async def send_throw(
     return await throw_ball(device, image)
 
 
+async def feed_before_flick(
+    device: IOSGBLDevice,
+    feeder: excellent_throw_ios.IOSExcellentThrowDevice,
+    artifacts: Path,
+    image: Image.Image,
+    throw: int,
+) -> Image.Image:
+    """Feed a Silver Pinap ahead of a plain flick; the frame to flick from.
+
+    The excellent-throw routine feeds before its own throw, but the SE refuses
+    the lock on nearly every reward, and the flicks that followed went out
+    with no berry at all.  Anything that goes wrong here costs the berry, not
+    the throw: the flick goes ahead on a fresh frame either way.
+    """
+    viewport = (device.viewport["width"], device.viewport["height"])
+    ball = excellent_throw_ios.locate_throw_ball(image, viewport)
+    if ball is None:
+        return image
+    directory = artifacts / f"flick-{throw:02d}"
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        await excellent_throw_ios.use_nanab_berry(
+            feeder, ball, image, directory, berry="silver"
+        )
+    except (excellent_throw_ios.ExcellentThrowError, WebDriverException, OSError) as exc:
+        log(device, f"  Silver Pinap not fed ({exc}); flicking without it")
+    fresh = await device.screenshot()
+    return image if fresh is None else fresh
+
+
+def encounter_marker(
+    boxes: list[gbl_vision.OCRBox], image: Image.Image
+) -> gbl_vision.OCRBox | None:
+    """The plate of a reward encounter, else its ball count; None off one.
+
+    The plate follows the Pokemon, and a Lugia flies it out of the band the
+    moto measured, so the count under the ball has to vouch for the frames the
+    plate is missing from.
+    """
+    return gbl_vision.encounter_plate(
+        boxes, image.height, image.width
+    ) or gbl_vision.encounter_ball_count(boxes, image.width, image.height)
+
+
 async def take_reward_encounter(
     device: IOSGBLDevice, spend_balls: bool = True
 ) -> bool:
@@ -2079,6 +2123,12 @@ async def take_reward_encounter(
     # fires on any read that finds no thrower, so it would be built again, from
     # a fresh stream, with nothing remembered about having just given up.
     flicking = False
+    # What the reward gets fed before each throw, and -- once the lock is given
+    # up on -- the refused thrower's device, kept to feed it ahead of the flicks.
+    berry = "nanab"
+    feeder: tuple[excellent_throw_ios.IOSExcellentThrowDevice, Path] | None = None
+    # The plate's words, kept for the reads that find only the ball count.
+    named = "the reward Pokemon"
     try:
         for _read in range(ENCOUNTER_READS):
             image = await device.screenshot()
@@ -2093,8 +2143,10 @@ async def take_reward_encounter(
                 log(device, f"  Back on the GBL card after {throws} throw(s)")
                 return True
 
-            plate = gbl_vision.encounter_plate(boxes, image.height)
+            plate = encounter_marker(boxes, image)
             if plate is not None:
+                if gbl_vision.ENCOUNTER_PLATE.search(gbl_vision.normalize(plate.text)):
+                    named = plate.text.strip()
                 if (
                     throws >= ENCOUNTER_THROWS
                     or misfires >= ENCOUNTER_MISFIRES
@@ -2110,7 +2162,7 @@ async def take_reward_encounter(
                         reason = "will not stay in the ball"
                     else:
                         reason = "cannot be thrown at"
-                    log(device, f"  {plate.text.strip()} {reason}; fleeing")
+                    log(device, f"  {named} {reason}; fleeing")
                     flee = encounter_flee_point(device)
                     await device.tap(flee)
                     await wait(device, android_gbl.MENU_SETTLE)
@@ -2122,15 +2174,22 @@ async def take_reward_encounter(
                 # Every box, not just the plate: the plate box is sometimes
                 # only "CP 2056", with the name read as a box of its own.
                 legendary = legendary_pokemon.legendary_named(box.text for box in boxes)
-                if thrower is not None and legendary is not None and thrower.berry != "silver":
+                if legendary is not None and berry != "silver":
                     log(device, f"  {legendary} is legendary; feeding it Silver Pinaps")
-                    thrower.berry = "silver"
-                log(device, f"  Set reward is a catch: {plate.text.strip()}, throw {throws + 1}")
+                    berry = "silver"
+                if thrower is not None:
+                    thrower.berry = berry
+                log(device, f"  Set reward is a catch: {named}, throw {throws + 1}")
+                if feeder is not None and berry == "silver":
+                    image = await feed_before_flick(device, *feeder, image, throws + 1)
                 thrown = await send_throw(device, thrower, image)
                 if thrower is not None and thrower.refused:
                     # Drop it for the rest of the encounter rather than pay the
                     # lock's minute, and a Nanab, to be refused again per throw.
+                    # Its device stays: a legendary's flicks still get the
+                    # Silver Pinap and the Ultra Ball the lock would have had.
                     log(device, "  Excellent throw is out for this catch; flicking the rest")
+                    feeder = (thrower.thrower, thrower.artifacts)
                     thrower.close()
                     thrower = None
                     flicking = True
@@ -2178,7 +2237,7 @@ async def start_on_encounter(device: IOSGBLDevice, image: Image.Image) -> bool:
         boxes = await asyncio.to_thread(gbl_vision.recognize, image)
     except gbl_vision.VisionOCRError:
         return False
-    if gbl_vision.encounter_plate(boxes, image.height) is None:
+    if encounter_marker(boxes, image) is None:
         return False
     log(device, "  Parked on a set's reward catch; taking it before starting")
     await take_reward_encounter(device)
@@ -2912,7 +2971,7 @@ async def play_device(
         # by its own name plate instead, and answered by the routine that knows
         # the three screens a catch leaves behind.
         if not armed and not attacking and menu_boxes \
-                and gbl_vision.encounter_plate(menu_boxes, image.height) is not None:
+                and encounter_marker(menu_boxes, image) is not None:
             if await take_reward_encounter(
                 device, spend_balls=abandoned < ABANDONED_ENCOUNTER_LIMIT
             ):
@@ -3473,6 +3532,10 @@ async def async_main(args: argparse.Namespace, config: RuntimeConfig) -> int:
             # 'battle' is the fallback verdict: no pill, no league list, no
             # reward button.  Starting there would send fast attacks at whatever
             # the phone is actually showing, so refuse rather than guess.
+            # WebDriverAgent read every frame of that, so it stays up: stopping
+            # it is what sent the SE's next leg into a rebuild that the M4's
+            # ssh-locked keychain could not sign, and the phone lost the day.
+            normal_exit = True
             raise IOSGBLError(
                 "No BATTLE pill, league list or reward button on screen; put the phone on the "
                 "GO BATTLE LEAGUE screen. No taps were sent."

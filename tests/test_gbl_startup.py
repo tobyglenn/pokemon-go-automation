@@ -56,3 +56,30 @@ class IOSStartupTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "bad profile"):
                 await gbl_ios.async_main(SimpleNamespace(), config)
         connect.assert_not_called()
+
+
+class IOSStartupRefusalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_an_unknown_screen_leaves_webdriveragent_up(self):
+        # Stopping it forced the next leg to rebuild WDA, which the M4 cannot
+        # sign over ssh -- the SE lost its day to a screen it did not know.
+        config = SimpleNamespace(ios_device={"udid": "example-device"}, battles=1)
+        args = SimpleNamespace(check=False, dry_run=False, battles=1)
+        device = SimpleNamespace(
+            screenshot=AsyncMock(return_value=Image.new("RGB", (100, 200))),
+            quit=AsyncMock(),
+            restore_foreground=AsyncMock(return_value=False),
+        )
+        with (
+            patch.object(gbl_ios.gbl_strategy, "load_strategy_profile", return_value=object()),
+            patch.object(gbl_ios.IOSGBLDevice, "connect", return_value=device),
+            patch.object(gbl_ios, "probe", AsyncMock(return_value="battle")),
+            patch.object(gbl_ios.android_gbl, "teal_result_ready", return_value=False),
+            patch.object(gbl_ios, "start_on_encounter", AsyncMock(return_value=False)),
+            patch.object(gbl_ios.gbl_vision, "recognize", return_value=[]),
+            patch.object(gbl_ios, "wait", AsyncMock()),
+            patch.object(gbl_ios.ios_wda_cleanup, "stop_wda_runner") as stop,
+        ):
+            with self.assertRaisesRegex(gbl_ios.IOSGBLError, "No BATTLE pill"):
+                await gbl_ios.async_main(args, config)
+        device.quit.assert_awaited_once()
+        stop.assert_not_called()

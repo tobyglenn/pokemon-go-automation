@@ -271,6 +271,12 @@ MOTO_CHARGED_Y = 0.855
 TEAL_SAMPLE_X = (0.465, 0.50, 0.535)
 TEAL_SAMPLE_Y = (0.858, 0.875, 0.892)
 TEAL_READY_FRACTION = 0.20
+# Android only: where an edge-to-edge game draws the tick, one nav bar lower.
+LOW_DISC_SCAN_Y = (0.84, 0.99)
+LOW_DISC_MIN_Y = 0.905
+LOW_DISC_MIN_HEIGHT = 0.035
+LOW_DISC_WIDTH = (0.08, 0.16)          # of screen width, through the centre row
+RESULT_TEAL_FLAT = (28, 133, 148)
 
 # The weekly report's close disc sits below the card's stat rows, and it is a
 # disc rather than a hairline: the SE's measures 75px on a 1334px frame, while
@@ -694,6 +700,11 @@ REWARD_TILE_TAP_Y = 0.30
 # under the text -- two cards of the three on the android-one, and the bottom of a card
 # rather than its middle.
 CARD_SCAN_X = (0.86, 0.93)
+# Long card text reaches into that band -- on 30 Sep "No limit" and "Great
+# League Edition" split both cards into slivers under CARD_MIN_HEIGHT, and the
+# list read as a battlefield. The blank gap between icon and title is a second
+# witness; a row is card-white if either band is.
+CARD_GAP_X = (0.33, 0.37)
 CARD_SCAN_Y = (0.28, 0.80)   # below the "CHOOSE YOUR LEAGUE" heading, above bottom nav bar
 CARD_SCAN_STEPS = 16
 CARD_ROW_WHITE = 0.90
@@ -1473,9 +1484,16 @@ def basic_banner_row(frame, y: int) -> bool:
 
 
 def white_row(frame, y: int) -> bool:
-    """Whether row y is near-white right across the card band."""
+    """Whether row y is near-white right across either card band."""
+    return (
+        white_band_row(frame, y, CARD_SCAN_X)
+        or white_band_row(frame, y, CARD_GAP_X)
+    )
+
+
+def white_band_row(frame, y: int, scan_x: tuple[float, float]) -> bool:
     width, _height, offset, data = frame
-    x0, x1 = CARD_SCAN_X
+    x0, x1 = scan_x
     hits = 0
     for xi in range(CARD_SCAN_STEPS):
         x = int(width * (x0 + (x1 - x0) * xi / (CARD_SCAN_STEPS - 1)))
@@ -2195,7 +2213,13 @@ async def settled_league_point(
     frame = await read_screen(device)
     if frame is None:
         return None
-    state, again, again_label, _boxes = await smart_screen_state(frame, profile)
+    # Probed like the read it is checking. The shape detector cannot always
+    # find the cards: on 30 Sep, with two live cards above the greyed "coming
+    # next" previews, it called the list a battlefield, OCR was skipped, and
+    # every re-read disagreed -- no phone tapped a league all morning.
+    state, again, again_label, _boxes = await smart_screen_state(
+        frame, profile, probe_unknown=True
+    )
     if state != 'league' or again is None:
         return None
     if label is not None and again_label != label:
@@ -2853,13 +2877,79 @@ def shield_candidate_point(frame) -> list[int] | None:
     return [int(width * SHIELD_TAP_X), (run[0] + run[-1]) // 2]
 
 
-def result_tap_point(frame) -> list[int]:
+def result_tap_point(frame, low_disc: bool = False) -> list[int]:
     """The middle of the teal tick, which is not at one height on every phone."""
+    if low_disc:
+        low = low_result_disc_y(frame)
+        if low is not None:
+            return [int(frame[0] * RESULT_TAP_X), low]
     y_fraction = MOTO_RESULT_TAP_Y if moto_layout(frame) else RESULT_TAP_Y
     return [int(frame[0] * RESULT_TAP_X), int(frame[1] * y_fraction)]
 
 
-def teal_result_ready(frame, sample_x=TEAL_SAMPLE_X, sample_y=TEAL_SAMPLE_Y) -> bool:
+def result_teal(rgb: tuple[int, int, int]) -> bool:
+    red, green, blue = rgb
+    return (red <= 70 and 115 <= green <= 190 and 115 <= blue <= 195
+            and abs(green - blue) <= 35)
+
+
+def low_result_disc_y(frame) -> int | None:
+    """Centre row of a teal tick drawn below the calibrated rows, or None.
+
+    PoGO 0.431 draws edge-to-edge, and on 30 Sep ph-1's tick sat at
+    0.903-0.959h against the 0.846-0.904h it was measured at -- one navigation
+    bar lower. The fixed sample rows then missed it, and the leg attacked
+    GOOD EFFORT! for minutes. Only a disc centred below LOW_DISC_MIN_Y counts,
+    which keeps clear of the charged-move buttons above it.
+    """
+    width, height, offset, data = frame
+    # Three columns, since the white tick itself cuts through any one of them.
+    columns = [int(width * xf) for xf in TEAL_SAMPLE_X]
+    best: tuple[int, int] | None = None
+    start: int | None = None
+    for y in range(int(height * LOW_DISC_SCAN_Y[0]), int(height * LOW_DISC_SCAN_Y[1])):
+        if any(result_teal(pixel(width, offset, data, x, y)) for x in columns):
+            if start is None:
+                start = y
+            if best is None or y - start > best[1] - best[0]:
+                best = (start, y)
+        else:
+            start = None
+    if best is None or best[1] - best[0] < height * LOW_DISC_MIN_HEIGHT:
+        return None
+    centre = (best[0] + best[1]) // 2
+    if centre < height * LOW_DISC_MIN_Y:
+        return None
+    # The tick is one flat colour on a disc about 0.11w across. Ice Burn's
+    # minigame bubbles are teal too, but shaded and not that shape: one read
+    # of them ended a live battle on ph-1 halfway through.
+    # Outermost teal either side, since the tick's own strokes break the run.
+    x = int(width * RESULT_TAP_X)
+    reach = int(width * 0.10)
+    hits = [
+        xi for xi in range(x - reach, x + reach + 1)
+        if result_teal(pixel(width, offset, data, xi, centre))
+    ]
+    if not hits:
+        return None
+    left, right = hits[0], hits[-1]
+    if not LOW_DISC_WIDTH[0] <= (right - left) / width <= LOW_DISC_WIDTH[1]:
+        return None
+    if abs((left + right) / 2 - x) > width * 0.02:
+        return None
+    column = int(width * TEAL_SAMPLE_X[0])
+    rows = range(best[0], best[1] + 1)
+    flat = sum(
+        1 for y in rows
+        if all(abs(c - t) <= 10 for c, t in zip(
+            pixel(width, offset, data, column, y), RESULT_TEAL_FLAT))
+    )
+    return centre if flat / len(rows) >= 0.6 else None
+
+
+def teal_result_ready(
+    frame, sample_x=TEAL_SAMPLE_X, sample_y=TEAL_SAMPLE_Y, low_disc: bool = False
+) -> bool:
     """Whether the bottom action is the teal post-battle checkmark.
 
     This is only consulted after screen-state detection found no menu action.
@@ -2881,10 +2971,11 @@ def teal_result_ready(frame, sample_x=TEAL_SAMPLE_X, sample_y=TEAL_SAMPLE_Y) -> 
             red, green, blue = pixel(
                 width, offset, data, int(width * xf), int(height * yf))
             total += 1
-            if red <= 70 and 115 <= green <= 190 and 115 <= blue <= 195 \
-                    and abs(green - blue) <= 35:
+            if result_teal((red, green, blue)):
                 teal += 1
-    return teal / total >= TEAL_READY_FRACTION
+    if teal / total >= TEAL_READY_FRACTION:
+        return True
+    return low_disc and low_result_disc_y(frame) is not None
 
 
 def sheet_row(frame, y: int) -> bool:
@@ -3287,7 +3378,7 @@ async def recover_to_gbl(
             await tap(device, point)
             return
 
-    if teal_result_ready(frame):
+    if teal_result_ready(frame, low_disc=True):
         result_boxes = boxes
         if not result_boxes:
             try:
@@ -3299,7 +3390,7 @@ async def recover_to_gbl(
         if gbl_vision.gbl_card_visible(result_boxes):
             log(device, '  Teal disc here is the GBL card close button, not a checkmark; leaving it')
             return
-        point = result_tap_point(frame)
+        point = result_tap_point(frame, low_disc=True)
         log(device, f' Closing panel teal button at {point}')
         await tap(device, point)
         return
@@ -4137,7 +4228,7 @@ async def play_device(
         if state in ('scroll', 'scroll_back', 'tiles') and (armed or attacking):
             state = 'battle'
 
-        if attacking and state == "battle" and teal_result_ready(frame):
+        if attacking and state == "battle" and teal_result_ready(frame, low_disc=True):
             result_boxes = menu_boxes
             if not result_boxes:
                 try:
@@ -4155,7 +4246,7 @@ async def play_device(
                 # was never read is not evidence the game counted one.
                 interrupted += 1
                 log(device, f'Battle {played + 1}/{count} over (result OCR unavailable)')
-            await tap(device, result_tap_point(frame))
+            await tap(device, result_tap_point(frame, low_disc=True))
             played += 1
             if played >= count:
                 break
@@ -4544,8 +4635,8 @@ async def play_device(
         # It is also tested ahead of the charged move, since a teal tick is a
         # high-contrast bottom-centre disc too and that branch would answer it
         # with minigame swipes across the result screen.
-        if teal_result_ready(frame):
-            result = result_tap_point(frame)
+        if teal_result_ready(frame, low_disc=True):
+            result = result_tap_point(frame, low_disc=True)
             result_boxes = menu_boxes
             if not result_boxes:
                 try:

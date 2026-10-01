@@ -66,6 +66,9 @@ BALL_SWITCH_POINT = (0.872, 0.839)
 BALL_CHOICE_X = 0.498
 BALL_CHOICE_BELOW_SHEET = 0.167
 BALL_CHOICE_POINT = (0.498, 0.750)
+# The Ultra Ball, third in that row, for a Silver Pinap's throw.  Measured on
+# the SE's chooser (see excellent_throw_ios); not yet on an Android sheet.
+ULTRA_CHOICE_X = excellent_throw_ios.ULTRA_CHOICE_X
 BALL_SHEET_SECONDS = 1.2
 # How long a ball detection stays worth agreeing with. Two reads of the same
 # ball used to have to be back-to-back, and on the android-one they never were: the
@@ -950,19 +953,22 @@ async def feed_berry(
     return False
 
 
-async def swap_to_ball(device: AndroidDevice, artifact_dir: Path) -> bool:
+async def swap_to_ball(
+    device: AndroidDevice, artifact_dir: Path, choice_x: float = BALL_CHOICE_X
+) -> bool:
     """Put a ball back in the hand, and say whether it is there.
 
     Feeding a berry does not hand the ball back -- the game reselects a berry --
     so without this the throw that follows throws the berry, and a thrown berry
     never catches anything.  That was every no-catch attempt on both Androids.
+    `choice_x` picks the ball across the chooser's first row.
     """
     for attempt in range(1, 3):
         image, _ts = await capture_frame(device)
         await device.tap(encounter_button(image, device, "switch"))
         await asyncio.sleep(BALL_SHEET_SECONDS)
         sheet, _ts = await capture_frame(device)
-        await device.tap(ball_choice_point(sheet, device))
+        await device.tap(ball_choice_point(sheet, device, choice_x))
         await asyncio.sleep(BALL_SHEET_SECONDS)
         image, _ts = await capture_frame(device)
         image.save(artifact_dir / "ball-in-hand.jpg", "JPEG", quality=72)
@@ -973,8 +979,10 @@ async def swap_to_ball(device: AndroidDevice, artifact_dir: Path) -> bool:
     return False
 
 
-def ball_choice_point(image: Image.Image, device: AndroidDevice) -> list[int]:
-    """Where the Great Ball sits in the open held-item chooser.
+def ball_choice_point(
+    image: Image.Image, device: AndroidDevice, choice_x: float = BALL_CHOICE_X
+) -> list[int]:
+    """Where a ball -- the Great Ball by default -- sits in the open chooser.
 
     Anchored to the sheet's own top edge, because the sheet is anchored to the
     bottom of the screen and phones are not all the same shape: the same ball
@@ -985,9 +993,9 @@ def ball_choice_point(image: Image.Image, device: AndroidDevice) -> list[int]:
     rgba = image.convert("RGBA")
     top = berry_android.picker_sheet_top(rgba.width, rgba.height, 0, rgba.tobytes())
     if top is None:
-        return _fraction_point(device, BALL_CHOICE_POINT)
+        return _fraction_point(device, (choice_x, BALL_CHOICE_POINT[1]))
     return [
-        round(image.width * BALL_CHOICE_X),
+        round(image.width * choice_x),
         round(top + image.width * BALL_CHOICE_BELOW_SHEET),
     ]
 
@@ -1108,6 +1116,9 @@ async def use_nanab_berry(
     # throws the berry, and a thrown berry never caught anything.
     if not await feed_berry(device, ball, artifact_dir):
         await swap_to_ball(device, artifact_dir)
+    elif kind == 'silver':
+        # The ball the feed hands back is whichever was last thrown.
+        await swap_to_ball(device, artifact_dir, ULTRA_CHOICE_X)
 
 
 def fallback_target(

@@ -526,5 +526,54 @@ class ConfigSelectionTests(unittest.TestCase):
 
 
 
+class SilverPinapFeedTests(unittest.IsolatedAsyncioTestCase):
+    """A Silver Pinap is fed with a tap and followed by an Ultra Ball.
+
+    Live on the SE on 25 Sep 2026: four kinds of flick left a held Silver
+    Pinap in the hand with the bag still at 117; one tap on it fed it.
+    """
+
+    def setUp(self) -> None:
+        from sources import berry_android
+
+        berry_android.forget_empty_pockets()
+        self.addCleanup(berry_android.forget_empty_pockets)
+
+    async def feed(self, listed: list) -> tuple:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        picker = Image.new("RGB", (750, 1334))
+        device = SimpleNamespace(
+            label="SE",
+            viewport=VIEWPORT,
+            tap=AsyncMock(),
+            flick=AsyncMock(),
+            screenshot=MagicMock(return_value=picker),
+        )
+        ball = thrower.BallDetection(1.0, 187, 573, 46)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("sources.berry_android.picker_read", return_value=listed),
+            patch.object(thrower, "berry_in_hand", return_value=False),
+            patch.object(thrower, "swap_to_ball", new=AsyncMock()) as swap,
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            await thrower.use_nanab_berry(
+                device, ball, picker, Path(tmp), berry="silver"
+            )
+        return device, swap
+
+    async def test_a_silver_pinap_is_tapped_and_swapped_for_an_ultra_ball(self) -> None:
+        device, swap = await self.feed([("nanab", [375, 938]), ("silver", [375, 1170])])
+        taps = [call.args[0] for call in device.tap.await_args_list]
+        self.assertEqual(taps, [[188, 585], [187, 573]])
+        device.flick.assert_not_awaited()
+        self.assertEqual(swap.await_args.kwargs["choice_x"], thrower.ULTRA_CHOICE_X)
+
+    async def test_a_nanab_fallback_keeps_the_great_ball(self) -> None:
+        device, swap = await self.feed([("nanab", [375, 938])])
+        self.assertEqual(swap.await_args.kwargs["choice_x"], thrower.BALL_CHOICE_X)
+
+
 if __name__ == "__main__":
     unittest.main()

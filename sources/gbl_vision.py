@@ -750,20 +750,62 @@ ENCOUNTER_PLATE = re.compile(r"\bcp ?\d+\b")
 # Where that plate sits, as a fraction of screen height. Measured on the moto at
 # 720x1600: plate at y=562, so 0.35h, with room either side for taller layouts.
 ENCOUNTER_PLATE_BAND = (0.25, 0.50)
+# The plate rides above the Pokemon, so a tall flyer carries it well above that
+# band. The SE's Lugia put it anywhere from 0.03h to 0.26h, read in band on
+# one frame in ten, and the leg lost the encounter after its first throw and
+# stood on it for two minutes. Up there the battle header also reads "CP", but
+# it sits in the corners; the plate is centred. Checked against 755 saved SE
+# GBL screens: no centred CP box in this band on any of them.
+ENCOUNTER_PLATE_HIGH_BAND = (0.02, 0.25)
+ENCOUNTER_PLATE_CENTRE = 0.12  # most the plate's centre strays from mid-width
+
+# The ball count under the held ball, the one thing on an encounter that does
+# not move with the Pokemon. On the SE it reads at 0.65w, 0.96h on every saved
+# encounter; the "Battles: 335" line on the GBL card is the nearest miss, at
+# 0.54w. OCR drops it on about a third of frames, so it backs the plate up
+# rather than replacing it.
+ENCOUNTER_BALL_COUNT = re.compile(r"^\d{1,4}$")
+ENCOUNTER_BALL_COUNT_X = (0.58, 0.75)
+ENCOUNTER_BALL_COUNT_TOP = 0.93
 
 
-def encounter_plate(boxes: Iterable[OCRBox], image_height: int) -> OCRBox | None:
+def encounter_plate(
+    boxes: Iterable[OCRBox], image_height: int, image_width: int | None = None
+) -> OCRBox | None:
     """The name/CP plate of a catch screen, if this is one.
 
     A finished set pays out as an encounter often enough to matter, drawn over
     the GO BATTLE LEAGUE card. Nothing on that screen is a button this loop
     knows, so it read as unrecognised and the run spent its recovery scrolling
     and pressing exit doors while the next set sat unreachable behind it.
+
+    With `image_width`, a centred plate above the band counts as well.
     """
     for box in boxes:
-        if not ENCOUNTER_PLATE_BAND[0] <= box.center_y / image_height <= ENCOUNTER_PLATE_BAND[1]:
+        y = box.center_y / image_height
+        in_band = ENCOUNTER_PLATE_BAND[0] <= y <= ENCOUNTER_PLATE_BAND[1]
+        high = (
+            image_width is not None
+            and ENCOUNTER_PLATE_HIGH_BAND[0] <= y < ENCOUNTER_PLATE_HIGH_BAND[1]
+            and abs(box.center_x / image_width - 0.5) <= ENCOUNTER_PLATE_CENTRE
+        )
+        if not (in_band or high):
             continue
         if ENCOUNTER_PLATE.search(normalize(box.text)):
+            return box
+    return None
+
+
+def encounter_ball_count(
+    boxes: Iterable[OCRBox], image_width: int, image_height: int
+) -> OCRBox | None:
+    """The ball count under an encounter's held ball, if one was read."""
+    for box in boxes:
+        if box.center_y / image_height < ENCOUNTER_BALL_COUNT_TOP:
+            continue
+        if not ENCOUNTER_BALL_COUNT_X[0] <= box.center_x / image_width <= ENCOUNTER_BALL_COUNT_X[1]:
+            continue
+        if ENCOUNTER_BALL_COUNT.match(box.text.strip()):
             return box
     return None
 

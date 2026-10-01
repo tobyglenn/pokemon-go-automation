@@ -388,6 +388,27 @@ class UpcomingPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(label, "Great League")
         self.assertLess(point[1], int(1600 * 0.60))
 
+    async def test_android_settle_read_is_probed_when_shapes_miss_the_cards(self) -> None:
+        # 30 Sep: the shape detector found no card on the chooser and called it
+        # a battlefield, so an unprobed re-read never agreed with the probed
+        # read it was checking, and every phone looped "still moving".
+        image = Image.new("RGB", (720, 1600), (60, 90, 50))
+        with (
+            patch.object(gbl, "read_screen",
+                         AsyncMock(return_value=as_frame(frame(720, 1600)))),
+            patch.object(gbl.gbl_vision, "recognize",
+                         return_value=self.chooser(image.height)),
+            patch.object(gbl, "frame_image", lambda _frame: image),
+            patch.object(gbl, "read_screen_state", lambda _frame: ("battle", None)),
+        ):
+            state, first, label, _boxes = await gbl.smart_screen_state(
+                as_frame(frame(720, 1600)), profile("Master League"),
+                probe_unknown=True)
+            self.assertEqual(state, "league")
+            settled = await gbl.settled_league_point(
+                SimpleNamespace(), profile("Master League"), first, label)
+        self.assertEqual(settled, first)
+
 
 if __name__ == "__main__":
     unittest.main()

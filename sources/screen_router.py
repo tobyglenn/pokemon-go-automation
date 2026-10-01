@@ -180,12 +180,37 @@ async def launch(arguments: list[str]) -> int:
     return await process.wait()
 
 
-async def attached_androids() -> dict:
+async def adb_states() -> dict[str, str]:
+    """serial -> adb state.  `adb devices` starts the server when none is up."""
+    process = await asyncio.create_subprocess_exec(
+        berry_android.ADB_BINARY, "devices",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode:
+        raise RuntimeError(stderr.decode(errors="replace").strip() or "adb devices failed")
+    states = {}
+    for line in stdout.decode(errors="replace").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 2:
+            states[fields[0]] = fields[1]
+    return states
+
+
+async def attached_androids(specs: list[pokemon_fleet.DeviceSpec] = ()) -> dict:
     try:
-        return {device.serial: device for device in await berry_android.ClientAsync().devices()}
+        states = await adb_states()
+        devices = await berry_android.ClientAsync().devices()
     except Exception as exc:
         print(f"No Android phones read ({exc})")
         return {}
+    names = {spec.identifier: spec.name for spec in specs if spec.platform == "android"}
+    for serial, state in states.items():
+        if state != "device":
+            # An unauthorized phone is listed by ppadb, then fails every read.
+            hint = "; accept USB debugging on the phone" if state == "unauthorized" else ""
+            print(f"[{names.get(serial, serial)}] adb says {state}{hint}; skipped", flush=True)
+    return {device.serial: device for device in devices if states.get(device.serial) == "device"}
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -195,7 +220,7 @@ async def run(args: argparse.Namespace) -> int:
         spec for spec in fleet.devices.values()
         if spec.enabled and (not wanted or spec.name in wanted)
     ]
-    androids = await attached_androids()
+    androids = await attached_androids(specs)
     iphones = pokemon_fleet.ios_connected_udids()
     here = [
         spec for spec in specs

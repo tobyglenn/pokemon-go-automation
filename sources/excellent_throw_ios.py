@@ -578,7 +578,6 @@ def locate_encounter_buttons(
 
 
 BERRY_PINK_FRACTION = 0.15
-NANAB_FLICK_MS = 260
 NANAB_FEED_SETTLE_SECONDS = 1.6
 # Fallbacks only; the corner buttons are found per frame by
 # `locate_encounter_buttons`, whose y differs from phone to phone.
@@ -590,6 +589,10 @@ BALL_SWITCH_POINT = (0.872, 0.839)
 BALL_CHOICE_X = 0.498
 BALL_CHOICE_BELOW_SHEET = 0.167
 BALL_CHOICE_POINT = (0.498, 0.750)
+# The Ultra Ball, third in the same row -- the rightmost ball short of the
+# Master Ball, which sits alone on the row below.  Measured on the SE's chooser
+# on 25 Sep 2026.  A Silver Pinap is only worth its throw with an Ultra Ball.
+ULTRA_CHOICE_X = 0.813
 BALL_SHEET_SECONDS = 1.2
 
 
@@ -2108,9 +2111,9 @@ async def use_nanab_berry(
     berry = berry_android.berry_to_feed(device.label, berry)
     if berry_in_hand(encounter_image, device.viewport):
         # The last attempt left one in the hand; opening the picker again would
-        # only select a second. Throw the one that is already there.
+        # only select a second. Feed the one that is already there.
         print(f"[{device.label}] A Nanab is already in hand; feeding it", flush=True)
-        await flick_berry(device, ball, encounter_image, artifact_dir)
+        await feed_held_berry(device, ball)
         await swap_to_ball(device, artifact_dir)
         return
 
@@ -2183,58 +2186,52 @@ async def use_nanab_berry(
         round(pixel[1] * device.viewport[1] / picker_image.height),
     ]
     await device.tap(logical)
-    # The picker sheet takes about a second to slide away; flicking through it
+    # The picker sheet takes about a second to slide away; tapping through it
     # feeds nothing and leaves the berry in hand for the throw.
     await asyncio.sleep(1.2)
-    await flick_berry(device, ball, encounter_image, artifact_dir)
-    await swap_to_ball(device, artifact_dir)
+    await feed_held_berry(device, ball)
+    await swap_to_ball(
+        device,
+        artifact_dir,
+        choice_x=ULTRA_CHOICE_X if kind == "silver" else BALL_CHOICE_X,
+    )
 
 
-async def flick_berry(
-    device: IOSExcellentThrowDevice,
-    ball: BallDetection,
-    encounter_image: Image.Image,
-    artifact_dir: Path,
-) -> None:
-    """Throw the held berry at the Pokemon.
+async def feed_held_berry(device: IOSExcellentThrowDevice, ball: BallDetection) -> None:
+    """Feed the berry in the hand to the Pokemon: one tap on it.
 
-    Selecting a Nanab only puts it in the hand -- it has to be thrown with the
-    same gesture as a ball, and the tap that used to be here fed nothing.
-
-    Not verified afterwards: a successful feed makes the game select another
-    berry, so a berry is in the hand either way.  One flick, then take the ball
-    back with `swap_to_ball`.
+    Not a flick.  On 25 Sep 2026 the SE held a Silver Pinap through a stepped
+    flick, a ball-throw trace, a held flick and a 50ms flick; each one lifted
+    the berry a few points and dropped it back, and the bag stayed at 117.
+    One tap on the berry fed it -- the bag went to 116 -- and the game handed
+    the ball back on its own.  The berry sits where the ball was.
     """
-    target = _detect_immediate_target(
-        encounter_image, ball, device.viewport, device.config
-    )
-    feed_y = max(
-        round(device.viewport[1] * 0.34),
-        min(round(device.viewport[1] * 0.58), target.center_y),
-    )
-    await device.flick(
-        [ball.center_x, ball.center_y], [target.center_x, feed_y], NANAB_FLICK_MS
-    )
+    await device.tap([ball.center_x, ball.center_y])
     print(
-        f"[{device.label}] Nanab flicked to ({target.center_x},{feed_y})", flush=True
+        f"[{device.label}] Berry fed with a tap at ({ball.center_x},{ball.center_y})",
+        flush=True,
     )
     await asyncio.sleep(NANAB_FEED_SETTLE_SECONDS)
 
 
 async def swap_to_ball(
-    device: IOSExcellentThrowDevice, artifact_dir: Path
+    device: IOSExcellentThrowDevice,
+    artifact_dir: Path,
+    choice_x: float = BALL_CHOICE_X,
 ) -> bool:
     """Put a ball back in the hand, and say whether it is there.
 
     Feeding does not hand the ball back; the game reselects a berry.  Without
     this the throw that follows throws the berry, which never catches anything.
+    `choice_x` picks the ball across the chooser's first row: the Great Ball
+    by default, `ULTRA_CHOICE_X` after a Silver Pinap.
     """
     for attempt in range(1, 3):
         frame = await asyncio.to_thread(device.screenshot)
         await device.tap(_encounter_button(frame, device, "switch"))
         await asyncio.sleep(BALL_SHEET_SECONDS)
         sheet = await asyncio.to_thread(device.screenshot)
-        await device.tap(_ball_choice_point(sheet, device))
+        await device.tap(_ball_choice_point(sheet, device, choice_x))
         await asyncio.sleep(BALL_SHEET_SECONDS)
         image = await asyncio.to_thread(device.screenshot)
         image.save(artifact_dir / "ball-in-hand.png")
@@ -2248,17 +2245,19 @@ async def swap_to_ball(
 
 
 def _ball_choice_point(
-    image: Image.Image, device: IOSExcellentThrowDevice
+    image: Image.Image,
+    device: IOSExcellentThrowDevice,
+    choice_x: float = BALL_CHOICE_X,
 ) -> list[int]:
-    """The Great Ball in the open chooser, anchored to the sheet's top edge."""
+    """A ball in the open chooser's first row, anchored to the sheet's top edge."""
     from . import berry_android
 
     rgba = image.convert("RGBA")
     top = berry_android.picker_sheet_top(rgba.width, rgba.height, 0, rgba.tobytes())
     if top is None:
-        return _viewport_fraction(device, BALL_CHOICE_POINT)
+        return _viewport_fraction(device, (choice_x, BALL_CHOICE_POINT[1]))
     return [
-        round(device.viewport[0] * BALL_CHOICE_X),
+        round(device.viewport[0] * choice_x),
         round(
             (top + image.width * BALL_CHOICE_BELOW_SHEET)
             * device.viewport[1]
