@@ -836,6 +836,15 @@ async def smart_screen_state(
     boxes: list[gbl_vision.OCRBox] = []
     if state != "battle" or probe_unknown:
         boxes = await asyncio.to_thread(gbl_vision.recognize, image)
+        # A lit charged move is a solid orange disc in the button band, and the
+        # shape detector calls it the end-of-set reward. Both players' CP
+        # plates name the battlefield, which no GBL card carries.
+        if (
+            state != "battle"
+            and not gbl_vision.gbl_card_visible(boxes)
+            and gbl_vision.battle_header_visible(boxes, image.width, image.height)
+        ):
+            return "battle", None, None, boxes
         # An unclaimed reward outranks any action label on the same card. The
         # card a finished set leaves behind carries both, and its BATTLE is
         # spent -- greyed out until the tiles beside it are taken. The SE read
@@ -1794,8 +1803,12 @@ async def throw_ball(
     *,
     rise: float = ENCOUNTER_THROW_RISE,
     step_ms: int = ENCOUNTER_THROW_MS,
+    trust_hand: bool = False,
 ) -> bool:
     """Flick the encounter ball straight up the screen.  Says whether it went.
+
+    `trust_hand` skips the ball-or-item test, for a caller that has already
+    swapped a ball in and seen the test refuse it anyway.
 
     One ``dragFromToForDuration`` is read as a tap by Pokemon GO -- that is how
     the trade lobby gets opened by accident -- so the flick is a stepped pointer
@@ -1809,7 +1822,7 @@ async def throw_ball(
     ball = excellent_throw_ios.locate_throw_ball(image, viewport)
     if ball is None:
         return False
-    if not excellent_throw_ios.ball_in_hand(image, viewport):
+    if not trust_hand and not excellent_throw_ios.ball_in_hand(image, viewport):
         # `locate_throw_ball` matches a held berry as happily as a ball -- it
         # scored 0.99 on one -- so without this the flick throws the berry, and
         # a thrown berry never catches anything.  Asked as "is this a ball"

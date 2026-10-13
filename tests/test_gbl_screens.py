@@ -259,6 +259,41 @@ class SpentSetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state, "pill")
 
 
+class ChargedDiscIsNotARewardTests(unittest.IsolatedAsyncioTestCase):
+    """A lit charged move is solid orange in the button band.
+
+    The SE read its FUSION FLARE as the end-of-set reward mid-battle on 4 Oct,
+    wrote the battle off and walked recovery taps to the surrender prompt.
+    These are the boxes OCR read off that frame.
+    """
+
+    BATTLEFIELD = [
+        gbl_vision.OCRBox("9:15 AM", 1.0, 375, 20, 90, 24),
+        gbl_vision.OCRBox("Kyurem", 1.0, 68, 125, 80, 24),
+        gbl_vision.OCRBox("CP 5061", 1.0, 252, 125, 84, 24),
+        gbl_vision.OCRBox("CP 4618", 1.0, 497, 125, 84, 24),
+        gbl_vision.OCRBox("Mewtwo", 1.0, 675, 125, 86, 24),
+        gbl_vision.OCRBox("CP 5629", 1.0, 690, 805, 60, 20),
+        gbl_vision.OCRBox("ICE BURN", 1.0, 231, 1245, 96, 20),
+        gbl_vision.OCRBox("FUSION FLARE", 1.0, 517, 1267, 180, 24),
+    ]
+
+    async def test_the_battle_header_overrules_the_orange_shape(self) -> None:
+        image = Image.new("RGB", (750, 1334))
+        with patch.object(gbl, "read_screen_state", return_value=("orange", [522, 1160])), \
+                patch.object(gbl_vision, "recognize", return_value=self.BATTLEFIELD):
+            state, point, _label, _boxes = await gbl_ios.smart_screen_state(
+                image, object(), probe_unknown=True)
+        self.assertEqual(state, "battle")
+        self.assertIsNone(point)
+
+    def test_one_corner_is_not_a_battle_header(self) -> None:
+        # A catch screen's plate is one CP, centred; the header has two.
+        boxes = [box for box in self.BATTLEFIELD if box.text != "CP 4618"]
+        self.assertFalse(gbl_vision.battle_header_visible(boxes, 750, 1334))
+        self.assertTrue(gbl_vision.battle_header_visible(self.BATTLEFIELD, 750, 1334))
+
+
 class RewardEncounterTests(unittest.IsolatedAsyncioTestCase):
     """The catch a finished set pays out, on the iPhone transport.
 
@@ -1417,7 +1452,7 @@ class CombatTacticsTests(unittest.TestCase):
         self.assertTrue(gbl.teal_result_ready(self.button((28, 133, 148))))
 
     def test_edge_to_edge_result_tick_one_nav_bar_lower(self) -> None:
-        # 30 Sep, ph-1 on PoGO 0.431: the tick sat at 0.903-0.959h, below
+        # 30 Sep, android-one on PoGO 0.431: the tick sat at 0.903-0.959h, below
         # every calibrated sample row, and the leg attacked GOOD EFFORT!.
         f = frame(width=1316, height=2560, background=(60, 90, 50))
         put(f, 0.444, 0.556, 0.903, 0.959, (28, 133, 148))
@@ -1429,7 +1464,7 @@ class CombatTacticsTests(unittest.TestCase):
 
     def test_low_disc_search_ignores_shaded_or_wide_teal(self) -> None:
         # Ice Burn's minigame bubbles are teal but shaded; a teal band is not
-        # a disc. Either one ended a live battle on ph-1 as a LOSS.
+        # a disc. Either one ended a live battle on android-one as a LOSS.
         f = frame(width=1316, height=2560, background=(60, 90, 50))
         put(f, 0.444, 0.556, 0.903, 0.959, (60, 170, 185))
         self.assertIsNone(gbl.low_result_disc_y(as_frame(f)))
@@ -2149,7 +2184,7 @@ class WalkBackFromTheMapTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AndroidLockedRewardTileTests(unittest.IsolatedAsyncioTestCase):
-    """The moto-g hit the SE's stall on the Android path, same day.
+    """The android-one hit the compact iOS stall on the Android path, same day.
 
     The row was scrolled past the tile the set earned, `locked_reward_tile` did
     not catch the caption, so the leg took a locked tile, got the rank roster,
@@ -2167,7 +2202,7 @@ class AndroidLockedRewardTileTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         device = SimpleNamespace(
-            config={'GBL_MOVE_BTN': [360, 800]}, label='moto-g')
+            config={'GBL_MOVE_BTN': [360, 800]}, label='android-one')
         reads = [
             ('orange', tile, None, []),
             ('orange', tile, None, self.boxes('Pokemon available at your rank')),
@@ -2277,7 +2312,7 @@ class IOSStalledCardTests(unittest.IsolatedAsyncioTestCase):
     A set that ends back on the GBL card gets one turn of being left alone for
     the battle loop, and after that the card is refreshed through its close
     button.  That second turn called `logical_point` without the image it takes,
-    so on 2026-09-09 the SE died of a TypeError there twice and stopped playing
+    so on 2026-09-09 the compact iOS device died of a TypeError there twice and stopped playing
     with the day unfinished.
     """
 
@@ -2285,7 +2320,7 @@ class IOSStalledCardTests(unittest.IsolatedAsyncioTestCase):
         taps: list[list[int]] = []
 
         class FakeDevice:
-            label = "Second iPhone (SE)"
+            label = "ios-one"
             viewport = {"width": 375, "height": 667}
 
             def fraction_point(self, x: float, y: float) -> list[int]:
@@ -2391,7 +2426,7 @@ class IOSBattleStartingTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def device():
         device = gbl_ios.IOSGBLDevice.__new__(gbl_ios.IOSGBLDevice)
-        device.label = "Second iPhone (SE)"
+        device.label = "ios-one"
         device.viewport = {"width": 375, "height": 667}
         device.config = gbl_ios.RuntimeConfig(
             appium_server_url="http://127.0.0.1:4723",
@@ -3463,18 +3498,74 @@ class BlindRingTests(unittest.TestCase):
     on it and caught the reward Pokemon by hand.
     """
 
-    def test_a_blind_phone_is_written_off_early(self) -> None:
-        source = Path(gbl_ios.excellent_throw_ios.__file__).read_text()
-        self.assertIn(
-            "if last_measured is None and attempt >= BLIND_RING_ATTEMPTS:", source
+    def lock(self, readings):
+        """Run the ring lock against one scripted `measure_ring` result per hold."""
+        thrower = gbl_ios.excellent_throw_ios
+        config = SimpleNamespace(
+            target_ratio_min=0.12,
+            target_ratio_max=0.36,
+            calibration_hold_seconds=0.22,
+            pulse_hold_seconds=0.04,
+            max_ring_attempts=30,
         )
+        device = SimpleNamespace(
+            config=config,
+            label="SE",
+            viewport=(375, 667),
+            stationary_hold=AsyncMock(return_value=(0.0, 0.5)),
+        )
+        stream = SimpleNamespace(since=lambda *_a, **_k: [object()])
+        priors = []
 
-    def test_a_phone_that_has_read_the_ring_keeps_its_budget(self) -> None:
-        """The bail is gated on never having measured, not on this hold."""
-        source = Path(gbl_ios.excellent_throw_ios.__file__).read_text()
-        loop = source[source.index("for attempt in range(1, config.max_ring_attempts"):]
-        bail = loop.index("BLIND_RING_ATTEMPTS")
-        self.assertIn("last_measured is None", loop[bail - 60 : bail])
+        def measure(_frames, prior, _viewport):
+            priors.append(prior)
+            return readings[len(priors) - 1]
+
+        ball = thrower.BallDetection(1.0, 187, 607, 60)
+        with TemporaryDirectory() as directory, \
+                patch.object(thrower, "measure_ring", measure), \
+                patch.object(thrower, "_save_frames"), \
+                patch.object(thrower.asyncio, "sleep", AsyncMock()):
+            try:
+                result = asyncio.run(
+                    thrower.lock_excellent_ring(device, stream, Path(directory), ball)
+                )
+            except thrower.ExcellentThrowError as exc:
+                result = exc
+        return result, priors, device.stationary_hold.await_count
+
+    def test_a_blind_phone_is_written_off_early(self) -> None:
+        thrower = gbl_ios.excellent_throw_ios
+        result, _priors, holds = self.lock([None] * 30)
+        self.assertIsInstance(result, thrower.ExcellentThrowError)
+        self.assertEqual(holds, thrower.BLIND_RING_ATTEMPTS)
+
+    def test_one_read_does_not_buy_the_whole_budget(self) -> None:
+        """6 Oct 2026: one false read, then 29 blind holds on the SE."""
+        thrower = gbl_ios.excellent_throw_ios
+        false_read = thrower.RingLock(187, 204, 54, 37, 1.0)
+        result, _priors, holds = self.lock([false_read] + [None] * 29)
+        self.assertIsInstance(result, thrower.ExcellentThrowError)
+        self.assertEqual(holds, 1 + thrower.BLIND_RING_ATTEMPTS)
+
+    def test_a_blind_hold_drops_the_earlier_read(self) -> None:
+        """The real ring 130px below a false read is searched for afresh."""
+        thrower = gbl_ios.excellent_throw_ios
+        false_read = thrower.RingLock(187, 204, 54, 37, 1.0)
+        real = thrower.RingLock(187, 333, 50, 11, 0.9)
+        result, priors, _holds = self.lock([false_read, None, real])
+        self.assertEqual(result, real)
+        self.assertEqual(priors, [None, false_read, None])
+
+    def test_an_intermittent_reader_keeps_going(self) -> None:
+        """Only blind holds in a row count; a read in between resets them."""
+        thrower = gbl_ios.excellent_throw_ios
+        far = thrower.RingLock(187, 333, 50, 45, 1.0)
+        near = thrower.RingLock(187, 333, 50, 12, 1.0)
+        readings = [far, None, None, None, far, None, None, None, near]
+        result, _priors, holds = self.lock(readings)
+        self.assertEqual(result, near)
+        self.assertEqual(holds, len(readings))
 
     def test_the_budget_is_smaller_than_a_catch(self) -> None:
         """Catches are meant to land inside 30s; 30 holds never could."""
@@ -3791,7 +3882,7 @@ class DismissingRewardTapTests(unittest.IsolatedAsyncioTestCase):
             return "orange", list(self.REWARD), None, []
 
         class FakeDevice:
-            label = "Second iPhone (SE)"
+            label = "ios-one"
             viewport = {"width": 375, "height": 667}
             config = SimpleNamespace(
                 ios_device={},

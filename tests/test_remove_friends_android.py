@@ -12,8 +12,8 @@ from sources import remove_friends_android as remove
 from sources.gbl_vision import OCRBox
 
 
-# --- The heart strip, in the colours the razr draws it in ---
-# Measured on the razr (1224x2992, rows 391px) on 22 Sep 2026: five 36px
+# --- The heart strip, in the colours the test device draws it in ---
+# Measured on a test device (1224x2992, rows 391px) on 22 Sep 2026: five 36px
 # circles on a 40px pitch, 0.72-0.82 of the way down each row.
 DISC_RED = (250, 85, 45)
 HEART_YELLOW = (245, 225, 160)
@@ -101,7 +101,7 @@ class HeartCountTests(unittest.TestCase):
         self.assertIsNone(remove.count_hearts(image, rows_of(image)[0]))
 
     def test_a_short_top_row_is_still_read(self) -> None:
-        # M4C7R1CK5's black hood read as the top rule, 97px into the row,
+        # An avatar's dark hood read as the top rule, 97px into the row,
         # which slid the heart band down off the circles.
         image = friends_list([strip(), strip(REACHED)])
         draw = ImageDraw.Draw(image)
@@ -150,23 +150,23 @@ class ReadingTests(unittest.TestCase):
     def test_the_dialog_names_the_friend(self) -> None:
         boxes = [
             box("Are you sure you want to", 130, 500),
-            box("unfriend IAmArc3us?", 160, 540),
+            box("unfriend TrainerOne?", 160, 540),
             box("If you remove this friend in this", 110, 620),
             box("YES", 290, 860),
         ]
-        self.assertEqual(remove.dialog_name(boxes), "iamarc3us")
+        self.assertEqual(remove.dialog_name(boxes), "trainerone")
 
     def test_no_dialog_no_name(self) -> None:
         self.assertIsNone(remove.dialog_name([box("REMOVE FRIEND", 200, 1280)]))
 
     def test_names_match_through_ocr_lookalikes(self) -> None:
-        # What Vision read off the razr's dialog for IAmArc3us.
-        self.assertTrue(remove.same_name("IAmArc3us", "lamarcus"))
+        # What Vision read off the test device's dialog for IrisTrainer.
+        self.assertTrue(remove.same_name("IrisTrainer", "lrisTrainer"))
         self.assertTrue(remove.same_name("Steve135x", "steve 135x"))
 
     def test_a_neighbour_is_not_a_match(self) -> None:
-        self.assertFalse(remove.same_name("Imafukinidi8", "lamarcus"))
-        self.assertFalse(remove.same_name("KECHZANO", "ItalianDeGe29"))
+        self.assertFalse(remove.same_name("OtherTrainer", "IrisTrainer"))
+        self.assertFalse(remove.same_name("DifferentPlayer", "SomeoneElse"))
 
     def test_the_friend_count_is_read_under_the_tab(self) -> None:
         boxes = [box("ME", 40, 30, 40), box("FRIENDS", 260, 30, 100), box("649", 290, 60, 40)]
@@ -195,7 +195,7 @@ class RemovalTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(remove.excellent_throw_android, "capture_frame",
                              AsyncMock(return_value=(friends_list([strip()]), 0.0))), \
                 patch.object(remove.asyncio, "sleep", AsyncMock()):
-            result = await remove.remove_friend(device, row(name="IAmArc3us"))
+            result = await remove.remove_friend(device, row(name="TrainerOne"))
         return device, result
 
     profile = [box("REMOVE FRIEND", 300, 2560, 600, 30)]
@@ -206,14 +206,14 @@ class RemovalTests(unittest.IsolatedAsyncioTestCase):
     ])
 
     async def test_the_right_name_is_confirmed(self) -> None:
-        dialog = self.dialog_for("IAmArc3us")
+        dialog = self.dialog_for("TrainerOne")
         device, (removed, _what) = await self.run_removal([self.profile, dialog, dialog])
         self.assertTrue(removed)
         taps = [call.args[0] for call in device.tap.await_args_list]
         self.assertEqual(taps[-1], (610, 1755))
 
     async def test_another_name_gets_no(self) -> None:
-        dialog = self.dialog_for("KECHZANO")
+        dialog = self.dialog_for("OtherTrainer")
         device, (removed, what) = await self.run_removal([self.profile, dialog, dialog])
         self.assertFalse(removed)
         self.assertIn("pressed NO", what)

@@ -56,10 +56,10 @@ class AsleepMessageTests(unittest.TestCase):
         with mock.patch.object(
             ios_wda_cleanup, "display_backlight", return_value=False
         ):
-            message = ios_wda_cleanup.asleep_message("udid", "Second iPhone (SE)")
+            message = ios_wda_cleanup.asleep_message("udid", "ios-one")
         self.assertIsNotNone(message)
         assert message is not None
-        self.assertIn("Second iPhone (SE)", message)
+        self.assertIn("ios-one", message)
         self.assertIn("side button", message)
         self.assertIn("Auto-Lock", message)
 

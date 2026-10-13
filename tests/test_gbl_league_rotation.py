@@ -73,7 +73,7 @@ class AdoptLeagueTests(unittest.TestCase):
 
 
 class AndroidLeagueRotationTests(unittest.IsolatedAsyncioTestCase):
-    """The moto/razr/ph-1 half of the 16 Sep stall."""
+    """The Android half of the 16 Sep stall."""
 
     def setUp(self) -> None:
         self.addCleanup(gbl_meta.set_active_cap, gbl_meta.ACTIVE_CAP)
@@ -89,8 +89,8 @@ class AndroidLeagueRotationTests(unittest.IsolatedAsyncioTestCase):
         stop = RuntimeError("out of scripted reads")
         device = SimpleNamespace(
             config={"GBL_MOVE_BTN": [658, 1200]},
-            label="moto-g",
-            serial="ZY22K9WZH9",
+            label="android-one",
+            serial="SERIAL-ONE",
             display_id=None,
         )
         messages: list[str] = []
@@ -186,7 +186,7 @@ class AndroidLeagueRotationTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_stray_set_after_the_league_was_played_is_not_adopted(
         self,
     ) -> None:
-        """The 23 Sep moto-g: four Master battles, then a Retro Cup party.
+        """A test run: four Master battles, then a Retro Cup party.
 
         The configured league had just been played, so it is on the list;
         the Retro Cup set was a stray tap, and a door that would not open it
@@ -208,7 +208,7 @@ class AndroidLeagueRotationTests(unittest.IsolatedAsyncioTestCase):
             any("stopping rather than playing" in line for line in messages),
             messages,
         )
-        # The door failed on the moto-g, so the back key takes turns with it.
+        # The door failed on the test phone, so the back key takes turns with it.
         self.send_input.assert_any_await(
             unittest.mock.ANY, "input keyevent KEYCODE_BACK")
 

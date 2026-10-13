@@ -39,6 +39,8 @@ MODES = ("auto", "award", "research", "encounter")
 # catch, so one blank read is not a phone with nothing to do.
 DETECT_WINDOW = 8.0
 DETECT_POLL = 1.0
+# Times an encounter found open at the start is thrown at before giving up.
+OPENING_ROUNDS = 5
 
 
 class CatchError(RuntimeError):
@@ -60,6 +62,11 @@ async def detect_mode(device: Any, args: argparse.Namespace) -> str | None:
             return "research"
         if await asyncio.to_thread(claim_research_android.plate_visible, image):
             return "encounter"
+        # A flying legendary carries the plate out of the read; the ball in
+        # hand stays put.  android-three's Latios was left standing that way on
+        # 6 Oct 2026 after a break-out outlasted the throw's result window.
+        if await asyncio.to_thread(catch_awarded_android.ball_visible, device, image):
+            return "encounter"
         if time.monotonic() >= deadline:
             return None
         await asyncio.sleep(DETECT_POLL)
@@ -68,15 +75,24 @@ async def detect_mode(device: Any, args: argparse.Namespace) -> str | None:
 async def run_phone(device: Any, args: argparse.Namespace) -> int:
     mode = args.mode
     if mode == "auto":
+        # A berry sheet left up by an earlier run hides the ball, and the
+        # phone reads as having nothing to catch: both phones sat on a Latios
+        # that way on 6 Oct 2026.
+        if not args.dry_run:
+            await catch_awarded_android.close_item_sheet(device)
         mode = await detect_mode(device, args)
-        if mode == "encounter" and not args.dry_run:
+        opening = 0
+        while mode == "encounter" and not args.dry_run and opening < OPENING_ROUNDS:
             # A Pokemon already standing there belongs to whichever queue is
             # behind it, and that queue only shows itself once it is caught.
+            # A slow break-out can read as a catch, so it is looked at again.
+            opening += 1
             print(f"[{device.label}] An encounter is open; throwing at it first")
-            directory = args.artifacts / device.label / "opening"
+            directory = args.artifacts / device.label / f"opening-{opening:02d}"
             directory.mkdir(parents=True, exist_ok=True)
             await catch_awarded_android.catch_one(device, args, directory, lone_ball_reading=True)
             await catch_awarded_android.clear_catch_screens(device, directory)
+            await catch_awarded_android.close_item_sheet(device)
             mode = await detect_mode(device, args)
         if mode in {None, "encounter"}:
             print(
@@ -219,9 +235,10 @@ def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--count", type=int, help="award queue or encounter mode: stop after this many caught per phone (default: until it empties)")
     parser.add_argument("--wait", type=float, default=25.0, help="seconds to wait for an encounter to be throwable")
     parser.add_argument("--card-wait", type=float, default=30.0, help="award queue: seconds to wait for the next award card")
+    parser.add_argument("--queue-wait", type=float, default=300.0, help="award queue: once cards have been worked, seconds a late card is still waited for before the queue is called finished")
     parser.add_argument("--claim-wait", type=float, default=25.0, help="research: seconds to wait for one reward to resolve")
     parser.add_argument("--throws", type=int, default=6, help="max balls at one encounter before moving on")
-    parser.add_argument("--max-cards", type=int, default=40, help="award queue: hard cap on award cards worked per phone")
+    parser.add_argument("--max-cards", type=int, default=60, help="award queue: hard cap on award cards worked per phone")
     parser.add_argument("--max-claims", type=int, default=40, help="research: hard cap on buttons pressed per phone")
     parser.add_argument("--max-failures", type=int, default=3, help="consecutive encounters or claims that did not finish before stopping")
     parser.add_argument("--scrolls", type=int, default=3, help="research: screenfuls to look down before calling the list finished")
@@ -234,6 +251,8 @@ def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(arguments)
     if args.count is not None and args.count < 1:
         parser.error("--count must be at least 1")
+    if args.queue_wait < 0:
+        parser.error("--queue-wait cannot be negative")
     if args.throws < 1:
         parser.error("--throws must be at least 1")
     if args.max_claims < 1:

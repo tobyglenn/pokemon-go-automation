@@ -20,9 +20,9 @@ from . import catch_awarded_android, excellent_throw_android, gbl_vision
 # button and press the middle of a paragraph.
 DEFAULT_LABEL = r"\bclaim\b"
 
-# Pokemon GO draws its claim pills in one flat orange.  Measured off the razr's
-# GO Battle League Timed Research (1/6) card on 10 Sep 2026: (255, 174, 76) in
-# the body, (255, 177, 82) at the rounded edge.  The bounds are wide enough for
+# Pokemon GO draws its claim pills in one flat orange.  Measured off a test
+# phone's GO Battle League Timed Research (1/6) card on 10 Sep 2026: (255, 174, 76)
+# in the body, (255, 177, 82) at the rounded edge.  The bounds are wide enough for
 # the gradient the button carries on other screens and still exclude the teal
 # tabs, the green REWARDS strip and the white card.
 ORANGE_MIN_RED = 200
@@ -39,7 +39,7 @@ BUTTON_MIN_WIDTH = 0.30
 BUTTON_MIN_HEIGHT = 0.015
 
 # The band scan and the OCR both run on one downscaled copy.  Vision read all
-# six of the razr's CLAIM REWARD labels at 1.00 confidence on a 480px-wide
+# six CLAIM REWARD labels at 1.00 confidence on a 480px-wide
 # frame, which is a twelfth of the pixels of its native 1224x2992.
 OCR_WIDTH = 480
 OCR_CONFIDENCE = 0.5
@@ -52,7 +52,7 @@ CLAIM_POLL = 1.5
 
 # How long an encounter is still allowed to turn up after the button itself has
 # gone.  The row stops being orange the moment the claim registers, but the
-# Pokemon is not on screen for several seconds after that: razr claimed a GO
+# Pokemon is not on screen for several seconds after that: a test phone claimed a GO
 # Battle League step at 10:30 on 10 Sep 2026, was told the button was gone, and
 # left a Fearow standing there because it stopped watching two seconds in.
 ENCOUNTER_GRACE = 14.0
@@ -71,7 +71,7 @@ BAND_OVERLAP = 0.5
 
 # The name/CP plate an encounter draws over the Pokemon.  Searched across the
 # whole frame, unlike `gbl_vision.encounter_plate`, which bands it to the middle
-# of a GBL screen: the plate rides with the Pokemon, and razr's Fearow held it
+# of a GBL screen: the plate rides with the Pokemon, and a Fearow held it
 # at 0.40 of the screen while the bird was flying and 0.06 once it settled.
 ENCOUNTER_PLATE = re.compile(r"\bcp ?\d+\b")
 
@@ -218,7 +218,7 @@ async def encounter_on_screen(
 
     Wider than the throw loop's own ball test, deliberately.  Every gesture this
     module makes is either a claim tap or a scroll, and on an encounter screen a
-    swipe is a thrown ball: razr threw three Great Balls sideways at a Fearow on
+    swipe is a thrown ball: a test phone threw three Great Balls sideways at a Fearow on
     10 Sep 2026 because the ball was in flight at the moment of the read, so the
     frame looked like no encounter at all and the loop scrolled for buttons.
     The plate stays put while the ball moves, so both are asked.
@@ -244,7 +244,7 @@ async def plate_on_screen(
 
     Narrower than `encounter_on_screen` and the one to ask before throwing.  A
     round disc at the bottom of the screen is not proof of a Pokemon: the GO
-    Snapshot screen razr wandered onto after a catch on 10 Sep 2026 draws its
+    Snapshot screen a device wandered onto after a catch on 10 Sep 2026 draws its
     camera shutter exactly where the ball sits, and the run threw at that for
     eleven attempts.  Only a Pokemon has a plate over it.
     """
@@ -292,7 +292,7 @@ async def claim_one(
     """Press one claim button and see its reward through.  (claimed, caught).
 
     A research reward is either items or a Pokemon, and which one is behind a
-    given button is not written on it -- the razr's six all showed the same "?"
+    given button is not written on it -- the test phone's six all showed the same "?"
     medallion.  So both endings are waited for: an encounter is thrown at, and
     anything else is pressed through with the same pass a catch uses, which is
     what knows the XP card and the caught Pokemon's page.
@@ -346,7 +346,7 @@ async def run_device(
             # A payout that turned into an encounter can arrive after its claim
             # gave up waiting, and an encounter must be thrown at before
             # anything else happens on this phone: a swipe here is a thrown
-            # ball, not a scroll, which is how razr spent three Great Balls
+            # ball, not a scroll, which is how a test phone spent three Great Balls
             # sideways at a Fearow on 10 Sep 2026.
             if not await plate_on_screen(device, reads=SCROLL_GUARD_READS):
                 if await encounter_on_screen(device):
@@ -378,7 +378,7 @@ async def run_device(
                     # The encounter is up but nothing could be thrown at it,
                     # and the screen it is on has no claim button either.  Left
                     # to itself this retries the same standing Pokemon until
-                    # `max_claims` runs out, which is how razr burned a whole
+                    # `max_claims` runs out, which is how a run burned a whole
                     # run on one Fearow on 10 Sep 2026.
                     failures += 1
                     print(

@@ -24,8 +24,8 @@ DEFAULT_HEARTS = 0
 MAX_HEARTS = 3
 
 # --- Reading the hearts ---
-# Every row carries five circles under the avatar.  Measured on the razr
-# (1224x2992, rows 391px) on 22 Sep 2026, in the three states a circle can be:
+# Every row carries five circles under the avatar.  Measured on a 1224x2992 test
+# phone (rows 391px) on 22 Sep 2026, in the three states a circle can be:
 #   level reached  solid red-orange disc (~250,85,45) round a pale yellow heart
 #                  (~245,225,160)
 #   progress only  an amber ring (~250,145,45) round a white heart -- a partial
@@ -51,13 +51,13 @@ HEART_STRIP_ASPECT = (4.5, 6.5)
 HEART_MIN_RED = 0.10
 HEART_MIN_YELLOW = 0.05
 # A circle drawn in some colour none of the three states uses.  Only levels up
-# to two hearts were on the razr to measure, so a higher level drawn in a new
+# to two hearts were available to measure, so a higher level drawn in a new
 # colour must read as "cannot tell", never as "not reached": undercounting a
 # best friend's hearts is how the wrong friend gets removed.
 HEART_MAX_FOREIGN = 0.08
 
 # --- Reading the words ---
-# Vision reads the list's names and activity lines cleanly at half the razr's
+# Vision reads the list's names and activity lines cleanly at half a phone's
 # width, in 0.14-0.36s a screen.
 OCR_WIDTH = 640
 OCR_CONFIDENCE = 0.4
@@ -84,7 +84,7 @@ PROFILE_SCROLLS = 3
 # was misread.
 OPEN_LABEL = "open"
 # The dialog names who is about to go: "Are you sure you want to unfriend
-# IAmArc3us?".  YES is only pressed when that name is the row's own, so a tap
+# ExampleTrainer?".  YES is only pressed when that name is the row's own, so a tap
 # that landed on the neighbouring row cannot remove the neighbour.
 CONFIRM_WORD = "unfriend"
 YES_LABEL = "yes"
@@ -97,8 +97,8 @@ TAP_SETTLE = 2.2
 BACK_SETTLE = 2.0
 
 # --- Scrolling ---
-# A slow drag, never a fling.  Fast flings on the razr reached the end of the
-# list and landed as a tap, which opened killingjoker17's gift on 22 Sep 2026.
+# A slow drag, never a fling.  Fast flings reached the end of the
+# list and landed as a tap, which opened a friend's gift on 22 Sep 2026.
 SCROLL_FROM = 0.78
 SCROLL_TO = 0.40
 SCROLL_MS = 900
@@ -260,7 +260,7 @@ def read_rows(
     rows: list[FriendRow] = []
     spans = gift_android.friend_rows(frame)
     # The top row's upper rule can be missed and something inside the row
-    # taken for it (M4C7R1CK5's avatar, on the razr), which shortens the row
+    # taken for it (an avatar with dark artwork), which shortens the row
     # and slides the heart band off the circles. The bottom rule holds, so
     # the hearts are looked for a full row's height above it.
     pitch = max((bottom - top for top, bottom in spans), default=0)
@@ -385,7 +385,7 @@ async def back_to_list(device: excellent_throw_android.AndroidDevice, presses: i
     """Back out of a profile, gift or dialog until the list is showing again.
 
     Back is safe on every screen of this flow and the list keeps its scroll
-    position behind it, measured on the razr.  It is never pressed on the list
+    position behind it, measured on a test phone.  It is never pressed on the list
     itself, where it closes the whole friends panel.
     """
     for _press in range(presses):

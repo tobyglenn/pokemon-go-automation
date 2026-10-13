@@ -394,7 +394,7 @@ class FakeTarget(gbl_home_recovery.Target):
 class RecoverWalkTests(unittest.TestCase):
     """What the walk does with screens it was not looking for.
 
-    The live failure this covers: a moto g that had stopped with the GBL card up
+    The live failure this covers: a compact phone that had stopped with the GBL card up
     was walked anyway, and the pokeball's mapped coordinate is the X that closes
     the card, so the rescue put the phone on the map.
     """
@@ -494,7 +494,7 @@ class CardConfirmedTests(unittest.TestCase):
 
 
 # The measurements these fixtures reproduce were taken off real frames on
-# 2026-09-02: the menu's discs from a moto g and a tall_device that both walked back to
+# 2026-09-02: the menu's discs from a compact phone and a tall_device that both walked back to
 # the GBL card, and the battlefield from a android-one mid-battle that did not.
 MENU_GREEN = (206, 232, 178)
 DISC_TEAL = (40, 120, 140)
@@ -522,7 +522,7 @@ class MenuDiscTests(unittest.TestCase):
     """The main menu, told apart from a GBL battlefield by shape alone."""
 
     def menu(self) -> Image.Image:
-        """The moto g's menu: BATTLE over ITEMS, 101px across, x 559 and 558."""
+        """The compact phone's menu: BATTLE over ITEMS, 101px across, x 559 and 558."""
         image = Image.new('RGB', (720, 1600), MENU_GREEN)
         menu_ring(image, (559, 905), 50)
         menu_ring(image, (558, 1256), 50)

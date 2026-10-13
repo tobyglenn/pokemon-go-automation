@@ -95,34 +95,34 @@ class CommandTests(unittest.TestCase):
         return argparse.Namespace(spend=spend)
 
     def test_each_job_runs_locally_on_its_phones(self) -> None:
-        phones = [spec("razr", "android", "SERIAL1"), spec("iphone-second", "ios", "UDID")]
+        phones = [spec("android-one", "android", "SERIAL1"), spec("ios-one", "ios", "UDID")]
         self.assertEqual(
             screen_router.command(screen_router.GBL, phones, self.args()),
-            ["gbl_day.py", "--local", "--devices", "razr", "iphone-second"],
+            ["gbl_day.py", "--local", "--devices", "android-one", "ios-one"],
         )
         self.assertEqual(
             screen_router.command(screen_router.BERRIES, phones[:1], self.args(3)),
-            ["scripts/berry.py", "--local", "--devices", "razr", "--spend", "3"],
+            ["scripts/berry.py", "--local", "--devices", "android-one", "--spend", "3"],
         )
         self.assertEqual(
             screen_router.command(screen_router.GIFTS, phones[1:], self.args()),
-            ["gift.py", "--local", "--all", "--gifts-only", "--devices", "iphone-second"],
+            ["gift.py", "--local", "--all", "--gifts-only", "--devices", "ios-one"],
         )
 
     def test_catch_names_androids_by_serial(self) -> None:
-        phones = [spec("razr", "android", "SERIAL1"), spec("iphone-second", "ios", "UDID")]
+        phones = [spec("android-one", "android", "SERIAL1"), spec("ios-one", "ios", "UDID")]
         self.assertEqual(
             screen_router.command(screen_router.CATCH, phones, self.args()),
-            ["catch.py", "--devices", "SERIAL1", "--devices", "iphone-second"],
+            ["catch.py", "--devices", "SERIAL1", "--devices", "ios-one"],
         )
 
 
 class RunTests(unittest.IsolatedAsyncioTestCase):
     async def run_router(self, arguments: list[str], readings: dict[str, tuple[str | None, str]]):
         phones = {
-            "razr": spec("razr", "android", "SERIAL1"),
-            "iphone-second": spec("iphone-second", "ios", "UDID"),
-            "moto-g": spec("moto-g", "android", "ELSEWHERE"),
+            "android-one": spec("android-one", "android", "SERIAL1"),
+            "ios-one": spec("ios-one", "ios", "UDID"),
+            "android-two": spec("android-two", "android", "ELSEWHERE"),
         }
         launched = AsyncMock(return_value=0)
 
@@ -139,31 +139,31 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_plan_reads_but_starts_nothing(self) -> None:
         status, launched = await self.run_router(
-            ["--plan"], {"razr": ("gbl", "GBL"), "iphone-second": ("catch", "catching")}
+            ["--plan"], {"android-one": ("gbl", "GBL"), "ios-one": ("catch", "catching")}
         )
         self.assertEqual(status, 0)
         launched.assert_not_awaited()
 
     async def test_phones_on_one_screen_share_one_command(self) -> None:
         _status, launched = await self.run_router(
-            [], {"razr": ("gbl", "GBL"), "iphone-second": ("gbl", "GBL")}
+            [], {"android-one": ("gbl", "GBL"), "ios-one": ("gbl", "GBL")}
         )
-        launched.assert_awaited_once_with(["gbl_day.py", "--local", "--devices", "razr", "iphone-second"])
+        launched.assert_awaited_once_with(["gbl_day.py", "--local", "--devices", "android-one", "ios-one"])
 
     async def test_an_unrecognised_screen_is_left_alone(self) -> None:
         _status, launched = await self.run_router(
-            [], {"razr": (None, "left alone"), "iphone-second": ("gifts", "gifts")}
+            [], {"android-one": (None, "left alone"), "ios-one": ("gifts", "gifts")}
         )
         launched.assert_awaited_once_with(
-            ["gift.py", "--local", "--all", "--gifts-only", "--devices", "iphone-second"]
+            ["gift.py", "--local", "--all", "--gifts-only", "--devices", "ios-one"]
         )
 
     async def test_a_held_phone_is_reported_not_read(self) -> None:
-        phone = spec("razr", "android", "SERIAL1")
+        phone = spec("android-one", "android", "SERIAL1")
 
         @contextmanager
         def held(_specs):
-            raise pokemon_fleet.FleetError("razr is already controlled by pid 1")
+            raise pokemon_fleet.FleetError("android-one is already controlled by pid 1")
             yield
 
         with patch.object(screen_router.pokemon_fleet, "acquire_device_locks", held):

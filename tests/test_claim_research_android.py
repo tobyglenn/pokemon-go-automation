@@ -22,7 +22,7 @@ TEAL = (125, 185, 193)
 def research_screen(rows: int = 3, size: tuple[int, int] = (480, 1173)) -> Image.Image:
     """A research card with `rows` full-width orange pills down it.
 
-    Laid out like the razr's GO Battle League Timed Research (1/6): pills a
+    Laid out like a test phone's GO Battle League Timed Research (1/6): pills a
     twentieth of the screen tall, spanning most of the card, with white gaps.
     """
     image = Image.new("RGB", size, CARD_WHITE)
@@ -105,7 +105,7 @@ class ClaimButtonTests(unittest.TestCase):
     def test_an_orange_tile_that_is_not_a_claim_is_left_alone(self) -> None:
         """The GO Pass reward tile is this same orange and must not be pressed.
 
-        razr showed one on 10 Sep 2026: a MYSTERIOUS COMPONENT x2 tile, orange
+        A test phone showed one on 10 Sep 2026: a MYSTERIOUS COMPONENT x2 tile, orange
         edge to edge, sitting on the rank-21 row of the September pass.
         """
         found = self.buttons(
@@ -227,7 +227,7 @@ class EncounterOnScreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_missed_plate_does_not_open_the_gate(self) -> None:
         """The read a scroll is decided on gets more than one chance.
 
-        Neither test is certain on a single frame, and razr scrolled a Fearow's
+        Neither test is certain on a single frame, and a test phone scrolled a Fearow's
         encounter screen on 10 Sep 2026 -- a thrown Great Ball -- off one read
         whose OCR missed the grey-on-grass plate.
         """
@@ -263,7 +263,7 @@ class PlateOnScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.check([False, False, True]))
 
     async def test_no_plate_on_any_read_is_not(self) -> None:
-        """The shutter razr threw at on 10 Sep 2026 had nothing named over it."""
+        """The shutter a device threw at on 10 Sep 2026 had nothing named over it."""
         self.assertFalse(await self.check([False, False, False]))
 
 
@@ -323,7 +323,7 @@ class ClaimOneTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_encounter_that_draws_late_is_still_caught(self) -> None:
         """The button goes the instant the tap lands; the Pokemon takes seconds.
 
-        razr walked away from a Fearow on 10 Sep 2026 because the vanished
+        A test phone walked away from a Fearow on 10 Sep 2026 because the vanished
         button was read as the whole story.
         """
         device = FakePhone([])
@@ -420,7 +420,7 @@ class RunDeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_open_encounter_is_thrown_at_and_never_swiped_over(self) -> None:
         """On an encounter screen a swipe is a thrown ball, not a scroll.
 
-        razr threw three Great Balls sideways at a Fearow on 10 Sep 2026, when
+        A test phone threw three Great Balls sideways at a Fearow on 10 Sep 2026, when
         a claim's late encounter met a loop that scrolled to look for buttons.
         The real scroll runs here, so the gesture it makes is on the record.
         """
@@ -453,7 +453,7 @@ class RunDeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_encounter_that_takes_no_throw_is_given_up_on(self) -> None:
         """Otherwise one standing Pokemon eats the whole run.
 
-        razr's Fearow was open, was seen, and could not be thrown at, so the
+        A Fearow was open, was seen, and could not be thrown at, so the
         loop threw at it again for every one of its 40 cycles and never got
         back to the five claims still on the card.
         """
@@ -505,7 +505,7 @@ class RunDeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_ball_with_no_pokemon_over_it_is_backed_out_of(self) -> None:
         """The GO Snapshot screen draws its shutter exactly where the ball sits.
 
-        razr wandered onto it after a catch on 10 Sep 2026 and the run threw at
+        A test phone wandered onto it after a catch on 10 Sep 2026 and the run threw at
         the camera button eleven times, because a round disc looked like an
         encounter.  Nothing is named over a shutter, so there is nothing to
         throw at and the way out is BACK.

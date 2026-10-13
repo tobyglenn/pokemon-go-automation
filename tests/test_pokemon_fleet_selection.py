@@ -35,12 +35,12 @@ class AttachmentSummaryTests(unittest.TestCase):
     """What each computer has, rather than two lists of what it hasn't."""
 
     def test_the_machine_and_its_phones_are_both_named(self) -> None:
-        said = pokemon_fleet.attachment_summary("berry", ["moto-g"], 5, "local")
-        self.assertEqual(said, "[local] berry on moto-g (5 of 6 configured not attached)")
+        said = pokemon_fleet.attachment_summary("berry", ["android-one"], 5, "local")
+        self.assertEqual(said, "[local] berry on android-one (5 of 6 configured not attached)")
 
     def test_every_phone_present_needs_no_absence_count(self) -> None:
-        said = pokemon_fleet.attachment_summary("berry", ["ph-1", "razr"], 0, "remote")
-        self.assertEqual(said, "[remote] berry on ph-1, razr")
+        said = pokemon_fleet.attachment_summary("berry", ["android-one", "android-two"], 0, "remote")
+        self.assertEqual(said, "[remote] berry on android-one, android-two")
 
     def test_a_computer_with_nothing_plugged_in_says_so(self) -> None:
         said = pokemon_fleet.attachment_summary("berry", [], 6, "remote")
@@ -49,8 +49,8 @@ class AttachmentSummaryTests(unittest.TestCase):
 
     def test_a_run_with_no_machine_name_still_reads(self) -> None:
         """A hand-run command outside the fan-out has nobody to distinguish."""
-        said = pokemon_fleet.attachment_summary("gbl", ["razr"], 0)
-        self.assertEqual(said, "gbl on razr")
+        said = pokemon_fleet.attachment_summary("gbl", ["android-one"], 0)
+        self.assertEqual(said, "gbl on android-one")
 
 
 class ConnectedDeviceSelectionTests(unittest.TestCase):

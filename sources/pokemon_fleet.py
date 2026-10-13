@@ -835,7 +835,7 @@ def lock_holder(path: Path) -> str:
     do not.  Naming the pid and its command turns "another fleet command" into
     something the operator can find, because the usual holder is not another
     command at all: it is a leg that outlived its supervisor and kept the
-    phone (2026-09-21, razr, pid 55317, orphaned 19 minutes).
+    phone (e.g., android-one, orphaned leg).
     """
     try:
         written = path.read_text(encoding="utf-8", errors="replace").strip()
@@ -1644,7 +1644,7 @@ def repeat_escape(controller: TradeController, state: str | None = None) -> str 
         return "BACK"
     if state == "selection":
         # The picker has no door: its top-left corner is the search row, and
-        # the iphone-second spent its last two recovery rounds on 2026-09-13
+        # an iOS device spent its last two recovery rounds on 2026-09-13
         # pressing that empty space. The disc at the bottom really does close
         # this screen — what sent the phone back to it was the lobby below,
         # which is handled where that screen is named.
@@ -1728,7 +1728,7 @@ async def step_towards_friend(
         # BACK. Once this phone has confirmed, the pill under the action point
         # turns from a green CONFIRM into an amber CANCEL and the trade is
         # waiting on the other trainer: nothing else on that screen does
-        # anything, and the razr sat through all four of its recovery rounds
+        # anything, and the Android phone sat through all four of its recovery rounds
         # pressing BACK at it on 2026-09-13 while the iPhone it was waiting for
         # stood on the picker. The pill itself is the way out, and it is
         # already under a mapped coordinate.
@@ -2446,7 +2446,7 @@ def build_parser() -> argparse.ArgumentParser:
     trade = sub.add_parser("trade", help="trade between exactly two registered devices")
     trade.add_argument("--pair", nargs=2, required=False, default=None, metavar=("DEVICE_A", "DEVICE_B"))
     trade.add_argument("--devices", nargs="+", default=None, help=argparse.SUPPRESS)
-    trade.add_argument("--count", type=int, default=1)
+    trade.add_argument("--count", type=int, default=100, help="how many trades to run (default 100)")
     trade.add_argument("--delay-modifier", type=float, default=0)
     trade.add_argument("--selection", "--from-selection", "--skip-trade-btn", action="store_true", help="start first trade from Pokémon selection screen")
     trade.add_argument("--start-step", choices=("TRADE_BTN", "FIRST_PKMN_BTN", "NEXT_BTN", "MAX_LEVEL_RESET_BTN", "CONFIRM_BTN", "X_BTN"), default=None, help="step to start the first trade cycle from")
@@ -2521,6 +2521,10 @@ def main() -> int:
         allow_unready=allow_unready,
         allow_empty=bool(getattr(args, "allow_empty", False)),
     )
+    # A host with no phones attached has nothing to pair; the fleet entry point
+    # passes --allow-empty so that host sits the run out instead of failing it.
+    if operation in {"trade", "battle"} and not specs and getattr(args, "allow_empty", False):
+        return 0
     if operation in {"trade", "battle"} and len(specs) != 2:
         names_str = ", ".join(spec.name for spec in specs)
         raise FleetError(

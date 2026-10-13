@@ -1,8 +1,8 @@
 """The fleet lock, and what it says when it refuses.
 
-`razr is already controlled by another fleet command` reads like a stale file
+`android-one is already controlled by another fleet command` reads like a stale file
 and never is: the lock is an flock, so it exists only while a live process
-holds the fd.  On 2026-09-21 the holder was a `gbl.py --devices razr` leg that
+holds the fd.  On 2026-09-21 the holder was a `gbl.py --devices android-one` leg that
 had outlived its supervisor by 19 minutes, and the message gave no way to find
 it.  The error now names the pid and its command.
 """
@@ -20,7 +20,7 @@ import unittest.mock
 from sources import pokemon_fleet
 
 
-def device(name: str = "razr", identifier: str = "ZY22LJS32X") -> pokemon_fleet.DeviceSpec:
+def device(name: str = "android-one", identifier: str = "SERIAL-ONE") -> pokemon_fleet.DeviceSpec:
     return pokemon_fleet.DeviceSpec(
         name=name,
         platform="android",
@@ -37,22 +37,22 @@ class LockFileTests(unittest.TestCase):
     def test_the_holder_is_written_down_where_the_next_run_can_read_it(self) -> None:
         spec = device()
         with pokemon_fleet.acquire_device_locks([spec], self.lock_dir):
-            written = (self.lock_dir / "ZY22LJS32X.lock").read_text(encoding="utf-8")
+            written = (self.lock_dir / "SERIAL-ONE.lock").read_text(encoding="utf-8")
         self.assertIn(f"pid={os.getpid()}", written)
-        self.assertIn("device=razr", written)
+        self.assertIn("device=android-one", written)
 
     def test_a_supervised_leg_records_the_supervisor_too(self) -> None:
         """So an orphan can be told from a leg whose supervisor is still there."""
         with unittest.mock.patch.dict(os.environ, {"POKEMON_SUPERVISOR_PID": "4242"}):
             with pokemon_fleet.acquire_device_locks([device()], self.lock_dir):
-                written = (self.lock_dir / "ZY22LJS32X.lock").read_text(encoding="utf-8")
+                written = (self.lock_dir / "SERIAL-ONE.lock").read_text(encoding="utf-8")
         self.assertIn("supervisor=4242", written)
 
     def test_a_hand_run_records_that_it_had_no_supervisor(self) -> None:
         environment = {k: v for k, v in os.environ.items() if k != "POKEMON_SUPERVISOR_PID"}
         with unittest.mock.patch.dict(os.environ, environment, clear=True):
             with pokemon_fleet.acquire_device_locks([device()], self.lock_dir):
-                written = (self.lock_dir / "ZY22LJS32X.lock").read_text(encoding="utf-8")
+                written = (self.lock_dir / "SERIAL-ONE.lock").read_text(encoding="utf-8")
         self.assertIn("supervisor=-", written)
 
     def test_the_lock_is_released_when_the_run_ends(self) -> None:
@@ -75,7 +75,7 @@ class RefusalTests(unittest.TestCase):
             with self.assertRaises(pokemon_fleet.FleetError) as caught:
                 with pokemon_fleet.acquire_device_locks([spec], self.lock_dir):
                     pass
-        self.assertIn("razr is already controlled", str(caught.exception))
+        self.assertIn("android-one is already controlled", str(caught.exception))
 
     def test_the_refusal_names_the_process_to_kill(self) -> None:
         """The whole point: the holder was findable all along, just unnamed."""
@@ -99,7 +99,7 @@ class RefusalTests(unittest.TestCase):
 
     def test_a_phone_taken_by_the_second_of_two_leaves_no_lock_behind(self) -> None:
         """A half-acquired run must not leave the first phone locked."""
-        first, second = device("moto-g", "ZY22K9WZH9"), device()
+        first, second = device("android-two", "SERIAL-TWO"), device()
         with pokemon_fleet.acquire_device_locks([second], self.lock_dir):
             with self.assertRaises(pokemon_fleet.FleetError):
                 with pokemon_fleet.acquire_device_locks([first, second], self.lock_dir):
@@ -122,7 +122,7 @@ class HolderDescriptionTests(unittest.TestCase):
 
     def test_a_live_holder_is_described_by_its_command(self) -> None:
         path = self.lock_dir / "held.lock"
-        path.write_text(f"pid={os.getpid()} device=razr\n", encoding="utf-8")
+        path.write_text(f"pid={os.getpid()} device=android-one\n", encoding="utf-8")
         described = pokemon_fleet.lock_holder(path)
         self.assertIn(f"pid {os.getpid()}", described)
         self.assertIn("python", described.lower())
@@ -130,7 +130,7 @@ class HolderDescriptionTests(unittest.TestCase):
     def test_a_pid_nobody_is_running_still_gets_named(self) -> None:
         """Not expected -- the flock refused us -- but it must not crash."""
         path = self.lock_dir / "gone.lock"
-        path.write_text("pid=999999 device=razr\n", encoding="utf-8")
+        path.write_text("pid=999999 device=android-one\n", encoding="utf-8")
         self.assertEqual(pokemon_fleet.lock_holder(path), "pid 999999")
 
 

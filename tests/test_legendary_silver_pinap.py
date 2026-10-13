@@ -15,10 +15,11 @@ from PIL import Image
 from sources import berry_android, gbl_android as gbl, legendary_pokemon
 from sources import excellent_throw_android as throw
 from sources import gbl_vision
+from sources import catch_awarded_android as awarded
 
 
 class LegendaryNameTests(unittest.TestCase):
-    def test_the_razr_terrakion_is_legendary(self) -> None:
+    def test_the_encounter_terrakion_is_legendary(self) -> None:
         # 24 Sep: the plate box read "CP 2056", the name was its own box.
         self.assertEqual(
             legendary_pokemon.legendary_named(["CP 2056", "Terrakion"]), "Terrakion"
@@ -98,6 +99,80 @@ class RewardBerryTests(unittest.IsolatedAsyncioTestCase):
         ):
             await gbl.throw_ball(SimpleNamespace(label="example-phone"), object(), "silver")
         self.assertEqual(run.await_args.kwargs["berry"], "silver")
+
+
+def plate(*texts: str) -> list:
+    return [SimpleNamespace(text=text, confidence=1.0) for text in texts]
+
+
+class AwardCatchLegendaryTests(unittest.IsolatedAsyncioTestCase):
+    """catch.py feeds a legendary a Silver Pinap and throws Ultra Balls at it."""
+
+    async def catch(self, boxes: list, results: list) -> AsyncMock:
+        device = SimpleNamespace(label="fake-g", viewport=(720, 1600))
+        args = SimpleNamespace(nanab=True, throws=4, wait=1.0, ring_hold=False)
+        thrown = AsyncMock(side_effect=results)
+        with patch.object(
+            awarded, "capture_frame",
+            AsyncMock(return_value=(Image.new("RGB", (720, 1600)), 0.0)),
+        ), patch.object(awarded.gbl_vision, "recognize", return_value=boxes), patch.object(
+            awarded, "throw_once", thrown
+        ), patch("asyncio.sleep", AsyncMock()), TemporaryDirectory() as directory:
+            await awarded.catch_one(device, args, Path(directory))
+        return thrown
+
+    async def test_a_legendary_gets_silver_on_every_throw(self) -> None:
+        thrown = await self.catch(plate("Regidrago", "CP 2056"), [False, False, True])
+        self.assertEqual(
+            [(c.kwargs["berry"], c.kwargs["use_nanab"]) for c in thrown.await_args_list],
+            [("silver", True)] * 3,
+        )
+
+    async def test_an_ordinary_award_keeps_one_nanab(self) -> None:
+        thrown = await self.catch(plate("Smoliv", "CP 412"), [False, True])
+        self.assertEqual(
+            [(c.kwargs["berry"], c.kwargs["use_nanab"]) for c in thrown.await_args_list],
+            [("nanab", True), ("nanab", False)],
+        )
+
+
+class UltraBallTests(unittest.IsolatedAsyncioTestCase):
+    """A legendary takes the Ultra Ball even with no Silver Pinap left to feed."""
+
+    async def test_an_empty_silver_pocket_still_switches_to_ultra(self) -> None:
+        device = SimpleNamespace(label="fake-g", viewport=(720, 1600))
+        swapped = AsyncMock(return_value=True)
+        with patch.object(throw, "berry_in_hand", return_value=False), patch.object(
+            berry_android, "berry_to_feed", return_value="nanab"
+        ), patch.object(berry_android, "pocket_known_empty", return_value=True), patch.object(
+            throw, "ball_in_hand", return_value=True
+        ), patch.object(throw, "swap_to_ball", swapped), TemporaryDirectory() as directory:
+            await throw.use_nanab_berry(
+                device, None, Image.new("RGB", (720, 1600)), Path(directory), berry="silver"
+            )
+        self.assertEqual(swapped.await_args.args[2], throw.ULTRA_CHOICE_X)
+
+    async def test_a_refused_silver_pinap_closes_the_sheet(self) -> None:
+        """6 Oct 2026: android-three's Latios already had one, and the sheet stayed up."""
+        device = SimpleNamespace(label="fake-g", viewport=(720, 1600), tap=AsyncMock())
+        swapped = AsyncMock(return_value=True)
+        fed = AsyncMock(return_value=True)
+        frame = AsyncMock(return_value=(Image.new("RGB", (720, 1600)), 0.0))
+        with patch.object(throw, "berry_in_hand", return_value=False), patch.object(
+            berry_android, "berry_to_feed", return_value="silver"
+        ), patch.object(berry_android, "pocket_known_empty", return_value=False), patch.object(
+            berry_android, "picker_read", return_value=[("silver", [360, 1400])]
+        ), patch.object(berry_android, "picker_sheet_top", return_value=1200), patch.object(
+            throw, "capture_frame", frame
+        ), patch.object(throw, "feed_berry", fed), patch.object(
+            throw, "swap_to_ball", swapped
+        ), patch("asyncio.sleep", AsyncMock()), TemporaryDirectory() as directory:
+            await throw.use_nanab_berry(
+                device, None, Image.new("RGB", (720, 1600)), Path(directory), berry="silver"
+            )
+        fed.assert_not_awaited()
+        self.assertEqual(device.tap.await_args_list[-1].args[0], [360, 720])
+        self.assertEqual(swapped.await_args.args[2], throw.ULTRA_CHOICE_X)
 
 
 if __name__ == "__main__":

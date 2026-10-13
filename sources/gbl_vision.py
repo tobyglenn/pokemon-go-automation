@@ -769,6 +769,35 @@ ENCOUNTER_BALL_COUNT_X = (0.58, 0.75)
 ENCOUNTER_BALL_COUNT_TOP = 0.93
 
 
+# The battle header: each player's "CP <number>" in a top corner. Measured on
+# the SE at 750x1334: CP boxes at y=125 (0.09h), x=0.34w and 0.66w.
+BATTLE_HEADER_BOTTOM = 0.15
+
+
+def battle_header_visible(
+    boxes: Iterable[OCRBox], image_width: int, image_height: int
+) -> bool:
+    """Whether both players' CP plates are up, so this is a battlefield.
+
+    A lit charged-move disc is a solid orange button low on the screen, and
+    the colour test reads it as the end-of-set reward. The SE took its own
+    FUSION FLARE for a finished set on 4 Oct, mid-battle against a Mewtwo it
+    was winning, wrote the battle off and walked recovery taps to the
+    surrender prompt until it was finished by hand. No menu draws a CP in
+    both top corners.
+    """
+    left = right = False
+    for box in boxes:
+        if box.center_y / image_height > BATTLE_HEADER_BOTTOM:
+            continue
+        if not ENCOUNTER_PLATE.search(normalize(box.text)):
+            continue
+        x = box.center_x / image_width
+        left = left or x < 0.5
+        right = right or x >= 0.5
+    return left and right
+
+
 def encounter_plate(
     boxes: Iterable[OCRBox], image_height: int, image_width: int | None = None
 ) -> OCRBox | None:
@@ -848,11 +877,11 @@ def safety_notice_point(boxes: Iterable[OCRBox], image=None) -> list[int] | None
     Pressed by name rather than through `dismiss_point`, which finds any OK at
     all: this one is only safe to press because the words behind it say what
     the dialog is.  Nothing gets past it on its own, so a relaunched game waits
-    here indefinitely -- the moto-g spent a whole leg's reads tapping map
+    here indefinitely -- a test phone spent a whole leg's reads tapping map
     coordinates through this card on 22 Sep 2026.
 
     Vision often cannot read the button: its letters are spaced so widely that
-    the moto-g's OCR returned the title and the body and nothing else.  So the
+    the device's OCR returned the title and the body and nothing else.  So the
     text is tried first, and then the pill is found by its own colour, below
     the writing, in the middle of the card where it is always drawn.
     """

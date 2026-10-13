@@ -289,7 +289,7 @@ class RecoverToFriendTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_iphone_on_the_picker_keeps_pressing_the_disc(self) -> None:
         """The picker has no door to fall back to.
 
-        Its top-left corner is the search row, and the iphone-second spent two
+        Its top-left corner is the search row, and the iOS phone spent two
         of its four rounds pressing that empty space on 2026-09-13 — the door
         it had just been given belongs to the lobby below, not to this screen.
         """
@@ -311,7 +311,7 @@ class RecoverToFriendTests(unittest.IsolatedAsyncioTestCase):
 
 class TradeLobbyExitTests(unittest.IsolatedAsyncioTestCase):
     """The screen that ended run 3 at trade 45 on 2026-09-13, twice over: the
-    iPhone flipping between picker and lobby while the razr waited on it."""
+    iPhone flipping between picker and lobby while the Android phone waited on it."""
 
     def ios(self, name: str, screens: Sequence[str]) -> FakeController:
         controller = FakeController(
@@ -332,7 +332,7 @@ class TradeLobbyExitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_waiting_lobby_is_cancelled_rather_than_backed_out_of(self) -> None:
         """Once a phone has confirmed, the pill under CONFIRM_BTN is an amber
-        CANCEL and nothing else on the screen answers — the razr sat through
+        CANCEL and nothing else on the screen answers — the Android phone sat through
         four rounds of BACK at one while the iPhone it waited for stood on the
         picker."""
         # An Android phone's trade coordinates come off the handset itself, so

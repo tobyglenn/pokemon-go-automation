@@ -861,7 +861,7 @@ def item_in_hand(image: Image.Image, viewport: tuple[int, int]) -> bool:
     """True only when something is held over the throw spot and it is not a ball.
 
     `ball_in_hand` says no to a frame it cannot read at all, which is not the
-    same answer: a Pokemon standing over its own ball hides the disc, and razr's
+    same answer: a Pokemon standing over its own ball hides the disc, and a
     Fearow on 10 Sep 2026 was read as an item held in the hand every time, sent
     the throw off to the berry picker, and lost the throw when the picker did
     not open.  Nothing legible is no reason to put the ball down.
@@ -1041,18 +1041,22 @@ async def use_nanab_berry(
         rgba = image.convert("RGBA")
         return rgba.width, rgba.height, 0, rgba.tobytes()
 
+    # A legendary gets the Ultra Ball whichever berry the bag can spare it.
+    legendary = berry == "silver"
+    choice_x = ULTRA_CHOICE_X if legendary else BALL_CHOICE_X
+
     if berry_in_hand(encounter_image, device.viewport):
         print(f"[{device.label}] A berry is already in hand; feeding it")
-        if not await feed_berry(device, ball, artifact_dir):
-            await swap_to_ball(device, artifact_dir)
+        if not await feed_berry(device, ball, artifact_dir) or legendary:
+            await swap_to_ball(device, artifact_dir, choice_x)
         return
 
     berry = berry_android.berry_to_feed(device.label, berry)
     if berry_android.pocket_known_empty(device.label, berry):
         # The picker was read earlier in this run and had none.  Opening it
         # again buys the same answer at the same four seconds, every throw.
-        if not ball_in_hand(encounter_image, device.viewport):
-            await swap_to_ball(device, artifact_dir)
+        if legendary or not ball_in_hand(encounter_image, device.viewport):
+            await swap_to_ball(device, artifact_dir, choice_x)
         return
 
     listed: list[tuple[str, list[int]]] | None = None
@@ -1079,6 +1083,8 @@ async def use_nanab_berry(
             )
             await asyncio.sleep(0.8)
             print(f"[{device.label}] A berry is already active; keeping it for the throw")
+            if legendary:
+                await swap_to_ball(device, artifact_dir, choice_x)
             return
         raise AndroidExcellentThrowError(
             f"Nanab picker did not open on {device.label}; no ball was thrown"
@@ -1100,8 +1106,8 @@ async def use_nanab_berry(
         )
         await asyncio.sleep(0.8)
         held, _ts = await capture_frame(device)
-        if not ball_in_hand(held, device.viewport):
-            await swap_to_ball(device, artifact_dir)
+        if legendary or not ball_in_hand(held, device.viewport):
+            await swap_to_ball(device, artifact_dir, choice_x)
         return
     kind, point = chosen
     if kind != berry:
@@ -1110,15 +1116,28 @@ async def use_nanab_berry(
     # The picker sheet has to finish closing before the flick, or the gesture
     # lands on the sheet and the berry stays in the hand.
     await asyncio.sleep(1.2)
+    after, _ts = await capture_frame(device)
+    if berry_android.picker_sheet_top(*frame(after)) is not None:
+        # The game keeps the sheet up when the Pokemon already has a berry
+        # working.  On 6 Oct 2026 android-three fed a Latios that way: feed taps and
+        # swaps all landed on the sheet, and every throw went out unaimed.
+        print(
+            f"[{device.label}] {kind} refused (a berry is already working); "
+            "closing the berry sheet"
+        )
+        await device.tap(
+            [round(device.viewport[0] * 0.50), round(device.viewport[1] * 0.45)]
+        )
+        await asyncio.sleep(0.8)
+        await swap_to_ball(device, artifact_dir, choice_x)
+        return
 
     # The feed hands the ball back itself.  `swap_to_ball` is for the feed
     # that did not take: without a ball in the hand the throw that follows
     # throws the berry, and a thrown berry never caught anything.
-    if not await feed_berry(device, ball, artifact_dir):
-        await swap_to_ball(device, artifact_dir)
-    elif kind == 'silver':
+    if not await feed_berry(device, ball, artifact_dir) or legendary:
         # The ball the feed hands back is whichever was last thrown.
-        await swap_to_ball(device, artifact_dir, ULTRA_CHOICE_X)
+        await swap_to_ball(device, artifact_dir, choice_x)
 
 
 def fallback_target(

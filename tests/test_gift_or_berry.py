@@ -33,7 +33,7 @@ class AndroidRoutingTests(unittest.IsolatedAsyncioTestCase):
     """The screen each phone is parked on picks gifts or berries."""
 
     async def route(self, feeding: set[str], **overrides):
-        phones = [spec("moto-g", "android"), spec("razr", "android")]
+        phones = [spec("android-one", "android"), spec("android-two", "android")]
         gift_process = AsyncMock()
         berry_process = AsyncMock()
         gifters = AsyncMock(side_effect=lambda specs: [s.name for s in specs])
@@ -48,24 +48,24 @@ class AndroidRoutingTests(unittest.IsolatedAsyncioTestCase):
         return looked, gift_process, berry_process
 
     async def test_a_phone_on_a_gym_feeds_while_the_rest_gift(self) -> None:
-        _looked, gift_process, berry_process = await self.route({"razr"})
-        self.assertEqual(gift_process.await_args.args[0], ["moto-g"])
-        self.assertEqual(berry_process.await_args.args[0], ["razr"])
+        _looked, gift_process, berry_process = await self.route({"android-two"})
+        self.assertEqual(gift_process.await_args.args[0], ["android-one"])
+        self.assertEqual(berry_process.await_args.args[0], ["android-two"])
 
     async def test_no_gym_screen_means_every_phone_gifts(self) -> None:
         _looked, gift_process, berry_process = await self.route(set())
-        self.assertEqual(gift_process.await_args.args[0], ["moto-g", "razr"])
+        self.assertEqual(gift_process.await_args.args[0], ["android-one", "android-two"])
         berry_process.assert_not_awaited()
 
     async def test_every_phone_on_a_gym_sends_no_gifts(self) -> None:
-        _looked, gift_process, berry_process = await self.route({"moto-g", "razr"})
+        _looked, gift_process, berry_process = await self.route({"android-one", "android-two"})
         gift_process.assert_not_awaited()
-        self.assertEqual(berry_process.await_args.args[0], ["moto-g", "razr"])
+        self.assertEqual(berry_process.await_args.args[0], ["android-one", "android-two"])
 
     async def test_gifts_only_does_not_look(self) -> None:
-        looked, gift_process, berry_process = await self.route({"razr"}, gifts_only=True)
+        looked, gift_process, berry_process = await self.route({"android-two"}, gifts_only=True)
         looked.assert_not_awaited()
-        self.assertEqual(gift_process.await_args.args[0], ["moto-g", "razr"])
+        self.assertEqual(gift_process.await_args.args[0], ["android-one", "android-two"])
         berry_process.assert_not_awaited()
 
 
@@ -95,7 +95,7 @@ class IPhoneRoutingTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(pokemon_fleet, "run_child", child), \
                 patch.object(pokemon_fleet, "operation_config_path", lambda s, op: Path(f"/tmp/{op}.yaml")), \
                 patch.object(pokemon_fleet, "operation_readiness", lambda s, op: "ready"):
-            await pokemon_fleet.run_gifts([spec("iphone-second", "ios")], gift_args())
+            await pokemon_fleet.run_gifts([spec("ios-one", "ios")], gift_args())
         return launched
 
     async def test_a_gym_screen_feeds_and_sends_no_gifts(self) -> None:

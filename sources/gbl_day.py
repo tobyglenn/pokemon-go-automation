@@ -45,9 +45,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # it straight into five more.  Whatever the real allowance is on a given account
 # and day (passes, events, a set left over from a leg that lost count), the phone
 # is the only thing that knows it, and it says so by refusing to start another
-# battle -- which STALL_LIMIT below turns into an ending.  So the number here is
-# deliberately higher than any day can hold.
-BATTLES_PER_DAY = 40
+# battle -- which STALL_LIMIT below turns into an ending.
+#
+# 40 then stopped a device short too (1 Oct 2026): "40/40 battle(s) -- allotment
+# played" with no cap banner ever on its card, and battles still on offer.  Any
+# fixed number repeats that, so by default there is no day budget at all: a
+# phone plays until it shows the cap, stalls, or hits MAX_LEGS.  `--allotment`
+# remains for a deliberately short day.  This is only how many battles one leg
+# is asked for.
+BATTLES_PER_LEG = 40
 
 # Two legs in a row that played nothing means retrying is not the answer.  One
 # empty leg is ordinary (a phone can stop on the reward page it cannot read),
@@ -86,7 +92,8 @@ class DeviceProgress:
     """What one phone has managed so far today."""
 
     name: str
-    allotment: int
+    # None: no budget -- the day ends when the game shows its cap.
+    allotment: int | None = None
     played: int = 0
     legs: int = 0
     stalls: int = 0
@@ -97,7 +104,11 @@ class DeviceProgress:
 
     @property
     def remaining(self) -> int:
-        return 0 if self.cap_reached else max(self.allotment - self.played, 0)
+        if self.cap_reached:
+            return 0
+        if self.allotment is None:
+            return BATTLES_PER_LEG
+        return max(self.allotment - self.played, 0)
 
     @property
     def done(self) -> bool:
@@ -547,7 +558,7 @@ def write_status(path: Path, devices: Sequence[DeviceProgress]) -> None:
 async def run_day(
     device_names: Sequence[str],
     *,
-    allotment: int = BATTLES_PER_DAY,
+    allotment: int | None = None,
     log_dir: Path | None = None,
     trace_dir: Path | None = None,
     status_path: Path | None = None,
@@ -641,7 +652,8 @@ async def hold_awake() -> asyncio.subprocess.Process | None:
 
 def summarise(devices: Sequence[DeviceProgress]) -> str:
     return "\n".join(
-        f"[gbl-day] {device.name}: {device.played}/{device.allotment} battle(s) "
+        f"[gbl-day] {device.name}: {device.played}"
+        f"{'' if device.allotment is None else f'/{device.allotment}'} battle(s) "
         f"over {device.legs} leg(s) -- {device.stopped}"
         for device in devices
     )
@@ -678,8 +690,8 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--allotment",
         type=int,
-        default=BATTLES_PER_DAY,
-        help=f"battles per phone for the day (default {BATTLES_PER_DAY})",
+        default=None,
+        help="stop each phone after this many battles (default: play until the game's daily cap)",
     )
     parser.add_argument(
         "--allmachines",
@@ -720,7 +732,7 @@ def resolve_device_names(args: argparse.Namespace) -> list[str]:
 
 def main(arguments: Sequence[str] | None = None) -> int:
     args = parse_args(arguments)
-    if args.allotment < 1:
+    if args.allotment is not None and args.allotment < 1:
         raise GBLDayError("--allotment needs to be at least 1")
     log_dir = args.log_dir or default_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)

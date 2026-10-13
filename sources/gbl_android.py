@@ -113,7 +113,7 @@ LEAGUE_EXIT_LIMIT = 3
 # Exits allowed once the configured league has been played this leg. Having
 # played it proves it is on today's list, so a set in another league is a
 # stray tap -- a mid-set reward misread, or NEXT BATTLE opening the featured
-# cup -- and not a reason to adopt that league. On 23 Sep the moto-g's exit
+# cup -- and not a reason to adopt that league. On 23 Sep a test phone's exit
 # door failed three times on a Retro Cup party screen after four Master
 # League: Mega battles, and the fallback played Retro Cup for the rest of the
 # day. Past this many exits the leg stops instead.
@@ -2036,7 +2036,7 @@ async def smart_screen_state(
 ) -> tuple[str, list[int] | None, str | None, list[gbl_vision.OCRBox]]:
     """``refused_rewards`` are end-of-set points already caught not paying out.
 
-    ``locked_reward_tile`` reads the caption, and on the moto-g it did not catch
+    ``locked_reward_tile`` reads the caption, and on a test device it did not catch
     every locked tile, so the row was pressed rather than pulled back.  What the
     tap did is the check the caption cannot fail.
     """
@@ -2447,7 +2447,7 @@ async def encounter_behind_battle(frame) -> str | None:
     """Whether a battle read is really the reward catch a set ended on.
 
     The home check below only knows the red Poke Ball, so an encounter holding
-    an Ultra Ball passes for a battlefield: on 24 Sep the razr fast-attacked a
+    an Ultra Ball passes for a battlefield: on 24 Sep a test phone fast-attacked a
     reward Rufflet for three minutes, timed the battle out, and then "started"
     battle 3 on the same catch screen.
 
@@ -2896,7 +2896,7 @@ def result_teal(rgb: tuple[int, int, int]) -> bool:
 def low_result_disc_y(frame) -> int | None:
     """Centre row of a teal tick drawn below the calibrated rows, or None.
 
-    PoGO 0.431 draws edge-to-edge, and on 30 Sep ph-1's tick sat at
+    PoGO 0.431 draws edge-to-edge, and on 30 Sep a test phone's tick sat at
     0.903-0.959h against the 0.846-0.904h it was measured at -- one navigation
     bar lower. The fixed sample rows then missed it, and the leg attacked
     GOOD EFFORT! for minutes. Only a disc centred below LOW_DISC_MIN_Y counts,
@@ -2922,7 +2922,7 @@ def low_result_disc_y(frame) -> int | None:
         return None
     # The tick is one flat colour on a disc about 0.11w across. Ice Burn's
     # minigame bubbles are teal too, but shaded and not that shape: one read
-    # of them ended a live battle on ph-1 halfway through.
+    # of them ended a live battle on a test phone halfway through.
     # Outermost teal either side, since the tick's own strokes break the run.
     x = int(width * RESULT_TAP_X)
     reach = int(width * 0.10)
@@ -4195,7 +4195,7 @@ async def play_device(
                 # The tile just taken opened the roster rather than paying out,
                 # and closing the sheet puts the row back exactly as it was, so
                 # the same tile goes again on the next read.  That is the loop
-                # the moto-g sat in until it was scrolled back by hand.  A point
+                # a test phone sat in until it was scrolled back by hand.  A point
                 # that does not collect is not the reward, whatever the caption
                 # said, so write it off and let the row scroll have its turn.
                 locked_rewards.append(roster_suspect)
@@ -4332,7 +4332,7 @@ async def play_device(
                 shot = save_unknown_frame(device, frame)
                 where = f' (frame: {shot})' if shot else ''
                 if not game_restarted:
-                    # 24 Sep: ph-1 and the moto-g each sat on a screen whose
+                    # 24 Sep: test devices each sat on a screen whose
                     # every recovery tap changed nothing, and each fresh leg
                     # found the same screen and quit on it, until gbl_day gave
                     # up on both phones.  A cold start always lands on the map,
@@ -4586,7 +4586,7 @@ async def play_device(
                             f'({league_exits}/{limit})',
                         )
                         if league_exits % 2 == 0:
-                            # The door alone left the moto-g on the same party
+                            # The door alone left the device on the same party
                             # screen three times running; Android's own back
                             # key is the other way off it.
                             log(device, '  Pressing Android back instead of the exit door')
@@ -4646,7 +4646,7 @@ async def play_device(
                 except gbl_vision.VisionOCRError:
                     result_boxes = []
             # The GBL card's close button is the same teal disc, at the same
-            # place, as the post-battle checkmark: on the moto both are the
+            # place, as the post-battle checkmark: on a compact phone both are the
             # phone's own CLOSE_BTN at [359, 1421]. Pressing it here is what
             # ended a live run -- it left GBL for the map after one battle, and
             # everything that followed was the loop tapping at a map. Only the
@@ -4692,7 +4692,7 @@ async def play_device(
         # It is named by its own name plate instead, and answered by the routine
         # that knows the three screens a catch leaves behind.  `armed` does not
         # veto it: a battle that timed out onto the catch screen leaves the loop
-        # armed, and the razr then "started" a battle on a reward Rufflet and
+        # armed, and a test phone then "started" a battle on a reward Rufflet and
         # fast-attacked its Ultra Ball.  No battlefield carries the plate.
         if not attacking and menu_boxes \
                 and gbl_vision.encounter_plate(menu_boxes, frame[1]) is not None:
@@ -4738,7 +4738,7 @@ async def play_device(
             # recovery attempt at read 32: it is what a game that restarted
             # mid-leg is sitting behind, and one OK is the whole of the way
             # past it.  Left to the ladder, a phone spent 40 reads tapping map
-            # coordinates through it (moto-g, 22 Sep 2026).
+            # coordinates through it (tested 22 Sep 2026).
             unknown_image = frame_image(frame)
             safety = gbl_vision.safety_notice_point(menu_boxes, unknown_image)
             if safety is not None:

@@ -1,6 +1,6 @@
 """A backgrounded or crashed game is put back, not tapped through.
 
-Seen on the moto-g, 22 Sep 2026: Google Messages took the screen mid-leg with
+Seen on the android-one, 22 Sep 2026: Google Messages took the screen mid-leg with
 Pokemon GO still running behind it, and the leg printed nothing for an hour
 because every recovery tap landed in the messaging app.
 """
@@ -62,7 +62,7 @@ class ForegroundPackageTests(unittest.TestCase):
 
 class AndroidRestoreTests(unittest.IsolatedAsyncioTestCase):
     def target(self, front: str, pid: str = '17996') -> gbl_home_recovery.AndroidTarget:
-        phone = gbl_home_recovery.AndroidTarget('moto-g', 'SERIAL')
+        phone = gbl_home_recovery.AndroidTarget('android-one', 'SERIAL')
         self.sent: list[tuple[str, ...]] = []
 
         def fake_adb(*arguments, **_options):
@@ -99,7 +99,7 @@ class AndroidRestoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_launch_is_reported_even_when_it_does_not_come_forward(self) -> None:
         """Saying it acted stops the caller tapping the app it can still see."""
-        phone = gbl_home_recovery.AndroidTarget('moto-g', 'SERIAL')
+        phone = gbl_home_recovery.AndroidTarget('android-one', 'SERIAL')
         phone._adb = lambda *arguments, **_options: mock.Mock(stdout=FOCUSED)
         with mock.patch.object(gbl_home_recovery, 'FOREGROUND_TIMEOUT', 0.0):
             self.assertTrue(await phone.restore())
@@ -112,7 +112,7 @@ class ColdStartPatienceTests(unittest.IsolatedAsyncioTestCase):
         waited: list[float | None] = []
 
         class Phone(gbl_home_recovery.Target):
-            label = 'moto-g'
+            label = 'android-one'
             restored_cold = True
 
             async def screenshot(self):
@@ -142,7 +142,7 @@ class ColdStartPatienceTests(unittest.IsolatedAsyncioTestCase):
         waited: list[float | None] = []
 
         class Phone(gbl_home_recovery.Target):
-            label = 'moto-g'
+            label = 'android-one'
 
             async def screenshot(self):
                 return mock.Mock(size=(1080, 2400))
@@ -168,7 +168,7 @@ class ColdStartPatienceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SafetyNoticeTests(unittest.TestCase):
-    """The card a cold-started game stops on, measured from the moto-g.
+    """The card a cold-started game stops on, measured from the android-one.
 
     Vision read the title and the body and nothing else: the button's letters
     are spaced too widely to come back as a word, so the pill has to be found
@@ -245,7 +245,7 @@ class SafetyNoticeWalkTests(unittest.IsolatedAsyncioTestCase):
         pressed = self.pressed = []
 
         class Phone(gbl_home_recovery.Target):
-            label = 'moto-g'
+            label = 'android-one'
 
             async def screenshot(self):
                 return screens[min(len(pressed), len(screens) - 1)]

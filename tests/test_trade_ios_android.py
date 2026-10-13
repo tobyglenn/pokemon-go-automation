@@ -906,7 +906,7 @@ class TradeExpiredDialogTests(unittest.TestCase):
     def test_the_other_wording_is_read_too(self) -> None:
         """The tall_device's version names the trainer instead of a second line."""
         self.assertTrue(
-            self.read(self.dialog(), "This trade with BadMannas has expired", "OK")
+            self.read(self.dialog(), "This trade with TrainerOne has expired", "OK")
         )
 
     def test_a_question_is_not_the_notice(self) -> None:

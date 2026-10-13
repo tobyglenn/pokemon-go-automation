@@ -1,6 +1,6 @@
 """Which Pokemon are legendary or mythical, read off an encounter screen.
 
-A GBL set can pay out a legendary -- a razr was handed a CP 2056 Terrakion on
+A GBL set can pay out a legendary -- a test phone was handed a CP 2056 Terrakion on
 24 Sep 2026 -- and a legendary is worth the Silver Pinap the ordinary reward
 Rufflet is not.  The encounter's name plate is the only place the species is
 written, so the check is a name match against OCR text.

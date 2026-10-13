@@ -19,7 +19,7 @@ def box(text: str, fraction: float, height: int = 1600) -> gbl_vision.OCRBox:
 class EncounterBehindBattleTests(unittest.IsolatedAsyncioTestCase):
     """24 Sep: a set ended straight onto a reward Rufflet holding an Ultra Ball.
 
-    The attack loop's home check only knows a red Poke Ball, so the razr
+    The attack loop's home check only knows a red Poke Ball, so the test device
     fast-attacked the catch screen for three minutes -- its bottom-centre
     probes pressing the ball, which hid the plate -- timed the battle out, and
     then "started" battle 3 on the same screen.

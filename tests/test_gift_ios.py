@@ -244,6 +244,115 @@ class LatePaintingGiftTests(unittest.TestCase):
         self.assertEqual(taps, [])
 
 
+class TransientScreenTests(unittest.TestCase):
+    """Screens that read wrong for a moment and right once they settle.
+
+    Measured on the SE, 2026-10-03: a capped OPEN lands on the profile under the
+    "Daily limit reached" banner, and the gift picker can still be sliding in
+    when FIRST_GIFT_BTN is tapped. A single look at either cost the run.
+    """
+
+    _points = staticmethod(LatePaintingGiftTests._points)
+
+    def _run(self, saturation_at, open_waiting=True):
+        points = self._points()
+        screen = {"name": "card" if open_waiting else "profile", "since": 0}
+        taps: list[list[int]] = []
+
+        def available(driver, point):
+            if point == points["OPEN_BTN"]:
+                return screen["name"] == "card"
+            if point == points["SEND_GIFT_BTN"]:
+                return screen["name"] == "profile" and not screen.get("sent")
+            return True
+
+        def saturation(driver, point, logical_radius=8):
+            screen["since"] += 1
+            return saturation_at(screen, points, point)
+
+        def tap(driver, point):
+            taps.append(point)
+            screen["since"] = 0
+            if point == points["OPEN_BTN"]:
+                screen["name"] = "banner"
+            elif point == points["SEND_GIFT_BTN"]:
+                screen["name"] = "picker"
+            elif point == points["FIRST_GIFT_BTN"]:
+                screen["name"] = "selected"
+            elif point == points["SEND_BTN"]:
+                screen["name"], screen["sent"] = "profile", True
+            elif point == points["CLOSE_BTN"]:
+                screen["name"] = "profile" if screen["name"] == "picker" else "list"
+
+        with (
+            mock.patch.object(gift_ios, "coordinates", return_value=points),
+            mock.patch.object(
+                gift_ios, "colored_action_available", side_effect=available
+            ),
+            mock.patch.object(gift_ios, "point_saturation", side_effect=saturation),
+            mock.patch.object(
+                gift_ios,
+                "is_friends_list",
+                side_effect=lambda driver: screen["name"] == "list",
+            ),
+            mock.patch.object(gift_ios, "tap", side_effect=tap),
+            mock.patch.object(gift_ios.time, "sleep"),
+        ):
+            completed = gift_ios.run_gifts_v3(
+                object(), {}, 1, guard=False, dry_run=False, all_mode=True
+            )
+        return completed, taps, points
+
+    def test_the_daily_limit_banner_is_waited_out_not_closed(self) -> None:
+        def saturation_at(screen, points, point):
+            if screen["name"] == "banner":
+                # The banner lies on OPEN_BTN for the first two looks, then fades.
+                if screen["since"] > 2:
+                    screen["name"] = "profile"
+                    return 0.0
+                return 60.0
+            if point == points["SEND_BTN"]:
+                return 80.0 if screen["name"] == "selected" else 0.0
+            return 60.0 if screen["name"] == "card" else 0.0
+
+        completed, taps, points = self._run(saturation_at)
+
+        self.assertEqual(completed, 1)
+        # The only CLOSE is the one that leaves the profile after the send.
+        self.assertEqual(taps.count(points["CLOSE_BTN"]), 1)
+        self.assertIn(points["SEND_BTN"], taps)
+
+    def test_a_picker_still_sliding_in_is_not_taken_for_an_empty_bag(self) -> None:
+        def saturation_at(screen, points, point):
+            if point == points["SEND_BTN"]:
+                return 80.0 if screen["name"] == "selected" and screen["since"] > 2 else 0.0
+            return 0.0
+
+        completed, taps, points = self._run(saturation_at, open_waiting=False)
+
+        self.assertEqual(completed, 1)
+        self.assertIn(points["SEND_BTN"], taps)
+        self.assertEqual(taps.count(points["FIRST_GIFT_BTN"]), 1)
+
+    def test_a_first_gift_tap_lost_to_the_picker_is_retried_once(self) -> None:
+        lost = {"done": False}
+
+        def saturation_at(screen, points, point):
+            if point == points["SEND_BTN"]:
+                if screen["name"] == "selected" and not lost["done"]:
+                    # The first tap landed before the picker could take it.
+                    screen["name"] = "picker"
+                    lost["done"] = True
+                return 80.0 if screen["name"] == "selected" else 0.0
+            return 0.0
+
+        completed, taps, points = self._run(saturation_at, open_waiting=False)
+
+        self.assertEqual(completed, 1)
+        self.assertEqual(taps.count(points["FIRST_GIFT_BTN"]), 2)
+        self.assertIn(points["SEND_BTN"], taps)
+
+
 # --- The friends list, in the colours the SE draws it in ---
 # Measured on a 750x1334 screenshot of the SE's own friends list: the rule
 # between rows, the halo just outside a highlighted avatar, the orange a pinned
@@ -572,6 +681,118 @@ class CycleFailureRecoveryTests(unittest.TestCase):
         self.assertEqual(
             self.taps.count("OPEN_BTN"), gift_ios.GIFT_CYCLE_RETRIES
         )
+
+
+class RefusedOpenTests(unittest.TestCase):
+    """An OPEN the game refuses must not cost the friends their sends.
+
+    Measured on the SE, 2026-10-06: after three opens the OPEN tap left a
+    screen that did not change for nine seconds, and CLOSE went back to the
+    same unopened gift. Three friends in a row did that, the cycle-failure cap
+    fired, and the SE's run ended while android-three carried on.
+    """
+
+    _points = staticmethod(CycleFailureRecoveryTests._points)
+
+    def _run(self, count: int, opens_before_refusal: int):
+        points = self._points()
+        names = {tuple(point): name for name, point in points.items()}
+        state = {"screen": "card", "opens": 0}
+        sent = {"done": False}
+        taps: list[str] = []
+
+        def available(driver, point):
+            if point == points["OPEN_BTN"]:
+                return state["screen"] in {"card", "refused"}
+            if point == points["SEND_GIFT_BTN"]:
+                return not sent["done"]
+            return True
+
+        def saturation(driver, point, logical_radius=8):
+            if point == points["OPEN_BTN"]:
+                return 60.0 if state["screen"] in {"card", "refused"} else 0.0
+            if point == points["SEND_BTN"]:
+                return 80.0 if state["screen"] == "picker" else 0.0
+            return 0.0
+
+        def fake_tap(driver, point):
+            taps.append(names[tuple(point)])
+            if point == points["OPEN_BTN"]:
+                if state["opens"] < opens_before_refusal:
+                    state["opens"] += 1
+                    state["screen"] = "profile"
+                else:
+                    state["screen"] = "refused"
+            elif point == points["SEND_GIFT_BTN"]:
+                state["screen"] = "picker"
+            elif point == points["SEND_BTN"]:
+                state["screen"] = "profile"
+                sent["done"] = True
+            elif point == points["CLOSE_BTN"]:
+                state["screen"] = {
+                    "refused": "card",
+                    "card": "profile",
+                    "picker": "profile",
+                }.get(state["screen"], "list")
+            elif point == points["NEXT_FRIEND_BTN"]:
+                state["screen"] = "card"
+                sent["done"] = False
+
+        image = friends_list_image([(False, False)])
+        with (
+            mock.patch.object(gift_ios, "coordinates", return_value=points),
+            mock.patch.object(
+                gift_ios, "colored_action_available", side_effect=available
+            ),
+            mock.patch.object(gift_ios, "point_saturation", side_effect=saturation),
+            mock.patch.object(
+                gift_ios,
+                "is_friends_list",
+                side_effect=lambda driver: state["screen"] == "list",
+            ),
+            mock.patch.object(
+                gift_ios,
+                "choose_friend_row",
+                return_value=gift_ios.FriendRowChoice(
+                    points["NEXT_FRIEND_BTN"], True
+                ),
+            ),
+            mock.patch.object(gift_ios, "screenshot_image", return_value=image),
+            mock.patch.object(Image.Image, "save") as save,
+            mock.patch.object(gift_ios, "tap", side_effect=fake_tap),
+            mock.patch.object(gift_ios, "ensure_screen"),
+            mock.patch.object(gift_ios.time, "sleep"),
+        ):
+            driver = FakeDriver(rect={"width": 375, "height": 667})
+            completed = gift_ios.run_gifts_v3(
+                driver, {}, count, guard=True, dry_run=False, all_mode=True
+            )
+        return completed, taps, save
+
+    def test_every_friend_still_gets_a_gift_after_a_refused_open(self) -> None:
+        completed, taps, _ = self._run(5, opens_before_refusal=2)
+
+        self.assertEqual(completed, 5)
+        self.assertEqual(taps.count("SEND_BTN"), 5)
+
+    def test_opening_stops_after_the_first_refusal(self) -> None:
+        _, taps, _ = self._run(5, opens_before_refusal=2)
+
+        # Two opens that worked and the one that was refused; none after.
+        self.assertEqual(taps.count("OPEN_BTN"), 3)
+
+    def test_the_refused_gift_is_closed_twice_before_send_gift(self) -> None:
+        _, taps, _ = self._run(1, opens_before_refusal=0)
+
+        self.assertEqual(
+            taps[: taps.index("SEND_GIFT_BTN")],
+            ["OPEN_BTN", "CLOSE_BTN", "CLOSE_BTN"],
+        )
+
+    def test_the_refused_screen_is_kept_as_evidence(self) -> None:
+        _, _, save = self._run(1, opens_before_refusal=0)
+
+        save.assert_called_once_with(gift_ios.OPEN_REFUSED_SCREENSHOT)
 
 
 if __name__ == "__main__":

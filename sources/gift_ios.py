@@ -31,6 +31,7 @@ from . import config_paths, ios_wda_cleanup, pokemon_fleet
 DEFAULT_CONFIG = config_paths.default_config("ios-gifter.yaml")
 ARTIFACT_ROOT = config_paths.state_dir()
 DEFAULT_SCREENSHOT = ARTIFACT_ROOT / "gifts" / "ios-gifter-check.png"
+OPEN_REFUSED_SCREENSHOT = ARTIFACT_ROOT / "gifts" / "ios-open-refused.png"
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,15 @@ SEND_CONFIRM_ATTEMPTS = 6
 SEND_CONFIRM_PAUSE = 1
 # Seconds to let a send's overlay clear before the close scroll starts.
 PRE_SCROLL_SETTLE = 4
+# Looks, a second apart, that the friend profile gets to come back after OPEN.
+# A capped open lands on the profile under a pink "Daily limit reached" banner
+# for a few seconds, and a single look then read it as the gift card: the CLOSE
+# that followed shut the profile itself and lost the friend (SE, 2026-10-03).
+OPEN_SETTLE_ATTEMPTS = 6
+# Looks, a second apart, that SEND_BTN gets to light up after FIRST_GIFT. The
+# picker can still be sliding in when the first look is taken, and one grey
+# read used to end the phone's whole run as "no selectable outgoing gift".
+SEND_READY_ATTEMPTS = 4
 CLOSE_PROBE_MIN_BRIGHTNESS = 245
 CLOSE_PROBE_MAX_SATURATION = 15
 MAP_RECOVERY_KEYS = ("AVATAR_BTN", "FRIENDS_TAB_BTN")
@@ -982,6 +992,13 @@ def run_gifts_v3(
     outgoing_available = True
     # Last cycle's read of this friend's row. The send half never consults it.
     open_allowed = True
+    # Pokemon GO refused an OPEN this run. Measured on the SE, 2026-10-06:
+    # after three opens the OPEN tap put up a screen that never changed, and
+    # CLOSE went back to the same unopened gift. Three friends in a row did
+    # that and the cycle-failure cap ended the phone's run with sends still
+    # to make. The daily open limit or a full item bag both last the day, so
+    # the rest of the run sends without opening.
+    opens_refused = False
 
     def pause(seconds: float, modified: bool = False) -> None:
         extra = delay_modifier if modified else 0
@@ -1004,6 +1021,23 @@ def run_gifts_v3(
     def selected_gift_visible() -> tuple[bool, float]:
         saturation = point_saturation(driver, points["SEND_BTN"])
         return saturation >= send_min_saturation, saturation
+
+    def wait_for_selected_gift() -> tuple[bool, float]:
+        for attempt in range(SEND_READY_ATTEMPTS):
+            active, saturation = selected_gift_visible()
+            if active:
+                return active, saturation
+            if attempt + 1 < SEND_READY_ATTEMPTS:
+                time.sleep(1)
+        return active, saturation
+
+    def wait_for_friend_profile() -> bool:
+        for attempt in range(OPEN_SETTLE_ATTEMPTS):
+            if friend_profile_visible():
+                return True
+            if attempt + 1 < OPEN_SETTLE_ATTEMPTS:
+                time.sleep(1)
+        return False
 
     def sent_is_confirmed() -> bool:
         for attempt in range(SEND_CONFIRM_ATTEMPTS):
@@ -1035,26 +1069,60 @@ def run_gifts_v3(
             tap(driver, choice.point)
         return choice.open_allowed
 
+    def save_refused_frame() -> None:
+        try:
+            OPEN_REFUSED_SCREENSHOT.parent.mkdir(parents=True, exist_ok=True)
+            screenshot_image(driver).save(OPEN_REFUSED_SCREENSHOT)
+            print(f"  Saved the refused-open screen: {OPEN_REFUSED_SCREENSHOT}", flush=True)
+        except Exception as exc:  # the frame is evidence, never a reason to stop
+            print(f"  Could not save the refused-open screen: {exc}", flush=True)
+
     def open_incoming_gift() -> bool:
-        """Open a waiting gift and land on the friend profile; False if none."""
+        """Open a waiting gift and land on the friend profile; False if none.
+
+        A refused open also returns False, from the friend profile, with
+        opens_refused set.
+        """
+        nonlocal opens_refused
         if not colored_action_available(driver, points["OPEN_BTN"]):
             return False
         log_tap("OPEN_BTN")
         pause(3, modified=True)
-        if friend_profile_visible():
+        if wait_for_friend_profile():
             print(
                 "  OPEN returned to the friend profile; skipping CLOSE_BTN",
                 flush=True,
             )
         else:
             print("  Incoming-gift screen still open; closing it", flush=True)
+            save_refused_frame()
             log_tap("CLOSE_BTN")
             pause(2, modified=True)
             if not friend_profile_visible():
-                raise GifterError(
-                    "OPEN did not reach the friend profile; stopped before "
-                    "tapping Send Gift"
+                if is_friends_list(driver) or not colored_action_available(
+                    driver, points["OPEN_BTN"]
+                ):
+                    raise GifterError(
+                        "OPEN did not reach the friend profile; stopped before "
+                        "tapping Send Gift"
+                    )
+                # Back on the gift it would not open. A second CLOSE leaves it
+                # for the profile; a card that will not move is no refusal.
+                print("  Back on the unopened gift; closing it", flush=True)
+                log_tap("CLOSE_BTN")
+                pause(2, modified=True)
+                if not friend_profile_visible():
+                    raise GifterError(
+                        "OPEN did not reach the friend profile; stopped before "
+                        "tapping Send Gift"
+                    )
+                opens_refused = True
+                print(
+                    "  OPEN was refused (daily open limit or full item bag); "
+                    "sending without opening for the rest of the run",
+                    flush=True,
                 )
+                return False
         return True
 
     for gift_number in range(1, count + 1):
@@ -1084,9 +1152,9 @@ def run_gifts_v3(
                 completed += 1
                 continue
 
-            if open_allowed:
+            if open_allowed and not opens_refused:
                 opened = open_incoming_gift()
-                if not opened:
+                if not opened and not opens_refused:
                     print("  No incoming gift to open; continuing Send Gift", flush=True)
                     if not friend_profile_visible():
                         # The card was still painting when OPEN_BTN was sampled, so it
@@ -1095,7 +1163,12 @@ def run_gifts_v3(
                         print("  Incoming gift painted late; opening it now", flush=True)
                         opened = open_incoming_gift()
             else:
-                print("  Leaving this gift unopened; the row is highlighted", flush=True)
+                reason = (
+                    "opens were refused earlier this run"
+                    if opens_refused
+                    else "the row is highlighted"
+                )
+                print(f"  Leaving this gift unopened; {reason}", flush=True)
                 if not friend_profile_visible():
                     # An unopened gift is a screen of its own in front of the
                     # profile, and SEND GIFT is on the profile behind it.
@@ -1116,7 +1189,18 @@ def run_gifts_v3(
                 log_tap("FIRST_GIFT_BTN")
                 pause(1.5)
 
-                send_active, send_saturation = selected_gift_visible()
+                send_active, send_saturation = wait_for_selected_gift()
+                if not send_active:
+                    # A tap that landed while the picker was still sliding in
+                    # selects nothing; one more is cheaper than ending the run.
+                    print(
+                        "  SEND_BTN still grey "
+                        f"(saturation {send_saturation:.1f}); tapping the first gift again",
+                        flush=True,
+                    )
+                    log_tap("FIRST_GIFT_BTN")
+                    pause(1.5)
+                    send_active, send_saturation = wait_for_selected_gift()
                 if not send_active:
                     outgoing_available = False
                     print(
@@ -1208,7 +1292,9 @@ def run_gifts_v3(
             # --no-guard there is no sanctioned way to check what is on screen
             # first. So without the guard a failed cycle stays fatal, as it was
             # before, rather than tapping a screen nobody has identified.
-            if failures >= GIFT_CYCLE_RETRIES or not guard:
+            # An empty bag already ended the run; the close that then failed is
+            # no reason to go on opening friends who can be sent nothing.
+            if failures >= GIFT_CYCLE_RETRIES or not guard or not outgoing_available:
                 raise
             # The friends list is the screen every cycle starts from, so
             # getting back to it is what lets the next friend be tried at all.

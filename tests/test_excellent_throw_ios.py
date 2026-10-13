@@ -147,6 +147,27 @@ class EncounterGuardTests(unittest.TestCase):
         self.assertAlmostEqual(detection.center_x, 187, delta=3)
         self.assertAlmostEqual(detection.center_y, 540, delta=4)
 
+    def test_ball_is_found_below_sunlit_stadium_grass(self) -> None:
+        """6 Oct 2026, android-three: GBL-stadium grass reads as Ultra Ball gold.
+
+        Laid out as android-three's frame was: ball r=0.167W centred at 0.896H, grass
+        from the top of the search band down to the ball.
+        """
+        viewport = (420, 817)
+        radius, center = 70, (210, 732)
+        image = Image.new("RGB", viewport, (110, 128, 52))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, round(viewport[1] * 0.70), viewport[0], center[1] - radius), fill=(171, 171, 85))
+        box = (center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius)
+        draw.ellipse(box, fill=(235, 222, 226), outline=(20, 20, 20), width=5)
+        draw.pieslice(box, 180, 360, fill=(65, 85, 218))
+        draw.rectangle((box[0], center[1] - 3, box[2], center[1] + 3), fill=(15, 15, 15))
+        detection = thrower.locate_throw_ball(image, viewport)
+        self.assertIsNotNone(detection)
+        assert detection is not None
+        self.assertAlmostEqual(detection.center_y, center[1], delta=6)
+        self.assertAlmostEqual(detection.radius, radius, delta=6)
+
     def test_tall_phone_ball_bounce_stays_in_same_encounter(self) -> None:
         prior = thrower.BallDetection(1.0, 220, 768, 80)
         bounced = thrower.BallDetection(1.0, 220, 891, 88)
@@ -539,7 +560,7 @@ class SilverPinapFeedTests(unittest.IsolatedAsyncioTestCase):
         berry_android.forget_empty_pockets()
         self.addCleanup(berry_android.forget_empty_pockets)
 
-    async def feed(self, listed: list) -> tuple:
+    async def feed(self, listed: list, sheet_stays: bool = False) -> tuple:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         picker = Image.new("RGB", (750, 1334))
@@ -554,6 +575,10 @@ class SilverPinapFeedTests(unittest.IsolatedAsyncioTestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch("sources.berry_android.picker_read", return_value=listed),
+            patch(
+                "sources.berry_android.picker_sheet_top",
+                return_value=900 if sheet_stays else None,
+            ),
             patch.object(thrower, "berry_in_hand", return_value=False),
             patch.object(thrower, "swap_to_ball", new=AsyncMock()) as swap,
             patch("asyncio.sleep", new=AsyncMock()),
@@ -570,9 +595,17 @@ class SilverPinapFeedTests(unittest.IsolatedAsyncioTestCase):
         device.flick.assert_not_awaited()
         self.assertEqual(swap.await_args.kwargs["choice_x"], thrower.ULTRA_CHOICE_X)
 
-    async def test_a_nanab_fallback_keeps_the_great_ball(self) -> None:
+    async def test_a_nanab_fallback_still_takes_the_ultra_ball(self) -> None:
+        # Out of Silver Pinaps, a legendary is still worth the Ultra Ball.
         device, swap = await self.feed([("nanab", [375, 938])])
-        self.assertEqual(swap.await_args.kwargs["choice_x"], thrower.BALL_CHOICE_X)
+        self.assertEqual(swap.await_args.kwargs["choice_x"], thrower.ULTRA_CHOICE_X)
+
+    async def test_a_refused_berry_closes_the_sheet_instead_of_feeding(self) -> None:
+        """6 Oct 2026: a Latios already on a berry kept the sheet up 30 throws."""
+        device, swap = await self.feed([("silver", [375, 1170])], sheet_stays=True)
+        taps = [call.args[0] for call in device.tap.await_args_list]
+        self.assertEqual(taps, [[188, 585], [188, 300]])
+        self.assertEqual(swap.await_args.kwargs["choice_x"], thrower.ULTRA_CHOICE_X)
 
 
 if __name__ == "__main__":

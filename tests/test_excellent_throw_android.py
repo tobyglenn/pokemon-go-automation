@@ -49,7 +49,7 @@ class RawFramebufferTests(unittest.TestCase):
 class HoldLengthTests(unittest.TestCase):
     """The hold has to outlast the capture, or the ring is never on the frame.
 
-    Measured on 24 Aug: one raw screencap costs 0.52-0.60s on the moto and
+    Measured on 24 Aug: one raw screencap costs 0.52-0.60s on the compact device and
     1.09-1.21s on the android-one, against a configured 0.35s hold.  Every capture
     therefore finished after the release, `measure_ring` saw no ring on any
     Android phone, and every throw was a guessed fallback target.
@@ -237,6 +237,21 @@ class BallInHandTests(unittest.TestCase):
         image = Image.new("RGB", (720, 1600), (70, 110, 60))
         self.assertFalse(throw.ball_in_hand(image, image.size))
 
+    def test_a_night_tinted_ball_is_a_ball(self) -> None:
+        # Night lighting turns the ball's white to (196, 205, 238); the android-one,
+        # android-two, android-three and SE all read it as an item on 5 Oct 2026.
+        image = held_disc((40, 90, 210))
+        center_x, center_y, radius = 360, 1330, 110
+        for y in range(center_y, center_y + radius):
+            for x in range(center_x - radius, center_x + radius):
+                if (x - center_x) ** 2 + (y - center_y) ** 2 <= radius * radius:
+                    image.putpixel((x, y), (196, 205, 238))
+        self.assertTrue(throw.ball_in_hand(image, image.size))
+
+    def test_a_night_tinted_silver_pinap_is_not_a_ball(self) -> None:
+        image = held_disc((180, 190, 225))
+        self.assertFalse(throw.ball_in_hand(image, image.size))
+
 
 class TallPhoneBallTests(unittest.TestCase):
     """A held ball on the tall_device is 0.225 of the analysis width, not 0.166.
@@ -283,7 +298,7 @@ class EncounterButtonTests(unittest.TestCase):
     """The corner buttons are found, not assumed.
 
     Their x is the same everywhere -- 0.123 and 0.872 of the width -- but their
-    y is not: 0.836 on the android-one, 0.853 on the moto, 0.914 on the tall_device.  The
+    y is not: 0.836 on the android-one, 0.853 on the compact phone, 0.914 on the tall_device.  The
     fixed 0.855 the berry picker used to tap landed on bare grass on the tall_device,
     which is why it could never open its picker and never fed a Nanab.
     """
@@ -396,7 +411,7 @@ class GBLRewardThrowTests(unittest.TestCase):
         self.assertIsNotNone(found, "the tall_device's ball must be findable at all")
         ball = view.grow_ball(found)
 
-        # 0.81h is the moto's ball, which the GBL path used to throw from on
+        # 0.81h is the compact phone's ball, which the GBL path used to throw from on
         # every phone.
         blind_y = round(size[1] * 0.81)
         self.assertGreater(
@@ -489,7 +504,7 @@ class NanabFeedTests(unittest.IsolatedAsyncioTestCase):
 
     Every throwing version of this fed nothing.  The berry sits where the ball
     sits, so the swipe that throws a ball looks like the way to send it, and
-    the moto's bag read x9 before and after three of them while the foldable's
+    the compact phone's bag read x9 before and after three of them while the foldable's
     read x36 either side.  A tap fed one first try, 9 -> 8.  The gym feeder in
     `berry_android` had the same finding written down already: a press picks
     the berry up, so a swipe drags it and sets it down again.
@@ -612,7 +627,7 @@ class NanabFeedTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_berry_that_will_not_feed_is_never_backed_out_of(self) -> None:
         """BACK does not put the berry away, it runs from the encounter.
 
-        The moto took that exit on 24 Aug and finished the attempt on the map
+        The test device took that exit on 24 Aug and finished the attempt on the map
         screen, with the abandoned Pokemon counted as caught.
         """
         await self.feed([held_item(pink=True)])
@@ -673,7 +688,7 @@ class EncounterLockTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_one_reading_is_enough_when_the_caller_saw_the_pokemon(self) -> None:
         # A Pokemon that stands over its own ball hides it in most frames, so
-        # the pair never arrives: razr's Fearow on 10 Sep 2026 gave one clean
+        # the pair never arrives: a Fearow on 10 Sep 2026 gave one clean
         # reading every few seconds and the claim run could not throw at all.
         # The claim worker reads the CP plate before it throws, so the second
         # reading is buying a safeguard it already has.
@@ -742,7 +757,7 @@ class ThrowGestureTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_unreadable_hand_is_not_a_berry_and_still_throws(self) -> None:
         """A Pokemon standing over the ball hides the disc, and hiding is not holding.
 
-        razr's Fearow on 10 Sep 2026 read as nothing in the hand on every frame,
+        A Fearow on 10 Sep 2026 read as nothing in the hand on every frame,
         so every throw was sent to the berry picker first; the picker never
         opened on that phone and the encounter got no ball at all.
         """
@@ -811,7 +826,7 @@ class CatchScreenTests(unittest.IsolatedAsyncioTestCase):
         taps = [call.args[0] for call in device.tap.await_args_list]
         self.assertEqual(len(taps), 2)
         # The X is the phone's own, not a fraction: 2830 of 2992 here against
-        # the moto's 1421 of 1600.
+        # the compact phone's 1421 of 1600.
         self.assertEqual(taps[1], [612, 2830])
 
     async def test_a_phone_already_on_the_map_is_left_alone(self) -> None:
@@ -844,7 +859,7 @@ class ThrowGeometryTests(unittest.TestCase):
         return excellent_throw_ios.RingLock(center_x, center_y, 400, 200, 0.9)
 
     def test_the_blind_throw_is_the_one_that_caught_by_hand(self) -> None:
-        """moto at 720x1600: 360,1300 -> 360,560, sent by hand, caught."""
+        """compact phone at 720x1600: 360,1300 -> 360,560, sent by hand, caught."""
         start, end = throw.proven_throw_points(
             self.ball(360, 1300), (720, 1600)
         )
@@ -853,16 +868,16 @@ class ThrowGeometryTests(unittest.TestCase):
 
     def test_the_blind_throw_keeps_its_length_on_a_taller_phone(self) -> None:
         """A shared endpoint is a different throw on every handset: the tall_device's
-        ball rests at 0.913h against the moto's 0.8125h, so ending both at
+        ball rests at 0.913h against the compact phone's 0.8125h, so ending both at
         0.35h threw the tall_device 22% harder than the swipe that worked."""
-        _start, moto = throw.proven_throw_points(self.ball(360, 1300), (720, 1600))
+        _start, compact = throw.proven_throw_points(self.ball(360, 1300), (720, 1600))
         _start, tall_device = throw.proven_throw_points(self.ball(612, 2732), (1224, 2992))
         self.assertAlmostEqual(
-            (1300 - moto[1]) / 1600, (2732 - tall_device[1]) / 2992, places=2
+            (1300 - compact[1]) / 1600, (2732 - tall_device[1]) / 2992, places=2
         )
         self.assertGreater(
             tall_device[1], round(2992 * 0.35),
-            "the tall_device must stop throwing the moto's endpoint",
+            "the tall_device must stop throwing the compact phone's endpoint",
         )
 
     def test_a_circle_up_in_the_sky_is_not_a_reading(self) -> None:

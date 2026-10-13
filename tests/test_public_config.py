@@ -111,15 +111,15 @@ class MachineRoutingTests(unittest.TestCase):
         """The remote worker wakes, boots and probes while the local one is
         already reporting phones, so its lines land late among battle output."""
         self.assertEqual(
-            fleet_entrypoint.label_line("remote", "[gbl-day] Target devices (2): moto-g\n"),
-            "[remote] [gbl-day] Target devices (2): moto-g",
+            fleet_entrypoint.label_line("remote", "[gbl-day] Target devices (2): android-one\n"),
+            "[remote] [gbl-day] Target devices (2): android-one",
         )
 
     def test_a_line_that_already_names_its_machine_is_left_alone(self):
         """Each worker labels its own readout; two labels would read worse."""
         self.assertEqual(
-            fleet_entrypoint.label_line("remote", "[remote] gbl on moto-g\n"),
-            "[remote] gbl on moto-g",
+            fleet_entrypoint.label_line("remote", "[remote] gbl on android-one\n"),
+            "[remote] gbl on android-one",
         )
 
     def test_relaying_labels_a_workers_whole_output(self):

@@ -72,7 +72,7 @@ COLD_START_SETTLE = 180.0  # ... and much longer before the map is up
 BALL_KEY = 'GBL_MENU_BTN'
 BATTLE_KEY = 'GBL_MENU_BATTLE_BTN'
 # Deliberately not GBL_BATTLE_BTN: that key is the green BATTLE pill on the
-# GO BATTLE LEAGUE card (see Moto.yaml), a different button on a different
+# GO BATTLE LEAGUE card (e.g. in phone coordinates), a different button on a different
 # screen, and the recovery flow pressing it from the main menu taps whatever
 # happens to sit at those coordinates.
 
@@ -434,7 +434,7 @@ class AndroidTarget(Target):
         here rather than left for a human, because the walk below starts from
         the map and a cold start ends on it.  The alternative is a leg that
         taps map coordinates into whatever notification took the screen --
-        seen on the moto-g, which sat in Google Messages for an hour with the
+        seen on an Android device, which sat in Google Messages for an hour with the
         game still running behind it.
         """
         if await asyncio.to_thread(self.front_package) == GAME_PACKAGE:

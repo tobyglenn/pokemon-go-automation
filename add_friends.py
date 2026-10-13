@@ -257,6 +257,9 @@ def find_trainer_field(image: Image.Image) -> Optional[ImagePoint]:
                 break
             bottom = bottom_group[len(bottom_group) // 2]
             if bottom[2] - bottom[1] >= width * 0.50:
+                center_x = round((top[1] + top[2]) / 2)
+                if not (width * 0.40 <= center_x <= width * 0.60):
+                    continue
                 center_y = round((top[0] + bottom[0]) / 2)
                 interior_left = max(0, top[1] + round(width * 0.08))
                 interior_right = min(width, top[2] - round(width * 0.08))
@@ -321,9 +324,28 @@ def find_gradient_button(image: Image.Image) -> Optional[ImagePoint]:
 
 
 def find_add_friend_button(image: Image.Image) -> Optional[ImagePoint]:
-    """Find the orange Add Friend icon on the upper-left of the Friends list."""
+    """Find the Add Friend button on the upper section of the Friends list."""
     rgb = image.convert("RGB")
     width, height = rgb.size
+
+    # 1. Modern UI: Teal '+ person' Add Friend button
+    left = int(width * 0.30)
+    right = int(width * 0.50)
+    top = int(height * 0.10)
+    bottom = int(height * 0.19)
+    teal_matches: list[tuple[int, int]] = []
+    for y in range(top, bottom):
+        for x in range(left, right):
+            r, g, b = rgb.getpixel((x, y))
+            if 30 <= r <= 100 and 150 <= g <= 225 and 130 <= b <= 205:
+                teal_matches.append((x, y))
+    if len(teal_matches) >= 150:
+        xs = [p[0] for p in teal_matches]
+        ys = [p[1] for p in teal_matches]
+        if max(xs) - min(xs) >= width * 0.02 and max(ys) - min(ys) >= height * 0.01:
+            return ImagePoint(x=round(sum(xs) / len(xs)), y=round(sum(ys) / len(ys)))
+
+    # 2. Legacy UI: Orange Add Friend button
     left = int(width * 0.08)
     right = int(width * 0.98)
     top = int(height * 0.05)
@@ -1109,22 +1131,15 @@ def prepare_entry_screen(controller: FriendController) -> tuple[Image.Image, Ima
             time.sleep(1)
             image = controller.screenshot()
     width, height = image.size
-    trainer_tab = ImagePoint(x=round(width * 0.28), y=round(height * 0.08))
+    trainer_tab = ImagePoint(x=round(width * 0.28), y=round(height * 0.055))
+    friends_tab_btn = ImagePoint(x=round(width * 0.50), y=round(height * 0.055))
 
     # Step 1: Direct trainer field check
     image, field = _locate_field(controller, image)
     if field is not None:
         return image, field
 
-    # Step 2: If on Add Friend screen but QR CODE tab is open -> tap TRAINER CODE tab header
-    controller.tap(trainer_tab, image)
-    time.sleep(1.0)
-    image = controller.screenshot()
-    image, field = _locate_field(controller, image)
-    if field is not None:
-        return image, field
-
-    # Step 3: Check if on Friends list tab -> tap ADD FRIEND button
+    # Step 2: Check if on Friends list tab -> tap ADD FRIEND button
     add_friend = find_add_friend_button(image)
     if add_friend is not None:
         print(f"[{controller.label}] opening Add Friend from Friends list", flush=True)
@@ -1145,12 +1160,35 @@ def prepare_entry_screen(controller: FriendController) -> tuple[Image.Image, Ima
         if field is not None:
             return image, field
 
-    # Step 4: Check if on ME tab in profile -> tap FRIENDS tab pill header (x = 0.50*w, y = 0.08*h)
-    friends_tab_btn = ImagePoint(x=round(width * 0.50), y=round(height * 0.08))
+    # Step 3: Check if on ME tab in profile -> tap FRIENDS tab pill header (x = 0.50*w, y = 0.055*h)
     print(f"[{controller.label}] tapping Friends tab header (x={friends_tab_btn.x}, y={friends_tab_btn.y})", flush=True)
     controller.tap(friends_tab_btn, image)
     time.sleep(1.5)
     image = controller.screenshot()
+
+    add_friend = find_add_friend_button(image)
+    if add_friend is not None:
+        print(f"[{controller.label}] opening Add Friend from Friends list", flush=True)
+        controller.tap(add_friend, image)
+        time.sleep(1.8)
+        image = controller.screenshot()
+        image, field = _locate_field(controller, image, on_entry_page=True)
+        if field is not None:
+            return image, field
+        controller.tap(trainer_tab, image)
+        time.sleep(1.0)
+        image = controller.screenshot()
+        image, field = _locate_field(controller, image, on_entry_page=True)
+        if field is not None:
+            return image, field
+
+    # Step 4: If on Add Friend screen but QR CODE tab is open -> tap TRAINER CODE tab header
+    controller.tap(trainer_tab, image)
+    time.sleep(1.0)
+    image = controller.screenshot()
+    image, field = _locate_field(controller, image)
+    if field is not None:
+        return image, field
 
     add_friend = find_add_friend_button(image)
     if add_friend is not None:

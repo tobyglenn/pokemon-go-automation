@@ -10,7 +10,7 @@ from tests.test_gbl_league_rotation import CARDS, AndroidLeagueRotationTests
 
 
 class StuckScreenRestartTests(unittest.IsolatedAsyncioTestCase):
-    """24 Sep: ph-1 and the moto-g each sat on a screen no recovery tap moved.
+    """24 Sep: two test phones each sat on a screen no recovery tap moved.
 
     Each leg quit on it after 25 reads, the next leg found the same screen, and
     gbl_day gave up on both phones.  The first time, the game is restarted.

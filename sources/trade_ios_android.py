@@ -588,7 +588,7 @@ def state_matches(expected: str, metrics: dict[str, float]) -> bool:
         # phone's friend screen read as a post-trade card every other friend.
         # That is not a near miss: post_trade answers to X_BTN, and X_BTN on a
         # friend screen leaves for the map, which nothing recovers from. It is
-        # what put the razr on the map three runs running on 2026-09-13.
+        # what put the Android phone on the map three runs running on 2026-09-13.
         #
         # What the post-trade card has that a friend screen does not is a card
         # filling the head band: measured 0.992 on the android-three against
@@ -661,7 +661,7 @@ def state_matches(expected: str, metrics: dict[str, float]) -> bool:
 # did not fire and the screen went on to match "friend": the background behind
 # a dialog is the trade's flat green, which reads 1.000 under TRADE_BTN, and
 # white_panel sits at 0.464, inside every friend bound. The guard then believed
-# the razr was home, tapped TRADE_BTN into the dialog, and left the iPhone
+# the Android phone was home, tapped TRADE_BTN into the dialog, and left the iPhone
 # waiting in a trade nobody joined until Pokémon GO expired it. That is the
 # loop that stopped three runs.
 #
@@ -705,7 +705,13 @@ DIALOG_PILL_MIN_SHARE = 0.20
 # the white flank is looked for just outside the run rather than against it.
 DIALOG_PILL_FLANK = 4
 DIALOG_PILL_ROW_GAP = 3
-DIALOG_PILL_MIN_ROWS = 0.010
+# Thick enough to pass over a Pokémon's HP bar, which is green, sits on the
+# detail screen's white card and so is flanked like a pill. On the android-three's mega
+# notice (2026-10-02) the bar was 4 scaled rows (0.009 of the height). At the
+# old 0.010 floor it read as the topmost pill, and every press landed on the bar
+# rather than OK, which was 0.073 of the height further down. Real card pills
+# measure 0.037-0.082.
+DIALOG_PILL_MIN_ROWS = 0.020
 
 # Not every notice is a card. "New Mega Level available!" dims the screen
 # underneath and writes straight onto it, so its OK pill has the dimmed detail
@@ -809,6 +815,11 @@ def find_dialog_button(image: Any) -> tuple[int, int] | None:
             if abs(sum(row[1] for row in band) / len(band) - middle)
             <= DIALOG_SCAN_WIDTH * OVERLAY_PILL_MAX_OFFSET
         ]
+        # The thickest rather than the topmost, since an overlay notice has only
+        # one button. Above the android-three's mega OK pill (34 scaled rows), the teal
+        # sky behind the Pokémon gave a centred 14-row band at the top of the
+        # screen. Taking the topmost pressed the sky.
+        bands.sort(key=len, reverse=True)
     if not bands:
         return None
     top = bands[0]
@@ -913,8 +924,8 @@ def is_empty_handed_trade_screen(image: Any) -> bool:
 # The friendship-bonus sheet: the sub-screen behind the heart bar, listing
 # REMOTE TRADE / TRADE / GYM BATTLE and how many points the next heart needs.
 # It is not a trade screen at all, which is why nothing named it, and an
-# unnamed screen is left alone — so the iphone-second stood on this one through
-# every recovery round on 2026-09-13 while the razr walked itself out to the
+# unnamed screen is left alone — so an iOS device stood on this one through
+# every recovery round on 2026-09-13 while the Android device walked itself out to the
 # map, and the run gave up with both phones somewhere else.
 #
 # What separates it is the card: the bonus list is full-bleed white, so both

@@ -21,7 +21,7 @@ class FakeSession:
 
     def __init__(self) -> None:
         self.viewport = {"width": 375, "height": 667}
-        self.label = "Second iPhone (SE)"
+        self.label = "ios-one"
         self.taps: list[list[int]] = []
         self.scrolls: list[tuple[list[int], list[int], float]] = []
         self.screenshot = AsyncMock(return_value=frame())
@@ -37,7 +37,7 @@ class FakeSession:
 
 
 def iphone() -> catch_ios.IOSCatchPhone:
-    return catch_ios.IOSCatchPhone(FakeSession(), "iphone-second", (750, 1334))
+    return catch_ios.IOSCatchPhone(FakeSession(), "ios-one", (750, 1334))
 
 
 class IPhoneCoordinateTests(unittest.IsolatedAsyncioTestCase):
@@ -55,8 +55,8 @@ class IPhoneCoordinateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_name_is_the_fleet_name(self) -> None:
         phone = iphone()
-        self.assertEqual(phone.label, "iphone-second")
-        self.assertEqual(phone.session.label, "iphone-second")
+        self.assertEqual(phone.label, "ios-one")
+        self.assertEqual(phone.session.label, "ios-one")
 
     async def test_back_presses_nothing(self) -> None:
         """No BACK key exists; guessing one taps the GO Snapshot shutter."""
@@ -123,24 +123,42 @@ class IPhoneThrowTests(unittest.IsolatedAsyncioTestCase):
             fed.assert_awaited_once()
             self.assertTrue(await phone.throw(frame(), Path(tempfile.mkdtemp()), use_nanab=False))
         fed.assert_awaited_once()
-        self.assertEqual(flick.await_args.kwargs, {"rise": catch_ios.FLICK_RISE, "step_ms": catch_ios.FLICK_STEP_MS})
+        self.assertEqual(
+            flick.await_args.kwargs,
+            {"rise": catch_ios.FLICK_RISE, "step_ms": catch_ios.FLICK_STEP_MS, "trust_hand": False},
+        )
+
+    async def test_a_ball_refused_twice_is_thrown_anyway(self) -> None:
+        # The GBL stadium's pink glow made the SE read its ball as a berry on
+        # every throw; after one refusal and its swap, the next flick goes.
+        phone = iphone()
+        phone.flicking = True
+        flick = AsyncMock(side_effect=[False, True])
+        with patch.object(phone, "ball_visible", lambda _image: True), \
+                patch.object(catch_ios.gbl_ios, "throw_ball", flick):
+            self.assertFalse(await phone.throw(frame(), Path(tempfile.mkdtemp()), use_nanab=False))
+            self.assertTrue(await phone.throw(frame(), Path(tempfile.mkdtemp()), use_nanab=False))
+        self.assertEqual(
+            [call.kwargs["trust_hand"] for call in flick.await_args_list], [False, True]
+        )
+        self.assertEqual(phone.hand_refusals, 0)
 
 
 class SelectionTests(unittest.TestCase):
     def test_nothing_named_means_every_phone(self) -> None:
-        self.assertEqual(catch_rewards.split_selection(None, {"iphone-second"}), (None, None, True))
-        self.assertEqual(catch_rewards.split_selection(["all"], {"iphone-second"}), (None, None, True))
+        self.assertEqual(catch_rewards.split_selection(None, {"ios-one"}), (None, None, True))
+        self.assertEqual(catch_rewards.split_selection(["all"], {"ios-one"}), (None, None, True))
 
     def test_an_iphone_alone_asks_for_no_android(self) -> None:
         self.assertEqual(
-            catch_rewards.split_selection(["iphone-second"], {"iphone-second"}),
-            (["iphone-second"], None, False),
+            catch_rewards.split_selection(["ios-one"], {"ios-one"}),
+            (["ios-one"], None, False),
         )
 
     def test_mixed_names_are_split_by_platform(self) -> None:
         self.assertEqual(
-            catch_rewards.split_selection(["iphone-second", "SERIAL1"], {"iphone-second"}),
-            (["iphone-second"], ["SERIAL1"], True),
+            catch_rewards.split_selection(["ios-one", "SERIAL1"], {"ios-one"}),
+            (["ios-one"], ["SERIAL1"], True),
         )
 
 
@@ -157,7 +175,8 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(catch_rewards.catch_awarded_android, "run_device", award), \
                 patch.object(catch_rewards.claim_research_android, "run_device", research), \
                 patch.object(catch_rewards.catch_awarded_android, "catch_one", catch_one), \
-                patch.object(catch_rewards.catch_awarded_android, "clear_catch_screens", AsyncMock()):
+                patch.object(catch_rewards.catch_awarded_android, "clear_catch_screens", AsyncMock()), \
+                patch.object(catch_rewards.catch_awarded_android, "close_item_sheet", AsyncMock()):
             status = await catch_rewards.run_phone(device, args)
         return status, award, research, catch_one
 
@@ -182,6 +201,21 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         _status, award, _research, catch_one = await self.run_phone(["encounter", "award"])
         catch_one.assert_awaited_once()
         award.assert_awaited_once()
+
+    async def test_an_encounter_still_open_after_a_catch_is_thrown_at_again(self) -> None:
+        """6 Oct 2026: a Latios break-out outlasted the result window on android-three."""
+        _status, award, _research, catch_one = await self.run_phone(
+            ["encounter", "encounter", "award"]
+        )
+        self.assertEqual(catch_one.await_count, 2)
+        award.assert_awaited_once()
+
+    async def test_an_encounter_that_never_ends_is_given_up_on(self) -> None:
+        modes = ["encounter"] * (catch_rewards.OPENING_ROUNDS + 1)
+        status, award, _research, catch_one = await self.run_phone(modes)
+        self.assertEqual(catch_one.await_count, catch_rewards.OPENING_ROUNDS)
+        self.assertEqual(status, 0)
+        award.assert_not_awaited()
 
     async def test_a_forced_mode_skips_the_read(self) -> None:
         _status, _award, research, _catch = await self.run_phone([], extra=["--mode", "research"])

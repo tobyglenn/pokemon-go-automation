@@ -1,7 +1,7 @@
 """Which computer a phone is plugged into, discovered rather than declared.
 
 `pokemon-fleet.yaml` lets each device record the `machine` it hangs off, and
-that tag is right until someone moves a cable.  Then `--devices razr` routes to
+that tag is right until someone moves a cable.  Then `--devices android-one` routes to
 the computer the tag names, that host's own connectivity check reports
 `Android not connected/authorized`, and the phone is sitting in a USB port on
 the other Mac.  Worse in the other direction: a worker asked for a phone tagged

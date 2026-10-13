@@ -13,7 +13,7 @@ from typing import Any
 
 from PIL import Image
 
-from . import config_paths, excellent_throw_android, gbl_vision
+from . import config_paths, excellent_throw_android, gbl_vision, legendary_pokemon
 
 # The award card's own words.  The headline says the card is up at all; the
 # count line is the only place the queue length is written, and reading it is
@@ -36,6 +36,13 @@ CARD_SETTLE = 1.4
 CARD_POLL = 0.9
 # How long the card is given before anything is pressed to bring it out.
 CARD_FIRST_WAIT = 8.0
+# The encounter's name plate, and how many looks it gets before the first
+# throw.  The plate rides with the Pokemon and can be missed on one frame, but
+# every look is an OCR pass in front of a waiting throw.
+PLATE = re.compile(r"\bcp ?\d+\b")
+PLATE_READS = 3
+PLATE_POLL = 0.6
+ENCOUNTER_OPEN_READS = 3
 
 
 class AwardQueueError(RuntimeError):
@@ -161,6 +168,7 @@ async def next_award_card(
     device: excellent_throw_android.AndroidDevice,
     args: argparse.Namespace,
     artifact_dir: Path,
+    patience: float = 0.0,
 ) -> AwardCard | None:
     """Wait for the next card, clearing what a catch left up if it does not come.
 
@@ -172,13 +180,40 @@ async def next_award_card(
     sat there with twelve awards still queued.  So a card that does not arrive
     is treated as a screen still standing in front of it, once, before the
     wait is called finished.
+
+    `patience` is how long a run that has already worked cards keeps looking.
+    The card does not always come straight back: on 5 Oct 2026 android-three was given
+    up on with four still queued, and the android-two after its ninth with a set of
+    sixteen on its way, both by a 38-second wait while the card was still to
+    come.  An open encounter ends the wait early, so the caller can throw.
     """
+    started = time.monotonic()
     card = await wait_for_award_card(device, min(args.card_wait, CARD_FIRST_WAIT))
     if card is not None:
         return card
     print(f"[{device.label}] No card yet; clearing anything left over from the catch")
     await clear_catch_screens(device, artifact_dir)
-    return await wait_for_award_card(device, args.card_wait)
+    deadline = started + max(args.card_wait, patience)
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        card = await wait_for_award_card(device, min(args.card_wait, remaining))
+        waited = time.monotonic() - started
+        if card is not None:
+            if waited > args.card_wait:
+                print(f"[{device.label}] Award card came back after {waited:.0f}s")
+            return card
+        if time.monotonic() >= deadline:
+            image, _ts = await capture_frame(device)
+            image.save(artifact_dir / "no-card.jpg", "JPEG", quality=72)
+            return None
+        print(
+            f"[{device.label}] Still no award card after {waited:.0f}s; "
+            f"waiting up to {patience:.0f}s for the next one"
+        )
+        await clear_catch_screens(device, artifact_dir)
+        await close_item_sheet(device)
+        if await encounter_open(device):
+            return None
 
 
 async def close_item_sheet(device: excellent_throw_android.AndroidDevice) -> bool:
@@ -205,13 +240,45 @@ async def close_item_sheet(device: excellent_throw_android.AndroidDevice) -> boo
 
 
 async def encounter_open(device: excellent_throw_android.AndroidDevice) -> bool:
-    """Whether something throwable is on screen right now.
+    """Whether something throwable is on screen in the next few reads.
 
-    One read, not the encounter wait's repeated agreeing reads: this only has
-    to be good enough to decide whether the wait is worth spending at all.
+    Any one sighting is enough; the encounter wait that follows agrees its own
+    reads.  One read was not: on 6 Oct 2026 android-three's Latios broke out after the
+    result window closed, the card wait saw its Ultra Ball, and the single
+    re-check missed it and called a queue with a legendary in it finished.
     """
-    image, _ts = await capture_frame(device)
-    return ball_visible(device, image)
+    for look in range(ENCOUNTER_OPEN_READS):
+        if look:
+            await asyncio.sleep(PLATE_POLL)
+        image, _ts = await capture_frame(device)
+        if ball_visible(device, image):
+            return True
+    return False
+
+
+async def read_legendary(device: Any, reads: int) -> tuple[bool, str | None]:
+    """(whether the name plate was read, the legendary it names if any).
+
+    Every box, not just the plate's: the plate is sometimes read as "CP 2056"
+    alone, with the name as a box of its own.
+    """
+    for look in range(reads):
+        if look:
+            await asyncio.sleep(PLATE_POLL)
+        image, _ts = await capture_frame(device)
+        source = image
+        if image.width > OCR_WIDTH:
+            source = image.resize(
+                (OCR_WIDTH, max(1, round(image.height * OCR_WIDTH / image.width)))
+            )
+        try:
+            boxes = await asyncio.to_thread(gbl_vision.recognize, source)
+        except gbl_vision.VisionOCRError:
+            continue
+        texts = [box.text for box in boxes if box.confidence >= OCR_CONFIDENCE]
+        if any(PLATE.search(gbl_vision.normalize(text)) for text in texts):
+            return True, legendary_pokemon.legendary_named(texts)
+    return False, None
 
 
 async def catch_one(
@@ -231,18 +298,33 @@ async def catch_one(
     clean sight of the ball is enough to throw at.
     """
     fresh_encounter = args.nanab
+    berry = "nanab"
+    named = False
     for attempt in range(1, args.throws + 1):
         throw_dir = artifact_dir / f"throw-{attempt:02d}"
         throw_dir.mkdir(parents=True, exist_ok=True)
+        if not named:
+            named, legendary = await read_legendary(
+                device, PLATE_READS if attempt == 1 else 1
+            )
+            if legendary is not None:
+                print(
+                    f"[{device.label}] {legendary} is legendary; "
+                    "Silver Pinap and an Ultra Ball for every throw"
+                )
+                berry = "silver"
         try:
             ended = await throw_once(
                 device,
                 wait_seconds=args.wait,
                 artifact_dir=throw_dir,
                 dry_run=False,
-                use_nanab=fresh_encounter,
+                # A Silver Pinap is spent by the throw it rode on, so a
+                # legendary that breaks out is fed another before the next.
+                use_nanab=fresh_encounter or berry == "silver",
                 ring_hold=args.ring_hold,
                 lone_ball_reading=lone_ball_reading,
+                berry=berry,
             )
         except excellent_throw_android.NoEncounterError as exc:
             if attempt == 1:
@@ -280,7 +362,10 @@ async def run_device(
             break
         cycle_dir = base / f"award-{cycle:02d}"
         cycle_dir.mkdir(parents=True, exist_ok=True)
-        card = await next_award_card(device, args, cycle_dir)
+        # The first card is the one the phone was parked on; after it, a slow
+        # card is the queue taking its time, not the queue finished.
+        patience = args.queue_wait if cycle > 1 else 0.0
+        card = await next_award_card(device, args, cycle_dir, patience)
         if card is None:
             # An encounter already open is the queue's own: this workflow is
             # run against a phone parked on the award card, and one left
@@ -295,8 +380,8 @@ async def run_device(
                     failures = 0
                     continue
             print(
-                f"[{device.label}] No award card within {args.card_wait:g}s; "
-                f"queue finished after {caught} caught"
+                f"[{device.label}] No award card within "
+                f"{max(args.card_wait, patience):g}s; queue finished after {caught} caught"
             )
             return 0
         left = "an unread number of" if card.remaining is None else card.remaining

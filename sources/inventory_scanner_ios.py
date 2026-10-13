@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Automated Selenium / Appium iPhone Storage Scanner for Pokemon GO.
 
-Fires Appium/Selenium searches on the connected iPhone Pro Max, captures screenshots
+Fires Appium/Selenium searches on the connected iPhone, captures screenshots
 of Pokemon storage search results (CP <= 1500, 3*, 4*, pvp), parses Pokemon names and CPs
 using native Apple Vision OCR / Tesseract, and feeds the scanned inventory into gbl_evaluator.
 """

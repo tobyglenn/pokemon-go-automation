@@ -50,7 +50,7 @@ class ParsePlayedTests(unittest.TestCase):
         self.assertEqual(gbl_day.parse_played(""), {})
 
     def test_daily_cap_reached_is_detected(self) -> None:
-        output = "[Second iPhone (SE)] Daily battle cap reached; stopping after 28 battle(s)\n[Second iPhone (SE)] Finished: 28 battle(s)"
+        output = "[ios-one] Daily battle cap reached; stopping after 28 battle(s)\n[ios-one] Finished: 28 battle(s)"
         self.assertTrue(gbl_day.parse_cap_reached(output))
         self.assertFalse(gbl_day.parse_cap_reached("[android-two] Finished: 5 battle(s)"))
 
@@ -71,7 +71,7 @@ class LegCommandTests(unittest.TestCase):
 class SupervisedLegTests(unittest.TestCase):
     """A leg is told who it answers to, so it cannot outlive this supervisor.
 
-    The 2026-09-21 razr orphan: `start_new_session=True` keeps a closed
+    The 2026-09-21 orphan: `start_new_session=True` keeps a closed
     terminal from reaching the leg, and that also keeps a dead supervisor from
     reaching it.  The leg checks the pid itself -- see `fleet_watchdog`.
     """
@@ -115,6 +115,25 @@ class DayLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress.played, 25)
         self.assertEqual(progress.legs, 2)
         self.assertEqual(progress.stopped, "allotment played")
+
+    async def test_with_no_allotment_forty_battles_is_not_the_end_of_the_day(
+        self,
+    ) -> None:
+        """1 Oct: 40/40 called done with no cap banner and battles left."""
+        asked: list[int] = []
+        progress = gbl_day.DeviceProgress(name="android-two")
+
+        async def run(device: str, count: int) -> gbl_day.LegResult:
+            asked.append(count)
+            if len(asked) < 3:
+                return gbl_day.LegResult(played={device: 40 if len(asked) == 1 else 7})
+            return gbl_day.LegResult(played={device: 3}, cap_reached=True)
+
+        await gbl_day.play_device_day(progress, run)
+        self.assertEqual(asked, [gbl_day.BATTLES_PER_LEG] * 3)
+        self.assertEqual(progress.played, 50)
+        self.assertEqual(progress.stopped, "daily battle cap reached")
+        self.assertTrue(progress.done)
 
     async def test_the_phone_is_left_alone_after_two_empty_legs(self) -> None:
         progress = gbl_day.DeviceProgress(name="android-two", allotment=25)

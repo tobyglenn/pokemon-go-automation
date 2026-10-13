@@ -406,7 +406,7 @@ def _ball_pixel(rgb: tuple[int, int, int]) -> bool:
     return white or dark or red_panel or blue_panel or yellow_panel
 
 
-def _strong_ball_pixel(rgb: tuple[int, int, int]) -> bool:
+def _strong_ball_pixel(rgb: tuple[int, int, int], yellow: bool = True) -> bool:
     """Match painted ball panels without treating a white transition as a ball."""
     red, green, blue = rgb
     high, low = max(rgb), min(rgb)
@@ -414,7 +414,7 @@ def _strong_ball_pixel(rgb: tuple[int, int, int]) -> bool:
     white = low > 170 and spread < 65
     red_panel = red > 130 and red > green + 35 and red > blue + 15
     blue_panel = blue > 100 and blue > red + 25 and blue > green + 5
-    yellow_panel = red > 140 and green > 120 and blue < 100 and min(red, green) - blue > 40
+    yellow_panel = yellow and red > 140 and green > 120 and blue < 100 and min(red, green) - blue > 40
     return white or red_panel or blue_panel or yellow_panel
 
 
@@ -432,14 +432,53 @@ def _runs(values: Sequence[tuple[int, int]], *, minimum: int, gap: int = 2) -> l
 def locate_throw_ball(
     image: Image.Image, viewport: tuple[int, int] = (375, 667)
 ) -> BallDetection | None:
-    """Locate the large, centred encounter ball and reject fades/map controls."""
+    """Locate the large, centred encounter ball and reject fades/map controls.
+
+    The GBL stadium's sunlit grass reads as Ultra Ball gold, (171,171,85)
+    against the Ultra Ball's ~(191,181,70), so on 6 Oct 2026 it fused with
+    android-three's Great Ball into one band too tall to be a ball, and the catch
+    waited on a ball in hand forever.  Only when the gold-aware pass finds
+    nothing is the frame read again without gold: a Poke or Great Ball has
+    none to lose, and every frame the first pass already read is unchanged.
+    """
+    frame = image.convert("RGB").resize(viewport)
+    found = _locate_throw_ball(frame, viewport, yellow=True)
+    if found is None:
+        found = _locate_throw_ball(frame, viewport, yellow=False)
+        # Without the grass, a Pokedex grid or a menu can pass for a ball, so
+        # the second read only counts when gold really did carpet the floor
+        # above it.
+        if found is not None and not _gold_floor_above(frame, viewport, found):
+            found = None
+    return found
+
+
+def _gold_floor_above(
+    frame: Image.Image, viewport: tuple[int, int], ball: BallDetection
+) -> bool:
     width, height = viewport
-    frame = image.convert("RGB").resize((width, height))
+    left, right = round(width * 0.28), round(width * 0.72)
+    top, bottom = round(height * 0.70), ball.center_y - ball.radius
+    if bottom - top < 3:
+        return False
+    pixels = frame.load()
+    gold = sum(
+        _strong_ball_pixel(pixels[x, y]) and not _strong_ball_pixel(pixels[x, y], False)
+        for y in range(top, bottom)
+        for x in range(left, right)
+    )
+    return gold >= 0.5 * (bottom - top) * (right - left)
+
+
+def _locate_throw_ball(
+    frame: Image.Image, viewport: tuple[int, int], *, yellow: bool
+) -> BallDetection | None:
+    width, height = viewport
     pixels = frame.load()
     left, right = round(width * 0.28), round(width * 0.72)
     top, bottom = round(height * 0.70), height
     row_counts = [
-        (y, sum(_strong_ball_pixel(pixels[x, y]) for x in range(left, right)))
+        (y, sum(_strong_ball_pixel(pixels[x, y], yellow) for x in range(left, right)))
         for y in range(top, bottom)
     ]
     row_runs = _runs(
@@ -456,7 +495,7 @@ def locate_throw_ball(
         column_counts = [
             (
                 x,
-                sum(_strong_ball_pixel(pixels[x, y]) for y in range(y_min, y_max + 1)),
+                sum(_strong_ball_pixel(pixels[x, y], yellow) for y in range(y_min, y_max + 1)),
             )
             for x in range(left, right)
         ]
@@ -644,6 +683,13 @@ def berry_in_hand(
 # pale and 11.9 lift (24 Sep 2026), so the lines sit under that.
 BALL_PALE_FRACTION = 0.14
 BALL_LOWER_LIFT = 8
+# The game's night lighting tints the ball's white blue: (196, 205, 238) on the
+# android-one, android-two and android-three at 22:00 on 5 Oct 2026.  That fails both tests above,
+# so every phone read its ball as an item -- Android fed and swapped twice for
+# nothing before each throw, and the SE refused to throw at all.  A tinted
+# white is bright, blue-led and only blue-shifted; no berry is.
+NIGHT_PALE_LUMINANCE = 150
+NIGHT_BLUE_SHIFT = 60
 
 
 def ball_in_hand(image: Image.Image, analysis_viewport: tuple[int, int]) -> bool:
@@ -694,7 +740,13 @@ def ball_in_hand(image: Image.Image, analysis_viewport: tuple[int, int]) -> bool
                 and abs(green - blue) < 25
                 and 120 < luminance < 225
             )
-            if white or grey:
+            night = (
+                luminance > NIGHT_PALE_LUMINANCE
+                and abs(red - green) < 25
+                and green <= blue
+                and blue - red <= NIGHT_BLUE_SHIFT
+            )
+            if white or grey or night:
                 pale += 1
     if not inside or not upper_n or not lower_n:
         return False
@@ -1972,6 +2024,7 @@ async def lock_excellent_ring(
     last_measured: RingLock | None = None
     ratio = 1.0
     rate: float | None = None
+    blind = 0
     hold = config.calibration_hold_seconds
     for attempt in range(1, config.max_ring_attempts + 1):
         started, ended = await device.stationary_hold(probe_point, hold)
@@ -1991,21 +2044,34 @@ async def lock_excellent_ring(
                 flush=True,
             )
             continue
-        measured = measure_ring(frames, last_measured, device.viewport)
+        # Off the event loop: a blind read searches the whole frame for
+        # seconds, and another phone's catch shares this loop.
+        measured = await asyncio.to_thread(
+            measure_ring, frames, last_measured, device.viewport
+        )
         if measured is None:
+            blind += 1
             print(
                 f"[{device.label}] Hold {attempt} ({hold:.2f}s): "
                 f"{len(frames)} frames, no readable circle; nudging",
                 flush=True,
             )
-            if last_measured is None and attempt >= BLIND_RING_ATTEMPTS:
+            if blind >= BLIND_RING_ATTEMPTS:
                 raise ExcellentThrowError(
-                    f"No catch circle was readable in {attempt} holds; "
+                    f"No catch circle was readable in {blind} holds in a row; "
                     f"this phone cannot be locked and the ball is better flicked"
                 )
+            # The earlier read only admits circles near itself.  On 6 Oct 2026
+            # the SE's first hold locked a false circle by the name plate, and
+            # 29 holds then refused the real one 130px lower.
+            if last_measured is not None:
+                last_measured = None
+                ratio = 1.0
+                rate = None
             hold = config.pulse_hold_seconds
             continue
 
+        blind = 0
         last_measured = measured
         print(
             f"[{device.label}] Hold {attempt} ({hold:.2f}s): "
@@ -2108,13 +2174,15 @@ async def use_nanab_berry(
     """
     from . import berry_android
 
+    # A legendary gets the Ultra Ball whichever berry the bag can spare it.
+    choice_x = ULTRA_CHOICE_X if berry == "silver" else BALL_CHOICE_X
     berry = berry_android.berry_to_feed(device.label, berry)
     if berry_in_hand(encounter_image, device.viewport):
         # The last attempt left one in the hand; opening the picker again would
         # only select a second. Feed the one that is already there.
         print(f"[{device.label}] A Nanab is already in hand; feeding it", flush=True)
         await feed_held_berry(device, ball)
-        await swap_to_ball(device, artifact_dir)
+        await swap_to_ball(device, artifact_dir, choice_x=choice_x)
         return
 
     def frame(image: Image.Image) -> tuple[int, int, int, bytes]:
@@ -2146,6 +2214,8 @@ async def use_nanab_berry(
                 f"[{device.label}] A berry is already active; keeping it for the throw",
                 flush=True,
             )
+            if choice_x == ULTRA_CHOICE_X:
+                await swap_to_ball(device, artifact_dir, choice_x=choice_x)
             return
         raise ExcellentThrowError(
             f"Nanab picker did not open on {device.label}; no ball was thrown"
@@ -2173,7 +2243,7 @@ async def use_nanab_berry(
         if not ball_in_hand(held, device.viewport):
             # The game keeps the last berry it handed out selected, and a
             # thrown berry never catches anything.
-            await swap_to_ball(device, artifact_dir)
+            await swap_to_ball(device, artifact_dir, choice_x=choice_x)
         return
     kind, pixel = chosen
     if kind != berry:
@@ -2189,12 +2259,24 @@ async def use_nanab_berry(
     # The picker sheet takes about a second to slide away; tapping through it
     # feeds nothing and leaves the berry in hand for the throw.
     await asyncio.sleep(1.2)
+    after = await asyncio.to_thread(device.screenshot)
+    if berry_android.picker_sheet_top(*frame(after)) is not None:
+        # The game keeps the sheet up when the Pokemon already has a berry
+        # working.  On 6 Oct 2026 the SE fed a Latios that way 30 times: each
+        # swap tapped the sheet, and its grey disc read as a ball in hand.
+        print(
+            f"[{device.label}] {kind} refused (a berry is already working); "
+            "closing the berry sheet",
+            flush=True,
+        )
+        await device.tap(
+            [round(device.viewport[0] * 0.50), round(device.viewport[1] * 0.45)]
+        )
+        await asyncio.sleep(0.8)
+        await swap_to_ball(device, artifact_dir, choice_x=choice_x)
+        return
     await feed_held_berry(device, ball)
-    await swap_to_ball(
-        device,
-        artifact_dir,
-        choice_x=ULTRA_CHOICE_X if kind == "silver" else BALL_CHOICE_X,
-    )
+    await swap_to_ball(device, artifact_dir, choice_x=choice_x)
 
 
 async def feed_held_berry(device: IOSExcellentThrowDevice, ball: BallDetection) -> None:

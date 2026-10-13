@@ -51,9 +51,9 @@ ENABLED = os.environ.get("POKEMON_WATCHDOG", "1") != "0"
 # A leg is started with `start_new_session=True`, which is what lets `gbl_day`
 # signal the whole leg on purpose rather than having the terminal signal all of
 # it by accident.  The cost is that a leg no longer shares the supervisor's
-# fate: on 2026-09-21 a `gbl.py --devices razr` leg was still tapping the phone
+# fate: on 2026-09-21 a `gbl.py --devices android-one` leg was still tapping the phone
 # 19 minutes after its supervisor was gone, holding the fleet lock, so the next
-# day run died with "razr is already controlled by another fleet command".
+# day run died with "android-one is already controlled by another fleet command".
 # Nothing was left to notice, because the noticing lived in the supervisor.
 #
 # So the leg carries the supervisor's pid and checks it is still there.  The

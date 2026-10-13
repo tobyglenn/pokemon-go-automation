@@ -67,6 +67,9 @@ class IOSCatchPhone:
         # phone rather than of one Pokemon, and asking again costs a minute and
         # a berry per throw to reach the same answer.
         self.flicking = False
+        self.berry = "nanab"
+        # Flicks refused in a row for a ball that reads as an item.
+        self.hand_refusals = 0
 
     @classmethod
     def connect(cls, spec: pokemon_fleet.DeviceSpec) -> "IOSCatchPhone":
@@ -136,13 +139,17 @@ class IOSCatchPhone:
         use_nanab: bool = False,
         ring_hold: bool = False,
         lone_ball_reading: bool = False,
+        berry: str = "nanab",
     ) -> bool:
         """One ball: True when the encounter ended, as the Android routine says.
 
         `ring_hold` is Android's circle-measuring hold; the excellent routine
-        here always measures, so it has nothing to switch.
+        here always measures, so it has nothing to switch.  `berry` is the
+        picker kind to feed -- "silver" for a legendary, which also takes the
+        Ultra Ball.
         """
         del ring_hold
+        self.berry = berry
         image = await self.wait_for_encounter(wait_seconds, lone_ball_reading)
         if image is None:
             raise excellent_throw_android.NoEncounterError(
@@ -185,6 +192,8 @@ class IOSCatchPhone:
             self.thrower = gbl_ios.open_excellent_thrower(self.session)
             if self.thrower is None:
                 self.flicking = True
+        if self.thrower is not None:
+            self.thrower.berry = self.berry
         if self.thrower is not None and not self.flicking:
             directory = artifact_dir / "excellent"
             directory.mkdir(parents=True, exist_ok=True)
@@ -216,9 +225,22 @@ class IOSCatchPhone:
                 use_nanab = False
         if use_nanab and self.thrower is not None:
             image = await self.feed_nanab(image, artifact_dir)
-        return await gbl_ios.throw_ball(
-            self.session, image, rise=FLICK_RISE, step_ms=FLICK_STEP_MS
+        # A refusal swaps a ball in, so a second one in a row is the test
+        # misreading the ball, not a berry: the GBL stadium draws the held
+        # ball inside a pink glow, and on 5 Oct 2026 the SE refused it on
+        # every throw of an Inkay.  Android throws after its swaps the same way.
+        thrown = await gbl_ios.throw_ball(
+            self.session,
+            image,
+            rise=FLICK_RISE,
+            step_ms=FLICK_STEP_MS,
+            trust_hand=self.hand_refusals >= 1,
         )
+        if thrown:
+            self.hand_refusals = 0
+        elif self.ball_visible(image):
+            self.hand_refusals += 1
+        return thrown
 
     async def feed_nanab(self, image: Image.Image, artifact_dir: Path) -> Image.Image:
         """Feed a Nanab before a flick; hand back the frame to throw from."""
