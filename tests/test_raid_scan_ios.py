@@ -18,6 +18,7 @@ from __future__ import annotations
 from tests import support as _test_support  # noqa: F401
 
 from pathlib import Path
+import sys
 import unittest
 
 from PIL import Image
@@ -483,6 +484,10 @@ class SearchConfirmationTests(unittest.TestCase):
         self.assertEqual((count, [e.cp for e in entries]), (5, [1624]))
         self.assertEqual(phone.typed, ["094"])
 
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "needs Apple Vision framework (macOS only)",
+    )
     def test_stale_results_are_refused(self) -> None:
         # The previous species' filter, counter and all, still on screen.
         phone, scanner = self.scanner("Q 094094006")
