@@ -154,6 +154,8 @@ A phone opts in with a `raidscan` entry under its `operations:` in the private f
 - **A spend has to buy levels.** An individual already as high as its candy allows is not a spend; one that is strong but on the wrong moves is listed as a TM to teach instead.
 - **The spend goes to the individual that ends up strongest**, given how far its own candy and XL take it, not to the one with the most candy. An attacker that tops out below 55% of the type's #1 is never recommended; a moveset that needs a TM is marked.
 
+**Rare Candy and Rare Candy XL** are the default output. They turn into any species' candy, so they only belong where the species' own pool runs out first: an attacker the account can already max on its own candy is never listed. Each target is measured against the best the account can build in that slot with no rare candy, so a target only appears if it ends up stronger. Two lists, ranked by points gained per 100 spent: Rare Candy (to L40), and Rare Candy XL (to L50). A third list gives one target per type. Targets needing more than 400 of either (Eternatus needs about 6,500 XL) are left out. `--full` adds the per-type power-up plan using each species' own candy. The bag's rare candy count is not read.
+
 Stardust is reported, not budgeted.
 
 ### Reading a phone screen

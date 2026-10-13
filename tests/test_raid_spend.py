@@ -402,6 +402,22 @@ class Planning(unittest.TestCase):
         plan = raid_plan.build("phone", [scan], self.gd, rankings)
         self.assertEqual(plan.types["Ghost"].spends(False), [])
 
+    def test_rare_candy_skips_what_its_own_candy_can_max(self):
+        cpm = self.gd.cpm(20)
+        stats = [261, 149, 155]
+        individual = raid_inventory.Individual(
+            cp=raid_math.cp_of(stats, (15, 15, 15), cpm), hp=raid_math.hp_of(stats, (15, 15, 15), cpm),
+            iv_band="4*", moves=["Hex", "Shadow Ball"])
+        rankings = {"Ghost": raid_math.rank_type(self.gd, "Ghost").ratings}
+        rich = raid_plan.build("p", [self.scan(individuals=[individual], candy=5000, xl_candy=900,
+                                               mega_shown=False)], self.gd, rankings)
+        self.assertEqual(raid_plan.rare_targets(self.gd, rich), [])
+        poor = raid_plan.build("p", [self.scan(individuals=[individual], candy=10, xl_candy=0)],
+                               self.gd, rankings)
+        target = raid_plan.rare_targets(self.gd, poor)[0]
+        self.assertEqual((target.rare, target.rare_xl), (238, 296))
+        self.assertIn("RARE CANDY XL", raid_plan.rare_report(poor, self.gd))
+
     def test_eternatus_is_never_an_xl_spend(self):
         cpm = self.gd.cpm(40)
         stats = [278, 192, 268]

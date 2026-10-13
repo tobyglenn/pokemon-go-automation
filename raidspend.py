@@ -101,7 +101,10 @@ def run_plan(args) -> int:
             payload[device] = _as_json(plan)
         else:
             print(f"[scan from {where}]")
-            print(raid_plan.report(plan))
+            print(raid_plan.rare_report(plan))
+            if args.full:
+                print()
+                print(raid_plan.report(plan))
             print()
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -132,6 +135,8 @@ def main(argv=None) -> int:
     parser.add_argument("--scans", type=Path, default=None,
                         help="read raidscan_<device>.json from this directory instead "
                              "of each phone's computer")
+    parser.add_argument("--full", action="store_true",
+                        help="also print the per-type power-up plan using the species' own candy")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--local", action="store_true",
                         help="only read scans stored on this computer")

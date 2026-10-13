@@ -485,3 +485,143 @@ def report(plan: AccountPlan, gd: GameData | None = None) -> str:
         "Costs use this species' own candy and XL; stardust is shown, not budgeted."
     )
     return "\n".join(out)
+
+
+# --- rare candy ----------------------------------------------------------------
+#
+# Rare Candy and Rare Candy XL turn into any species' candy, one for one.  They
+# are only worth spending where the species' own pool runs out first, so an
+# attacker the account can already max for free (Raichu with 6,000 candy) is
+# never a target, however good it is.  What a rare candy buys is measured
+# against the best the account can build in that slot *without* any, so a
+# target only counts if it ends up stronger than the free build.
+
+UNLIMITED = 10 ** 7
+# A rare-candy target must end at least this close to the type's #1.
+RARE_MIN_RESULT = 0.70
+# Past a normal L40-50 run (296 XL, 360 for a shadow) a target is not
+# finishable with rare candy: Eternatus needs 6,500.
+RARE_XL_CAP = 400
+RARE_CANDY_CAP = 400
+# A gain smaller than this, in points of the type's #1, is not worth a mention.
+RARE_MIN_PTS = 3.0
+
+
+@dataclass
+class RareTarget:
+    attack_type: str
+    option: Option
+    rare: int            # Rare Candy needed (species-candy units, shadow x1.2)
+    rare_xl: int         # Rare Candy XL needed to finish at L50
+    with_rare: raid_math.Rating     # own XL after the Rare Candy
+    with_rare_level: float
+    maxed: raid_math.Rating         # L50 with both
+    free_best: float     # best rating in the slot with no rare candy at all
+    top: float
+
+    def pts(self, rating: raid_math.Rating) -> float:
+        return (rating.er - self.free_best) / self.top * 100
+
+    def pct(self, rating: raid_math.Rating) -> float:
+        return rating.er / self.top * 100
+
+
+def _pools(scan: SpeciesScan) -> str:
+    candy = "candy unread" if scan.candy is None else f"{scan.candy} candy"
+    xl = "XL unread -- counted as 0, check it" if scan.xl_candy is None else f"{scan.xl_candy} XL"
+    return f"pools {candy} / {xl}"
+
+
+def rare_targets(gd: GameData, plan: AccountPlan) -> list[RareTarget]:
+    out: list[RareTarget] = []
+    for attack_type, tp in plan.types.items():
+        for mega in (False, True):
+            free_best = max((o.reach.er for o in tp.options
+                             if bool(o.attacker.mega) == mega and not o.blocked), default=0.0)
+            best: dict[str, RareTarget] = {}
+            for o in tp.options:
+                if bool(o.attacker.mega) != mega or o.blocked:
+                    continue
+                mon, fit = o.owned, o.owned.conservative
+                own_candy, own_xl = mon.scan.candy or 0, mon.scan.xl_candy or 0
+                flags = dict(shadow=mon.shadow, purified=mon.purified, lucky=mon.lucky)
+                dex = mon.form["dex"]
+                fast = mon.fast or None if not o.needs_tm else None
+                charged = mon.charged or None if not o.needs_tm else None
+                lvl1, cost1 = raid_math.reachable_level(gd, dex, fit.level, own_candy + UNLIMITED,
+                                                        own_xl, **flags)
+                cost2 = raid_math.cost_between(gd, dex, fit.level, raid_math.MAX_LEVEL, **flags)
+                rare = max(0, cost1.candy - own_candy)
+                rare_xl = max(0, cost2.xl - own_xl)
+                if not rare and not rare_xl:
+                    continue  # its own candy already maxes it: no rare candy needed
+                if rare_xl > RARE_XL_CAP or rare > RARE_CANDY_CAP:
+                    continue
+                r1 = raid_math.best_rating(gd, o.attacker, attack_type, lvl1, fit.ivs,
+                                           fast=fast, charged=charged)
+                r2 = raid_math.best_rating(gd, o.attacker, attack_type, raid_math.MAX_LEVEL,
+                                           fit.ivs, fast=fast, charged=charged)
+                if r2 is None or r2.er < tp.top.er * RARE_MIN_RESULT or r2.er <= free_best * 1.01:
+                    continue
+                target = RareTarget(attack_type, o, rare, rare_xl, r1 or o.reach, lvl1, r2,
+                                    free_best, tp.top.er)
+                key = o.attacker.key
+                if key not in best or r2.er > best[key].maxed.er:
+                    best[key] = target
+            out.extend(best.values())
+    return out
+
+
+def rare_report(plan: AccountPlan, gd: GameData | None = None) -> str:
+    gd = gd or raid_gamedata.load()
+    targets = [t for t in rare_targets(gd, plan) if t.attack_type not in SKIP_SUMMARY]
+    out = [f"=== {plan.device}: where Rare Candy and Rare Candy XL go ===",
+           "Only attackers whose own candy runs out before they are maxed, and only where",
+           "the result beats the best you can build in that slot with no rare candy.",
+           "'pts' = gain over that free build, as % of the type's #1. Rare candy counts",
+           "are species-candy units (shadows cost 1.2x). Rare candy in the bag was not read.",
+           ""]
+
+    rc = [t for t in targets if t.rare and t.pts(t.with_rare) >= RARE_MIN_PTS]
+    rc.sort(key=lambda t: t.pts(t.with_rare) / t.rare, reverse=True)
+    out.append("-- RARE CANDY (gets it to L40; then its own XL takes it to "
+               "the level shown) " + "-" * 4)
+    for t in rc[:15]:
+        m = t.option.owned
+        out.append(f"  {t.attack_type:<9} {t.option.attacker.name:<28} {m.describe()}")
+        out.append(f"            {t.rare:>3} Rare Candy -> L{t.with_rare_level:g} = "
+                   f"{t.pct(t.with_rare):.0f}% (+{t.pts(t.with_rare):.0f} pts, "
+                   f"{t.pts(t.with_rare) / t.rare * 100:.1f} pts/100)"
+                   f"; {_pools(m.scan)}"
+                   + (" [needs TM]" if t.option.needs_tm else ""))
+    if not rc:
+        out.append("  none: every attacker worth building can reach L40 on its own candy")
+    out.append("")
+
+    xl = [t for t in targets if t.rare_xl and t.pts(t.maxed) >= RARE_MIN_PTS]
+    xl.sort(key=lambda t: t.pts(t.maxed) / t.rare_xl, reverse=True)
+    out.append("-- RARE CANDY XL (to L50) " + "-" * 44)
+    for t in xl[:15]:
+        m = t.option.owned
+        extra = f" + {t.rare} Rare Candy" if t.rare else ""
+        out.append(f"  {t.attack_type:<9} {t.option.attacker.name:<28} {m.describe()}")
+        out.append(f"            {t.rare_xl:>3} Rare Candy XL{extra} -> L50 = {t.pct(t.maxed):.0f}% "
+                   f"(+{t.pts(t.maxed):.0f} pts, {t.pts(t.maxed) / t.rare_xl * 100:.1f} pts/100 XL)"
+                   f"; {_pools(m.scan)}"
+                   + (" [needs TM]" if t.option.needs_tm else ""))
+    if not xl:
+        out.append("  none")
+    out.append("")
+
+    out.append("-- BY TYPE: the one rare-candy target per type " + "-" * 23)
+    for attack_type in plan.types:
+        if attack_type in SKIP_SUMMARY:
+            continue
+        mine = [t for t in targets if t.attack_type == attack_type and t.pts(t.maxed) >= RARE_MIN_PTS]
+        if not mine:
+            out.append(f"  {attack_type:<9} none -- your free build is already as good as any rare-candy build")
+            continue
+        t = max(mine, key=lambda t: t.maxed.er)
+        out.append(f"  {attack_type:<9} {t.option.attacker.name} ({t.option.owned.describe()}): "
+                   f"{t.rare} RC + {t.rare_xl} RC XL -> {t.pct(t.maxed):.0f}% (+{t.pts(t.maxed):.0f} pts)")
+    return "\n".join(out)
