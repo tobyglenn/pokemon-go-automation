@@ -16,6 +16,7 @@ The repository contains the automation code and example configuration. Your phon
 | GO Battle League | [`gbl.py`](../gbl.py) | Coordinate battle entry, combat, results, and reward handling across selected phones. |
 | A day of GBL | [`gbl_day.py`](../gbl_day.py) | Play a day's whole GBL allotment on the named phones, restarting stalled legs. |
 | Trades | [`trade.py`](../trade.py) | Run the trade sequence for a supported pair of phones attached to the same computer. |
+| Raid candy planning | [`raidspend.py`](../raidspend.py) | Per account and attacking type: the best raid attackers, what you can field now, which individual your candy and XL candy should go into and its cost, locked Megas, and top attackers you do not own. `--scan` reads each phone's storage (read-only), on whichever computer holds it. |
 | Transfers | [`luckytrash.py`](../luckytrash.py) | Transfer Pokémon from a deliberately prepared selection; execution requires the deletion confirmation option. |
 
 Everything else lives in [`scripts/`](../scripts): the fleet status and dispatcher [`scripts/fleet.py`](../scripts/fleet.py), the berries-only [`scripts/berry.py`](../scripts/berry.py), the GBL team tools, the package build backend, and the older long command names (`send_gifts.py`, `battle_league.py`, `trade_pokemon.py`, `transfer_pokemon.py`, `feed_berries.py`, `pokemon_fleet.py`), kept as compatibility entry points. Run them from the checkout root, e.g. `python scripts/fleet.py status`. See the [workflow guide](workflows.md) for preparation, commands, and platform limits.
@@ -37,11 +38,12 @@ Follow [Getting started](getting-started.md) to create private configuration and
 python gift.py --devices all --count 1 --plan
 python gbl.py --devices all --count 1 --plan
 python luckytrash.py --devices all --count 1 --plan
+python raidspend.py --devices all
 ```
 
 Configured computers participate automatically, and a named phone is sent to whichever of them is actually holding its cable: move a phone between computers and nothing needs reconfiguring. `scripts/fleet.py owners` shows where every configured phone currently is. Use `--local` when deliberately checking only the current computer. Examples are starting points: they do not identify real phones and must be completed before use.
 
-Use an explicit count for initial runs. Gifts default to `--all` with a 100-cycle cap per phone, GBL defaults to five battles, and trades default to one trade. Transfers require an explicit count or `--all` plus `--confirm-delete` for execution. See the workflow guide before increasing a limit.
+Use an explicit count for initial runs. Gifts default to `--all` with a 100-cycle cap per phone, GBL defaults to five battles, and trades default to 100 trades. Transfers require an explicit count or `--all` plus `--confirm-delete` for execution. See the workflow guide before increasing a limit.
 
 `--devices all` includes connected Android phones absent from the private registry. Disabled example records do not disable discovery of unregistered phones. Review the plan and use explicit device names for a narrowly scoped first run; worker-side calibration and pair checks still apply. Plans list configured devices without probing phones; they do not enumerate extra unregistered Android phones that execution may discover. Use live fleet status to inspect connected hardware and explicit device selection to constrain the run.
 

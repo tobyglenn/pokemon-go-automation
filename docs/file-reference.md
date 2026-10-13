@@ -14,6 +14,7 @@ Start with the public command for the action you want. Follow it into fleet disp
 | [`gbl.py`](../gbl.py) | Public GBL command. Use `--check` for a detector check or `--count 1 --plan` to inspect dispatch. |
 | [`gbl_day.py`](../gbl_day.py) | A day's whole GBL allotment, restarting stalled legs. |
 | [`trade.py`](../trade.py) | Public paired-trade command. Specify `--pair DEVICE_A DEVICE_B --count 1 --plan`. |
+| [`raidspend.py`](../raidspend.py) | Public raid candy planning command: `--scan` reads each phone's storage; the default plans candy and XL spending per attacking type. Read-only. |
 | [`luckytrash.py`](../luckytrash.py) | Public transfer command. Plan first; live deletion requires `--confirm-delete`. |
 
 ## Helper scripts
@@ -62,6 +63,15 @@ Run from the checkout root, e.g. `python scripts/fleet.py status`; on another co
 | [`sources/excellent_throw_android.py`](../sources/excellent_throw_android.py) | Android vision-guided throw assistance, used by `catch.py` and `scripts/excellent_throw.py`. |
 | [`sources/excellent_throw_ios.py`](../sources/excellent_throw_ios.py) | iOS vision-guided throws for a prepared encounter, used by `catch.py` and `scripts/excellent_throw.py`. |
 | [`sources/catch_rewards.py`](../sources/catch_rewards.py) | Reads each phone's screen and runs the award-queue, research or wild-encounter loop; reached through `catch.py`. |
+| [`sources/raid_scan.py`](../sources/raid_scan.py) | Fleet dispatcher: scans the selected phones in parallel, writes `raidscan_<device>.json` into private state, and reads a scan back from whichever computer took it. |
+| [`sources/raid_scan_android.py`](../sources/raid_scan_android.py) | Android hands for the raid scan: reach storage, confirmed searches, cell taps, safe scrolling and leaving. |
+| [`sources/raid_scan_ios.py`](../sources/raid_scan_ios.py) | iOS hands for the raid scan over Appium: the same steps without a BACK key. |
+| [`sources/raid_inventory.py`](../sources/raid_inventory.py) | The per-species scan sequence and detail-page parser shared by both platforms: filters, HP, power-up price, moves, candy, XL candy and Mega Energy. |
+| [`sources/raid_gamedata.py`](../sources/raid_gamedata.py) | Downloads and caches the PvPoke and PokeMiners game masters and derives the compact raid dataset. |
+| [`sources/raid_math.py`](../sources/raid_math.py) | CP/HP, the level-and-IV solver, power-up costs, and the raid DPS/TDO rating. |
+| [`sources/raid_meta.py`](../sources/raid_meta.py) | Per-type rankings computed from the game master, and the species list the scan searches. |
+| [`sources/raid_plan.py`](../sources/raid_plan.py) | Turns one account's scan into the per-type candy and XL plan and its report. |
+| [`sources/vision_ocr.py`](../sources/vision_ocr.py) | Apple Vision text recognition with bounding boxes, built once into the private state directory. Bounding boxes are what let the candy rows be told apart; bare text lines cannot. |
 | [`sources/screen_router.py`](../sources/screen_router.py) | Classifies each phone's screen and launches the matching command; reached through `play.py`. |
 | [`sources/catch_ios.py`](../sources/catch_ios.py) | An iPhone the two catch loops drive like an Android: pixel-to-point taps, Excellent throw then flick. |
 | [`sources/catch_awarded_android.py`](../sources/catch_awarded_android.py) | Award-queue loop: reads the award card, starts each encounter, and drives the throw loop; reached through `catch.py`. |

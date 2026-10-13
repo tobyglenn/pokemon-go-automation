@@ -21,7 +21,7 @@ dev = ["build>=1.2,<2"]
 pogo = "pokemon_go_automation.cli:main"
 
 [tool.setuptools]
-py-modules = ["add_friends", "catch", "gbl", "gbl_day", "gift", "luckytrash", "play", "remove_friends", "trade"]
+py-modules = ["add_friends", "catch", "gbl", "gbl_day", "gift", "luckytrash", "play", "raidspend", "remove_friends", "trade"]
 
 [tool.setuptools.packages.find]
 include = ["sources*", "scripts*", "pokemon_go_automation*"]

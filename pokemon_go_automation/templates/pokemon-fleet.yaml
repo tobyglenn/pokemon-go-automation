@@ -11,6 +11,9 @@ devices:
       berries: {}
       gbl: {}
       trade: {}
+      # Read-only storage scan for raid candy planning. Needs no calibration:
+      # it only reads the storage screen. See raidspend.py.
+      raidscan: {}
   ios-one:
     platform: ios
     enabled: false
@@ -28,6 +31,7 @@ devices:
       gbl:
         config: gbl-ios.yaml
         calibrated: false
+      raidscan: {}
       trade:
         calibrated: false
         coordinates:
