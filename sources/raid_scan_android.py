@@ -572,6 +572,20 @@ def search_bar_fraction(
     )
     if tab_box is None:
         return None
+    # The field always sits between the result counter (or the tab) and the
+    # SHOW EVOLUTIONARY LINE toggle, and both are read on every storage screen.
+    # Interpolating from the first CP row instead is how a scan tapped a
+    # Giratina: Vision skipped the top row of CPs, the second row became the
+    # anchor, and the estimate landed on a cell.
+    toggle = next((b for b in boxes if "evolutionary" in normalise(b.text).lower()), None)
+    if toggle is not None and toggle.y > tab_box.bottom:
+        counter = next(
+            (b for b in boxes
+             if re.search(r"\(\d+\)", normalise(b.text)) and tab_box.y <= b.y < toggle.y),
+            None,
+        )
+        above = counter.bottom if counter is not None else tab_box.bottom
+        return 0.5, (above + toggle.y) / 2 / image.height
     entries = parse_grid_entries(boxes)
     if not entries:
         # No CP row to interpolate against: the previous filter matched nothing,

@@ -21,6 +21,12 @@ from .raid_gamedata import TYPES
 # party fields one Mega at a time: the non-Mega depth is what fills the rest.
 TOP_MEGAS = 6
 TOP_REGULAR = 15
+# The scan only looks for what could be worth candy: a type's top ten, Megas
+# included, and nothing under 60% of its #1.  Deeper than that -- Shadow
+# Crawdaunt at #20 Water, 51% -- cost about a minute per species per phone
+# for attackers nobody builds.
+SCAN_DEPTH = 10
+SCAN_FLOOR = 0.60
 
 
 @lru_cache(maxsize=1)
@@ -46,7 +52,10 @@ def scan_terms() -> list[tuple[str, str, bool]]:
     gd = raid_gamedata.load()
     wanted: dict[int, tuple[str, bool]] = {}
     for ratings in rankings().values():
-        for rating in ratings:
+        top = ratings[0].er if ratings else 0.0
+        for rating in ratings[:SCAN_DEPTH]:
+            if rating.er < top * SCAN_FLOOR:
+                continue
             attacker = rating.attacker
             name, shadow = wanted.get(attacker.dex, (attacker.search.title(), False))
             wanted[attacker.dex] = (name, shadow)

@@ -158,6 +158,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", type=Path,
                         default=config_paths.default_config("pokemon-fleet.yaml"))
     args = parser.parse_args(argv)
+    # Run directly (`-m sources.raid_scan`) nothing else has put this
+    # machine's adb on PATH, and every Android phone then reads as detached.
+    fleet_entrypoint.apply_local_environment()
 
     names = [value.strip() for value in args.devices if value.strip()]
     fleet = pokemon_fleet.load_fleet(args.config)
