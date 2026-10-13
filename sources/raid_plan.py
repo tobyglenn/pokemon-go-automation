@@ -117,6 +117,9 @@ def identify(gd: GameData, scan: SpeciesScan, individual: Individual) -> Owned |
         # A misread price must not silently become "any level".
         by_variant = {}
     shadow_known = individual.shadow
+    if any("shadow bonus" in m.lower() for m in individual.moves):
+        # A shadow's detail page carries a SHADOW BONUS card.
+        shadow_known = True
     candidates: list[tuple[str, list[float] | None]] = []
     if by_variant:
         for variant, levels in by_variant.items():
@@ -209,8 +212,7 @@ class TypePlan:
         slot.  An individual that only becomes useful with a TM is listed when
         the result is better than anything usable today.
         """
-        best = self.best_now(mega)
-        bar = best.now.er if best else 0.0
+        bar = self.bar(mega)
         useful = []
         for option in self.options:
             if bool(option.attacker.mega) != mega or option.blocked:
@@ -221,16 +223,22 @@ class TypePlan:
             # reported apart, as a move to teach.
             if option.reach_level <= option.owned.conservative.level:
                 continue
-            if option.needs_tm:
-                if option.reach.er > bar * 1.03:
-                    useful.append(option)
-            elif option.gain / self.top.er >= MIN_GAIN and option.reach.er >= bar * 0.97:
+            if option.gain / self.top.er >= MIN_GAIN and option.reach.er >= bar * 0.97:
                 useful.append(option)
         # One line per attacker: the individual that ends up strongest.
         best: dict[str, Option] = {}
         for option in sorted(useful, key=lambda o: o.reach.er, reverse=True):
             best.setdefault(option.attacker.key, option)
         return list(best.values())
+
+    def bar(self, mega: bool) -> float:
+        """The best this slot can do with no candy at all, a TM allowed."""
+        return max((o.now.er for o in self.options
+                    if bool(o.attacker.mega) == mega and not o.blocked), default=0.0)
+
+    def candy_points(self, option: Option) -> float:
+        """What the candy adds over the slot's no-candy best, in % of #1."""
+        return (option.reach.er - self.bar(bool(option.attacker.mega))) / self.top.er
 
     def teach(self) -> list[Option]:
         """Attackers already built whose only problem is the moveset."""
@@ -430,9 +438,11 @@ def report(plan: AccountPlan, gd: GameData | None = None) -> str:
                 out.extend(_option_lines(tp, option, gd, "SPEND:"))
                 if attack_type in SKIP_SUMMARY:
                     continue
-                gain = option.reach.er - (tp.best_now(mega).now.er if tp.best_now(mega) else 0.0)
+                points = tp.candy_points(option)
+                if points < MIN_GAIN:
+                    continue
                 summary.append((
-                    max(gain, option.gain) / tp.top.er,
+                    points,
                     f"{attack_type:<9} {option.attacker.name} {option.owned.describe()} -> "
                     f"L{option.reach_level:g} ({_cost_text(option.reach_cost)}) = {tp.pct(option.reach)}"
                     + (" [needs TM]" if option.needs_tm else ""),
