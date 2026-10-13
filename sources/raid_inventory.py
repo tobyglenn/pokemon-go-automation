@@ -555,12 +555,31 @@ def scan_species(hands: Hands, term: str, display: str = "",
         targets = sorted({e.cp for e in entries}, reverse=True)[:limit]
         pools: list[dict] = []
         for cp in targets:
-            if not hands.open_cell(cp, image, entries):
-                record.note += f" cell CP {cp} not located;"
-                continue
-            # A scroll that opened the Mega Level page must not be read as the
-            # detail page: its energy and price are a different thing.
-            screens = [s for s in hands.read_detail() if not is_mega_level_page(s[1])]
+            screens = None
+            for attempt in range(2):
+                if attempt:
+                    # Back from a detail page the grid re-lays itself out as
+                    # the keyboard goes; a tap read off the frame before that
+                    # finishes lands between cells and nothing opens.
+                    time.sleep(1.5)
+                    count, entries, image, boxes = hands.regrid()
+                if not hands.open_cell(cp, image, entries):
+                    continue
+                try:
+                    # A scroll that opened the Mega Level page must not be read
+                    # as the detail page: its energy and price are different.
+                    screens = [s for s in hands.read_detail() if not is_mega_level_page(s[1])]
+                    break
+                except Exception as exc:  # noqa: BLE001 - retried, then recorded
+                    if "did not open" not in str(exc):
+                        raise
+            if screens is None:
+                record.note += f" CP {cp} did not open;"
+                if record.individuals:
+                    # One unread copy does not undo the ones already read.
+                    count, entries, image, boxes = hands.regrid()
+                    continue
+                raise RuntimeError(f"the detail page for CP {cp} did not open")
             parsed = parse_detail_page(screens)
             hands.leave_detail()
             pools.append(parsed)
