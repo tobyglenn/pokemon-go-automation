@@ -35,6 +35,9 @@ MIN_GAIN = 0.01
 # Below this share of the type's #1 an attacker is not worth candy at all,
 # however it compares with the rest of the account.
 MIN_USEFUL = 0.55
+# Normal is super effective against Fighting alone, so it is never where
+# scarce XL should go first; it is still listed per type.
+SKIP_SUMMARY = {"Normal"}
 SHOWN_META = 6
 SHOWN_SPENDS = 2
 
@@ -214,12 +217,31 @@ class TypePlan:
                 continue
             if option.reach.er < self.top.er * MIN_USEFUL:
                 continue
+            # Candy that buys no level is not a spend; a TM-only gain is
+            # reported apart, as a move to teach.
+            if option.reach_level <= option.owned.conservative.level:
+                continue
             if option.needs_tm:
                 if option.reach.er > bar * 1.03:
                     useful.append(option)
             elif option.gain / self.top.er >= MIN_GAIN and option.reach.er >= bar * 0.97:
                 useful.append(option)
-        return sorted(useful, key=lambda o: o.reach.er, reverse=True)
+        # One line per attacker: the individual that ends up strongest.
+        best: dict[str, Option] = {}
+        for option in sorted(useful, key=lambda o: o.reach.er, reverse=True):
+            best.setdefault(option.attacker.key, option)
+        return list(best.values())
+
+    def teach(self) -> list[Option]:
+        """Attackers already built whose only problem is the moveset."""
+        out: dict[str, Option] = {}
+        bar = max((o.now.er for o in self.options if not o.needs_tm and not o.blocked),
+                  default=0.0)
+        for option in sorted(self.options, key=lambda o: o.now.er, reverse=True):
+            if (option.needs_tm and not option.blocked
+                    and option.now.er > bar * 1.03 and option.now.er >= self.top.er * MIN_USEFUL):
+                out.setdefault(option.attacker.key, option)
+        return list(out.values())
 
 
 def mega_block(scan: SpeciesScan, attacker: raid_math.Attacker) -> str:
@@ -233,7 +255,8 @@ def mega_block(scan: SpeciesScan, attacker: raid_math.Attacker) -> str:
     cost = attacker.mega_first_cost
     energy = scan.mega_energy or 0
     if cost and energy < cost:
-        return f"needs {cost} Mega Energy, has {energy}"
+        return (f"first Mega Evolution costs {cost} energy, has {energy}; "
+                "free or cheap if it has been Mega Evolved before")
     return ""
 
 
@@ -254,6 +277,8 @@ def plan_type(gd: GameData, attack_type: str, meta: Sequence[raid_math.Rating],
             shadow=mon.shadow, purified=mon.purified, lucky=mon.lucky,
         )
         for attacker in filter(None, variants):
+            if attack_type not in (attacker.mega_types or attacker.types):
+                continue
             # An unread move is any move; a read one is the one it knows.
             fast = mon.fast or None
             charged = mon.charged or None
@@ -403,6 +428,8 @@ def report(plan: AccountPlan, gd: GameData | None = None) -> str:
             for option in tp.spends(mega)[:SHOWN_SPENDS]:
                 any_spend = True
                 out.extend(_option_lines(tp, option, gd, "SPEND:"))
+                if attack_type in SKIP_SUMMARY:
+                    continue
                 gain = option.reach.er - (tp.best_now(mega).now.er if tp.best_now(mega) else 0.0)
                 summary.append((
                     max(gain, option.gain) / tp.top.er,
@@ -410,6 +437,9 @@ def report(plan: AccountPlan, gd: GameData | None = None) -> str:
                     f"L{option.reach_level:g} ({_cost_text(option.reach_cost)}) = {tp.pct(option.reach)}"
                     + (" [needs TM]" if option.needs_tm else ""),
                 ))
+        for option in tp.teach()[:2]:
+            out.append(f"  TM:    {option.attacker.name}: {option.owned.describe()} -> "
+                       f"{option.now.moveset} would be {tp.pct(option.now)} with no candy")
         if not any_spend:
             weak = max((o for o in tp.options if not o.blocked), key=lambda o: o.reach.er,
                        default=None)

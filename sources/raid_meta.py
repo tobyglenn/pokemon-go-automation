@@ -36,7 +36,12 @@ def rankings() -> dict[str, list[raid_math.Rating]]:
     out: dict[str, list[raid_math.Rating]] = {}
     pool = raid_math.attackers(gd)
     for attack_type in TYPES:
-        ranked = raid_math.rank_type(gd, attack_type, pool, top=len(pool)).ratings
+        # Same-type attackers only.  A Mega Dragonite firing Hyper Beam rates
+        # as a "Normal attacker" on paper, and Mega Mewtwo Y places in half
+        # the types on raw attack, but nobody builds a type's counters that
+        # way, and listing them crowded out the attackers that are.
+        stab = [a for a in pool if attack_type in (a.mega_types or a.types)]
+        ranked = raid_math.rank_type(gd, attack_type, stab, top=len(stab)).ratings
         megas = [r for r in ranked if r.attacker.mega][:TOP_MEGAS]
         regular = [r for r in ranked if not r.attacker.mega][:TOP_REGULAR]
         out[attack_type] = sorted(megas + regular, key=lambda r: r.er, reverse=True)

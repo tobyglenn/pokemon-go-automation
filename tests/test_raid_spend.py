@@ -353,7 +353,7 @@ class Planning(unittest.TestCase):
     def test_mega_needs_energy_and_a_cell(self):
         mega = next(a for a in raid_math.attackers(self.gd) if a.mega)
         self.assertEqual(raid_plan.mega_block(self.scan(), mega), "")
-        self.assertIn("needs 200", raid_plan.mega_block(self.scan(mega_energy=40), mega))
+        self.assertIn("costs 200 energy, has 40", raid_plan.mega_block(self.scan(mega_energy=40), mega))
         self.assertIn("no Mega Energy", raid_plan.mega_block(self.scan(mega_shown=False), mega))
 
     def test_plan_spends_on_the_individual_that_ends_strongest(self):
@@ -376,6 +376,31 @@ class Planning(unittest.TestCase):
         text = raid_plan.report(plan, self.gd)
         self.assertIn("SPEND:", text)
         self.assertIn("Mega Gengar (no Mega Energy cell on this account)", text)
+
+    def test_off_type_attackers_are_not_options(self):
+        # Gengar has no Dragon move, but even with one it is not a Dragon type.
+        cpm = self.gd.cpm(40)
+        stats = [261, 149, 155]
+        individual = raid_inventory.Individual(
+            cp=raid_math.cp_of(stats, (15, 15, 15), cpm), hp=raid_math.hp_of(stats, (15, 15, 15), cpm),
+            iv_band="4*", moves=["Hex", "Sludge Bomb"])
+        scan = self.scan(individuals=[individual])
+        rankings = {"Poison": raid_math.rank_type(self.gd, "Poison").ratings,
+                    "Ghost": raid_math.rank_type(self.gd, "Ghost").ratings}
+        plan = raid_plan.build("phone", [scan], self.gd, rankings)
+        self.assertTrue(all("Poison" in (o.attacker.mega_types or o.attacker.types)
+                            for o in plan.types["Poison"].options))
+
+    def test_a_maxed_individual_is_not_a_spend(self):
+        cpm = self.gd.cpm(50)
+        stats = [261, 149, 155]
+        individual = raid_inventory.Individual(
+            cp=raid_math.cp_of(stats, (15, 15, 15), cpm), hp=raid_math.hp_of(stats, (15, 15, 15), cpm),
+            iv_band="4*", moves=["Hex", "Shadow Ball"])
+        scan = self.scan(individuals=[individual], mega_shown=False)
+        rankings = {"Ghost": raid_math.rank_type(self.gd, "Ghost").ratings}
+        plan = raid_plan.build("phone", [scan], self.gd, rankings)
+        self.assertEqual(plan.types["Ghost"].spends(False), [])
 
     def test_eternatus_is_never_an_xl_spend(self):
         cpm = self.gd.cpm(40)
