@@ -691,7 +691,11 @@ def league_score(text: str, preferred: str = "auto") -> tuple[float, int | None]
         score, cap = 68.0, 2500
     elif "master league" in normalized:
         score, cap = 42.0, None
-    elif "cup" in normalized:
+    # Little Cup, or a card OCR only got the cap of. A bare "500" test would
+    # also match 1500 and 2500, and score a Great League cup as Little Cup.
+    elif "little" in normalized or "erue" in normalized or re.search(r"(?<!\d)500(?!\d)", normalized):
+        score, cap = 85.0, 500
+    elif "cup" in normalized or "cap" in normalized:
         score, cap = 75.0, 1500
     else:
         return -1e9, None

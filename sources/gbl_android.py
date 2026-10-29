@@ -68,6 +68,7 @@ from . import (
     gbl_strategy,
     gbl_vision,
     legendary_pokemon,
+    pokemon_fleet,
 )
 
 try:
@@ -730,9 +731,9 @@ REWARD_PANEL_MIN_HEIGHT = 0.14
 REWARD_PANEL_TOP = (0.40, 0.62)
 REWARD_SCROLL_LIMIT = 3
 
-# This script lives in platform-tools, so prefer the adb binary next to it.
+# Prefer the bundled adb binary from platform-tools.
 _ADB = Path(__file__).resolve().parent.parent / 'adb'
-ADB_BINARY = str(_ADB) if _ADB.exists() else 'adb'
+ADB_BINARY = str(_ADB) if _ADB.exists() else pokemon_fleet.default_adb_binary()
 
 
 class DeviceAsyncWrapper(DeviceAsync):
@@ -1717,6 +1718,8 @@ def reward_scroll_needed(frame) -> bool:
 
 def reward_scroll_back_needed(frame) -> bool:
     """Whether an end-of-set page is scrolled below CLAIM RANK REWARDS."""
+    if basic_banner_visible(frame):
+        return False
     height = frame[1]
     cards = league_cards(frame)
     if len(cards) < 2:
@@ -2047,6 +2050,10 @@ async def smart_screen_state(
         boxes = await asyncio.to_thread(gbl_vision.recognize, image)
         if gbl_vision.season_info_visible(boxes):
             return 'season_info', None, 'GBL season information', boxes
+        if gbl_vision.catch_summary_visible(boxes):
+            summary = gbl_vision.dismiss_point(boxes, image.width, image.height) or find_pill(frame)
+            if summary is not None:
+                return 'pill', summary, 'ok', boxes
         blocked = gbl_vision.blocked_label(boxes)
         if blocked is not None:
             # Something on this screen must not be pressed, so nothing on it is.
@@ -2120,13 +2127,15 @@ async def smart_screen_state(
             if tier_pill is not None:
                 return 'pill', tier_pill, action[1], boxes
             return 'pill', action[0], action[1], boxes
-        if state == 'pill' and point is not None and gbl_vision.gbl_card_visible(boxes):
+        if (state in ('pill', 'scroll_back')) and gbl_vision.gbl_card_visible(boxes):
             if gbl_vision.set_completed(boxes):
                 return 'unconfirmed', None, None, boxes
             # The GBL card or reward chooser's green BATTLE pill can have its center
             # obscured by the teal close button (splitting "BATTLE" into "B" and "LE" in OCR).
             # Because gbl_card_visible confirms this is the GBL card, the detected green pill is safe.
-            return 'pill', point, 'battle', boxes
+            battle_pill = point or find_pill(frame)
+            if battle_pill is not None:
+                return 'pill', battle_pill, 'battle', boxes
         if state == 'pill':
             # Without OCR action label, never tap raw pill geometry.
             # This prevents menu card false positives stealing tap.
@@ -3315,7 +3324,9 @@ async def take_reward_encounter(
             throws += 1
             continue
 
-        summary = gbl_vision.dismiss_point(boxes)
+        summary = gbl_vision.dismiss_point(boxes, image.width, image.height)
+        if summary is None and gbl_vision.catch_summary_visible(boxes):
+            summary = find_pill(frame) or [image.width // 2, int(image.height * 0.665)]
         if summary is not None:
             log(device, f'  Catch summary, taking OK at {summary}')
             await tap(device, summary)
@@ -3401,6 +3412,22 @@ async def recover_to_gbl(
     # a menu that is already open and closes it again.  When either screen is
     # actually detected, walk them in order and check each one.
     recovery_image = frame_image(frame)
+    if gbl_vision.catch_summary_visible(boxes):
+        summary = gbl_vision.dismiss_point(boxes, frame[0], frame[1]) or find_pill(frame)
+        if summary is not None:
+            log(device, f'  Catch summary still up in recovery; pressing OK at {summary}')
+            await tap(device, summary)
+            await wait(MENU_SETTLE)
+            return
+
+    if gbl_vision.pokemon_detail_visible(boxes):
+        close = device.config.get('CLOSE_BTN') or device.config.get('X_BTN')
+        if close is not None:
+            log(device, f'  Caught Pokemon page still up in recovery; closing it at {close}')
+            await tap(device, close)
+            await wait(MENU_SETTLE)
+            return
+
     if gbl_vision.encounter_plate(boxes, recovery_image.height) is not None:
         # An encounter carries a pokeball at the bottom centre, so `on_map`
         # below says yes to one and the walk home taps the throw ball instead

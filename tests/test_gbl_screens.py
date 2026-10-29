@@ -1813,6 +1813,15 @@ class ScreenStateTests(unittest.TestCase):
         pill(f, y0f=0.48, y1f=0.53, x0f=0.20, x1f=0.80)
         self.assertEqual(gbl.read_screen_state(as_frame(f))[0], 'scroll_back')
 
+    def test_gbl_card_with_basic_banner_and_pill_does_not_scroll_back(self) -> None:
+        """A GBL card with a tall white section must not misread as a scrolled page."""
+        f = frame()
+        put(f, 0.06, 0.94, 0.44, 0.70, WHITE)
+        put(f, 0.28, 0.72, 0.62, 0.66, PINK)  # BASIC REWARDS ribbon
+        put(f, 0.06, 0.94, 0.71, 0.80, WHITE)
+        pill(f, y0f=0.85, y1f=0.90)
+        self.assertEqual(gbl.read_screen_state(as_frame(f))[0], 'pill')
+
 
 class ConfirmSwitchTests(unittest.IsolatedAsyncioTestCase):
     """The swap animation outlasts one poll, so verification has to wait."""

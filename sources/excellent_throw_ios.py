@@ -1437,6 +1437,10 @@ class IOSExcellentThrowDevice:
         for source, destination in optional:
             if device.get(source) is not None:
                 capabilities[destination] = device[source]
+        if isinstance(device.get("wda_remote_port"), int):
+            capabilities["appium:wdaRemotePort"] = device["wda_remote_port"]
+        elif isinstance(device.get("wda_local_port"), int):
+            capabilities["appium:wdaRemotePort"] = 8100
         if isinstance(device.get("derived_data_path"), str):
             capabilities["appium:derivedDataPath"] = config_paths.expand_user_path(
                 device["derived_data_path"]
@@ -2499,7 +2503,10 @@ async def clear_catch_screens(
         except gbl_vision.VisionOCRError:
             return
 
-        summary = gbl_vision.dismiss_point(boxes)
+        if gbl_vision.gbl_card_visible(boxes):
+            return
+
+        summary = gbl_vision.dismiss_point(boxes, image.width, image.height)
         if summary is not None:
             image.save(artifact_dir / "catch-summary.png")
             scale_x = device.viewport[0] / image.width
@@ -2523,6 +2530,7 @@ async def clear_catch_screens(
             await device.tap(close)
             await asyncio.sleep(CATCH_MENU_SETTLE)
             continue
+
         return
 
 

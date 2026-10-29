@@ -323,6 +323,10 @@ def build_capabilities(device: dict[str, Any]) -> dict[str, Any]:
         capabilities["appium:platformVersion"] = device["platform_version"]
     if isinstance(device.get("wda_local_port"), int):
         capabilities["appium:wdaLocalPort"] = device["wda_local_port"]
+    if isinstance(device.get("wda_remote_port"), int):
+        capabilities["appium:wdaRemotePort"] = device["wda_remote_port"]
+    elif isinstance(device.get("wda_local_port"), int):
+        capabilities["appium:wdaRemotePort"] = 8100
     if isinstance(device.get("mjpeg_server_port"), int):
         capabilities["appium:mjpegServerPort"] = device["mjpeg_server_port"]
     if isinstance(device.get("derived_data_path"), str):

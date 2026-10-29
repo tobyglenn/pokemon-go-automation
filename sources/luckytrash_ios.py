@@ -203,6 +203,10 @@ class IOSDevice:
             capabilities["platformVersion"] = device["platform_version"]
         if isinstance(device.get("wda_local_port"), int):
             capabilities["appium:wdaLocalPort"] = device["wda_local_port"]
+        if isinstance(device.get("wda_remote_port"), int):
+            capabilities["appium:wdaRemotePort"] = device["wda_remote_port"]
+        elif isinstance(device.get("wda_local_port"), int):
+            capabilities["appium:wdaRemotePort"] = 8100
         if isinstance(device.get("mjpeg_server_port"), int):
             capabilities["appium:mjpegServerPort"] = device["mjpeg_server_port"]
         if isinstance(device.get("derived_data_path"), str):
@@ -212,33 +216,38 @@ class IOSDevice:
         if device.get("use_preinstalled_wda"):
             capabilities["appium:usePreinstalledWDA"] = True
         name = device.get("name", "iPhone")
-        try:
-            driver = webdriver.Remote(
-                command_executor=config.appium_server_url,
-                options=XCUITestOptions().load_capabilities(capabilities),
-            )
-        except Exception as exc:
-            if capabilities.get("appium:usePreinstalledWDA", False):
-                print(
-                    f"[{name}] Preinstalled WebDriverAgent would not start ({exc});"
-                    " restarting the installed runner once",
-                    flush=True,
+        def _create_driver():
+            try:
+                return webdriver.Remote(
+                    command_executor=config.appium_server_url,
+                    options=XCUITestOptions().load_capabilities(capabilities),
                 )
-                ios_wda_cleanup.stop_wda_runner(device["udid"])
-                time.sleep(1)
-                try:
-                    driver = webdriver.Remote(
+            except Exception as exc:
+                if capabilities.get("appium:usePreinstalledWDA", False):
+                    print(
+                        f"[{name}] Preinstalled WebDriverAgent would not start ({exc});"
+                        " restarting the installed runner once",
+                        flush=True,
+                    )
+                    ios_wda_cleanup.stop_wda_runner(device["udid"])
+                    time.sleep(1)
+                    return webdriver.Remote(
                         command_executor=config.appium_server_url,
                         options=XCUITestOptions().load_capabilities(capabilities),
                     )
-                except Exception as retry_exc:
-                    raise LuckyTrashIOSError(
-                        f"Could not create the iOS Appium session for {name}: {retry_exc}"
-                    ) from retry_exc
-            else:
-                raise LuckyTrashIOSError(
-                    f"Could not create the iOS Appium session for {name}: {exc}"
-                ) from exc
+                raise
+
+        try:
+            driver = ios_wda_cleanup.connect_with_retry(
+                _create_driver,
+                udid=device["udid"],
+                name=device.get("name", "iPhone"),
+                interval=45.0,
+            )
+        except Exception as exc:
+            raise LuckyTrashIOSError(
+                f"Could not create the iOS Appium session for {name}: {exc}"
+            ) from exc
         return cls(driver, config)
 
     def screenshot(self) -> Image.Image:

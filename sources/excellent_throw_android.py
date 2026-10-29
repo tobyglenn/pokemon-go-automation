@@ -1267,7 +1267,10 @@ async def clear_catch_screens(device: AndroidDevice, artifact_dir: Path) -> None
         except gbl_vision.VisionOCRError:
             return
 
-        summary = gbl_vision.dismiss_point(boxes)
+        if gbl_vision.gbl_card_visible(boxes):
+            return
+
+        summary = gbl_vision.dismiss_point(boxes, image.width, image.height)
         if summary is not None:
             # The only ground truth for throw quality: the card itemises the
             # bonuses, so a run that earned none says "TOTAL 100 XP" and one
@@ -1290,6 +1293,7 @@ async def clear_catch_screens(device: AndroidDevice, artifact_dir: Path) -> None
             await device.tap(close)
             await asyncio.sleep(MENU_SETTLE)
             continue
+
         return
 
 

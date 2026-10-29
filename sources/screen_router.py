@@ -67,6 +67,8 @@ GIFT_WORDS = ("send gift", "add friend")
 # A trade's Pokemon picker carries a name/CP plate and a ball-like disc, so an
 # encounter is only one without the word.
 TRADE_WORD = "trade"
+# Phones whose looks finish this close together share one job.
+GROUP_WINDOW_SECONDS = 10.0
 
 
 def classify(image: Image.Image, feeding: Callable[[Frame], bool]) -> str | None:
@@ -238,14 +240,34 @@ async def run(args: argparse.Namespace) -> int:
         print(f"[{spec.name}] {note}", flush=True)
         return job, note
 
-    readings = await asyncio.gather(*(reported(spec) for spec in here))
-    groups: dict[str, list[pokemon_fleet.DeviceSpec]] = {}
-    for spec, (job, note) in zip(here, readings):
-        if job is not None:
-            groups.setdefault(job, []).append(spec)
-    if args.plan or not groups:
+    # Each phone's job starts as soon as that phone has been read. An iPhone
+    # showing a Face ID prompt for UI automation keeps its look retrying every
+    # 45s until someone answers it (`ios_wda_cleanup.connect_with_retry`), and
+    # waiting for every look before launching anything held the other phones'
+    # battles back for as long as that took. Phones read in the same moment
+    # still share one job.
+    reading = {asyncio.ensure_future(reported(spec)): spec for spec in here}
+    running: list[asyncio.Future] = []
+    while reading:
+        done, _ = await asyncio.wait(reading, return_when=asyncio.FIRST_COMPLETED)
+        rest = set(reading) - done
+        if rest:
+            more, _ = await asyncio.wait(rest, timeout=GROUP_WINDOW_SECONDS)
+            done |= more
+        groups: dict[str, list[pokemon_fleet.DeviceSpec]] = {}
+        for task in [task for task in list(reading) if task in done]:
+            spec = reading.pop(task)
+            job, _note = task.result()
+            if job is not None:
+                groups.setdefault(job, []).append(spec)
+        if not args.plan:
+            running += [
+                asyncio.ensure_future(launch(command(job, specs, args)))
+                for job, specs in groups.items()
+            ]
+    if not running:
         return 0
-    codes = await asyncio.gather(*(launch(command(job, specs, args)) for job, specs in groups.items()))
+    codes = await asyncio.gather(*running)
     return next((code for code in codes if code), 0)
 
 

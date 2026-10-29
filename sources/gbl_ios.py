@@ -415,6 +415,10 @@ class IOSGBLDevice:
             capabilities["appium:platformVersion"] = device["platform_version"]
         if isinstance(device.get("wda_local_port"), int):
             capabilities["appium:wdaLocalPort"] = device["wda_local_port"]
+        if isinstance(device.get("wda_remote_port"), int):
+            capabilities["appium:wdaRemotePort"] = device["wda_remote_port"]
+        elif isinstance(device.get("wda_local_port"), int):
+            capabilities["appium:wdaRemotePort"] = 8100
         if isinstance(device.get("mjpeg_server_port"), int):
             capabilities["appium:mjpegServerPort"] = device["mjpeg_server_port"]
         if isinstance(device.get("derived_data_path"), str):
@@ -464,7 +468,12 @@ class IOSGBLDevice:
             return cls(driver, config)
 
         try:
-            return _connect_and_create()
+            return ios_wda_cleanup.connect_with_retry(
+                _connect_and_create,
+                udid=device["udid"],
+                name=device.get("name", "iPhone"),
+                interval=45.0,
+            )
         except Exception as exc:
             if ios_wda_cleanup.stale_wda_error(exc):
                 print(
@@ -845,6 +854,10 @@ async def smart_screen_state(
             and gbl_vision.battle_header_visible(boxes, image.width, image.height)
         ):
             return "battle", None, None, boxes
+        if gbl_vision.catch_summary_visible(boxes):
+            summary = gbl_vision.dismiss_point(boxes, image.width, image.height) or android_gbl.find_pill(frame)
+            if summary is not None:
+                return "pill", summary, "ok", boxes
         # An unclaimed reward outranks any action label on the same card. The
         # card a finished set leaves behind carries both, and its BATTLE is
         # spent -- greyed out until the tiles beside it are taken. The SE read
@@ -911,10 +924,12 @@ async def smart_screen_state(
             if tier_pill is not None:
                 return "pill", tier_pill, action[1], boxes
             return "pill", action[0], action[1], boxes
-        if state == "pill" and point is not None and gbl_vision.gbl_card_visible(boxes):
+        if (state in ("pill", "scroll_back")) and gbl_vision.gbl_card_visible(boxes):
             if gbl_vision.set_completed(boxes):
                 return "unconfirmed", None, None, boxes
-            return "pill", point, "battle", boxes
+            battle_pill = point or android_gbl.find_pill(frame)
+            if battle_pill is not None:
+                return "pill", battle_pill, "battle", boxes
         # A screen with no reward and no action label is not answered here: the
         # run-away check and the league choice below both need these boxes, and
         # returning the shape classification early made them dead code.  The
@@ -2692,7 +2707,8 @@ async def play_device(
                     league_heading_up = True
                     league_view = None
                     league_still = 0
-                    await scroll_league_list(device, back=True)
+                    for _ in range(5):
+                        await scroll_league_list(device, back=True)
                     await wait(device, android_gbl.MENU_SETTLE)
                     continue
                 heading = "up" if league_heading_up else "down"

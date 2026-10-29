@@ -175,5 +175,106 @@ class ProcessSelectionTests(unittest.TestCase):
             stop_device.assert_not_called()
 
 
+class BiometricRetryTests(unittest.TestCase):
+    def test_identifies_biometric_and_lock_errors(self) -> None:
+        self.assertTrue(
+            ios_wda_cleanup.is_wda_biometric_or_unlock_error(
+                Exception("Timed out while enabling automation mode.")
+            )
+        )
+        self.assertTrue(
+            ios_wda_cleanup.is_wda_biometric_or_unlock_error(
+                Exception("Original error: xcodebuild failed with code 65.")
+            )
+        )
+        self.assertTrue(
+            ios_wda_cleanup.is_wda_biometric_or_unlock_error(
+                Exception("device was not, or could not be, unlocked")
+            )
+        )
+        self.assertFalse(
+            ios_wda_cleanup.is_wda_biometric_or_unlock_error(
+                Exception("some unexpected network timeout")
+            )
+        )
+
+    def test_retry_on_screen_off_until_woken(self) -> None:
+        calls = []
+        def fake_connect():
+            calls.append("connect")
+            return "driver"
+
+        with (
+            mock.patch.object(ios_wda_cleanup, "display_backlight", side_effect=[False, True]),
+            mock.patch.object(ios_wda_cleanup, "device_requires_unlock", return_value=False),
+            mock.patch.object(ios_wda_cleanup.time, "sleep") as sleep_mock,
+        ):
+            res = ios_wda_cleanup.connect_with_retry(
+                fake_connect, udid="PHONE-A", name="SE", interval=45.0
+            )
+            self.assertEqual(res, "driver")
+            self.assertEqual(calls, ["connect"])
+            sleep_mock.assert_called_once_with(45.0)
+
+    def test_retry_on_wda_biometric_failure_until_success(self) -> None:
+        attempts = 0
+        def fake_connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("xcodebuild failed with code 65")
+            return "driver"
+
+        with (
+            mock.patch.object(ios_wda_cleanup, "display_backlight", return_value=True),
+            mock.patch.object(ios_wda_cleanup, "device_requires_unlock", return_value=False),
+            mock.patch.object(ios_wda_cleanup, "stop_wda_runner") as stop_mock,
+            mock.patch.object(ios_wda_cleanup.time, "sleep") as sleep_mock,
+        ):
+            res = ios_wda_cleanup.connect_with_retry(
+                fake_connect, udid="PHONE-A", name="SE", interval=45.0
+            )
+            self.assertEqual(res, "driver")
+            self.assertEqual(attempts, 2)
+            stop_mock.assert_called_once_with("PHONE-A")
+            sleep_mock.assert_called_once_with(45.0)
+
+    def test_gives_up_with_the_original_error_after_the_wait_limit(self) -> None:
+        error = RuntimeError("xcodebuild failed with code 65")
+
+        def fake_connect():
+            raise error
+
+        with (
+            mock.patch.object(ios_wda_cleanup, "display_backlight", return_value=True),
+            mock.patch.object(ios_wda_cleanup, "device_requires_unlock", return_value=False),
+            mock.patch.object(ios_wda_cleanup, "stop_wda_runner"),
+            mock.patch.object(ios_wda_cleanup.time, "sleep") as sleep_mock,
+            mock.patch.object(
+                ios_wda_cleanup.time, "monotonic", side_effect=[0.0, 0.0, 50.0, 100.0]
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                ios_wda_cleanup.connect_with_retry(
+                    fake_connect, udid="PHONE-A", name="SE", interval=45.0, wait_limit=120.0
+                )
+        self.assertIs(raised.exception, error)
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_unrelated_error_is_raised_immediately(self) -> None:
+        def fake_connect():
+            raise ValueError("totally unrelated error")
+
+        with (
+            mock.patch.object(ios_wda_cleanup, "display_backlight", return_value=True),
+            mock.patch.object(ios_wda_cleanup, "device_requires_unlock", return_value=False),
+            mock.patch.object(ios_wda_cleanup.time, "sleep") as sleep_mock,
+        ):
+            with self.assertRaisesRegex(ValueError, "totally unrelated error"):
+                ios_wda_cleanup.connect_with_retry(
+                    fake_connect, udid="PHONE-A", name="SE", interval=45.0
+                )
+            sleep_mock.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

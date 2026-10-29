@@ -136,6 +136,10 @@ def scan_iphone_storage_with_selenium(
     
     if isinstance(device_dict.get("wda_local_port"), int):
         capabilities["appium:wdaLocalPort"] = device_dict["wda_local_port"]
+    if isinstance(device_dict.get("wda_remote_port"), int):
+        capabilities["appium:wdaRemotePort"] = device_dict["wda_remote_port"]
+    elif isinstance(device_dict.get("wda_local_port"), int):
+        capabilities["appium:wdaRemotePort"] = 8100
     if device_dict.get("use_preinstalled_wda"):
         capabilities["appium:usePreinstalledWDA"] = True
 

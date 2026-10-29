@@ -416,7 +416,13 @@ def default_adb_binary() -> str:
     itself uses, so connectivity checks have to ask the same one.
     """
     local = ROOT / "adb"
-    return str(local) if local.exists() else "adb"
+    if local.exists():
+        return str(local)
+    sibling = ROOT.parent / "sdk" / "platform-tools" / "adb"
+    if sibling.exists():
+        return str(sibling)
+    found = shutil.which("adb")
+    return found if found else "adb"
 
 
 def adb_states_or_raise(adb_binary: str | None = None) -> dict[str, str]:

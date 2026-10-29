@@ -11,6 +11,9 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
 
 
 WDA_PROJECT_MARKER = "WebDriverAgent.xcodeproj"
@@ -385,3 +388,112 @@ def asleep_message(udid: str, name: str = "The iPhone") -> str | None:
         "side button to wake it -- and set Settings > Display & Brightness > "
         "Auto-Lock to Never so an unattended run does not lose it again."
     )
+
+
+# What iOS says, through Appium, when WebDriverAgent cannot start because the
+# phone is waiting on its owner: a Face ID / passcode prompt to enable UI
+# automation, a locked phone, or a dark screen.  All of them surface as an
+# xcodebuild code 65, which is why that is on the list too -- a code 65 from a
+# broken Xcode setup is retried as well, but every retry line prints the error
+# so that case still shows up as itself.
+OWNER_WAIT_PHRASES = (
+    "enabling automation mode",
+    "code 65",
+    "unable to launch webdriveragent",
+    "would not launch webdriveragent",
+    "failed to initialize for ui testing",
+    "device was not, or could not be, unlocked",
+    "device was not unlocked",
+    "device is locked",
+    "screen is off",
+    "passcode required",
+    "not authorized for performing ui testing actions",
+    "remotexpc upstream connect error",
+    "connection was refused to port 8100",
+    "developer app certificate is not trusted",
+    "keep the phone unlocked",
+)
+
+# How often a waiting phone is tried again, and for how long in all.  Half an
+# hour covers someone who sees the prompt late; a phone nobody is coming to
+# still lets the run end.
+OWNER_RETRY_SECONDS = 45.0
+OWNER_WAIT_LIMIT_SECONDS = 30 * 60.0
+
+
+def is_wda_biometric_or_unlock_error(exc: Exception) -> bool:
+    """Whether WebDriverAgent failed because the phone is waiting on its owner."""
+    message = str(exc).lower()
+    return any(phrase in message for phrase in OWNER_WAIT_PHRASES)
+
+
+def _short_reason(exc: Exception) -> str:
+    """The first line of an Appium error, which is the part worth printing."""
+    text = str(exc).strip().splitlines()
+    first = text[0] if text else type(exc).__name__
+    return first if len(first) <= 160 else first[:157] + "..."
+
+
+def connect_with_retry(
+    connect_fn: "Callable[[], T]",
+    udid: str,
+    name: str = "iPhone",
+    interval: float = OWNER_RETRY_SECONDS,
+    wait_limit: float = OWNER_WAIT_LIMIT_SECONDS,
+) -> "T":
+    """`connect_fn()`, tried again every `interval` while the phone waits on its owner.
+
+    A Face ID prompt for UI automation, a locked phone or a dark screen each
+    stop WebDriverAgent until someone picks the phone up, and that can be
+    minutes.  Before this, the first failure ended the run and the phone sat
+    out the day even after the prompt was answered.  Now the connection is
+    retried until it works or `wait_limit` seconds pass; any other error is
+    raised at once.
+
+    A locked or dark phone is waited out without launching WebDriverAgent at
+    all, since a launch on one can only fail.
+    """
+    deadline = time.monotonic() + wait_limit
+    attempt = 0
+
+    def wait_or_give_up(reason: str, cause: Exception | None = None) -> None:
+        if time.monotonic() + interval > deadline:
+            message = (
+                f"[{name}] gave up after {int(wait_limit // 60)} minute(s) "
+                f"waiting: {reason}"
+            )
+            if cause is not None:
+                raise RuntimeError(message) from cause
+            raise RuntimeError(message)
+        print(
+            f"[{name}] {reason}; trying again in {int(interval)}s "
+            f"(attempt {attempt}). Unlock the phone and approve the prompt "
+            "-- the run carries on by itself.",
+            flush=True,
+        )
+        time.sleep(interval)
+
+    while True:
+        attempt += 1
+        if display_backlight(udid) is False:
+            wait_or_give_up("the screen is off")
+            continue
+        if device_requires_unlock(udid) is True:
+            wait_or_give_up("the phone is locked")
+            continue
+        try:
+            return connect_fn()
+        except Exception as exc:
+            if not is_wda_biometric_or_unlock_error(exc):
+                raise
+            # The half-started runner would otherwise hold the port the next
+            # attempt needs.
+            stop_wda_runner(udid)
+            try:
+                wait_or_give_up(
+                    "WebDriverAgent could not start -- usually a Face ID / "
+                    f"passcode prompt on the phone ({_short_reason(exc)})",
+                    exc,
+                )
+            except RuntimeError:
+                raise exc

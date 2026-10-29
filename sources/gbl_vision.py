@@ -839,7 +839,22 @@ def encounter_ball_count(
     return None
 
 
-def dismiss_point(boxes: Iterable[OCRBox]) -> list[int] | None:
+def catch_summary_visible(boxes: Iterable[OCRBox]) -> bool:
+    """Whether the post-catch XP summary card is on screen."""
+    boxes = list(boxes)
+    # A GBL card is never the catch summary, whatever its prose says. The
+    # fallback OK point below is a blind tap, so it must not fire on one.
+    if gbl_card_visible(boxes):
+        return False
+    seen = " | ".join(labels(boxes))
+    return "pokemon caught" in seen or ("total" in seen and "xp" in seen)
+
+
+def dismiss_point(
+    boxes: Iterable[OCRBox],
+    image_width: int = 0,
+    image_height: int = 0,
+) -> list[int] | None:
     """Where a summary card's OK sits, found by its own label.
 
     The XP card after a catch is a green pill in the same slot as NEXT BATTLE
@@ -850,6 +865,8 @@ def dismiss_point(boxes: Iterable[OCRBox]) -> list[int] | None:
     for box in boxes:
         if normalize(box.text) == "ok":
             return [box.center_x, box.center_y]
+    if catch_summary_visible(boxes) and image_width and image_height:
+        return [image_width // 2, int(image_height * 0.665)]
     return None
 
 

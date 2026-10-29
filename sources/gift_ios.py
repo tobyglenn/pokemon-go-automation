@@ -261,7 +261,7 @@ def wda_startup_guidance(exc: Exception, name: str) -> GifterError | None:
     )
 
 
-def connect(
+def _connect_once(
     config: dict[str, Any], use_new_wda: bool = False
 ) -> "webdriver.Remote":
     try:
@@ -312,6 +312,10 @@ def connect(
         capabilities["platformVersion"] = device["platform_version"]
     if isinstance(device.get("wda_local_port"), int):
         capabilities["appium:wdaLocalPort"] = device["wda_local_port"]
+    if isinstance(device.get("wda_remote_port"), int):
+        capabilities["appium:wdaRemotePort"] = device["wda_remote_port"]
+    elif isinstance(device.get("wda_local_port"), int):
+        capabilities["appium:wdaRemotePort"] = 8100
     if isinstance(device.get("mjpeg_server_port"), int):
         capabilities["appium:mjpegServerPort"] = device["mjpeg_server_port"]
     if isinstance(device.get("derived_data_path"), str):
@@ -342,9 +346,6 @@ def connect(
                 )
             except Exception as retry_exc:
                 exc = retry_exc
-        guidance = wda_startup_guidance(exc, name)
-        if guidance is not None:
-            raise guidance from exc
         if capabilities.get("appium:usePreinstalledWDA", False):
             raise GifterError(
                 f"{name} could not launch the preinstalled WebDriverAgent. "
@@ -352,6 +353,35 @@ def connect(
                 "would replace its signing identity."
             ) from exc
         raise exc
+
+
+def connect(
+    config: dict[str, Any], use_new_wda: bool = False, retry: bool = True
+) -> "webdriver.Remote":
+    device = device_config(config)
+    name = device.get("name", "iPhone")
+    udid = device.get("udid", "")
+    if not retry or not udid:
+        try:
+            return _connect_once(config, use_new_wda=use_new_wda)
+        except Exception as exc:
+            guidance = wda_startup_guidance(exc, name)
+            if guidance is not None:
+                raise guidance from exc
+            raise
+
+    try:
+        return ios_wda_cleanup.connect_with_retry(
+            lambda: _connect_once(config, use_new_wda=use_new_wda),
+            udid=udid,
+            name=name,
+            interval=45.0,
+        )
+    except Exception as exc:
+        guidance = wda_startup_guidance(exc, name)
+        if guidance is not None:
+            raise guidance from exc
+        raise
 
 
 def close_driver(driver: webdriver.Remote) -> None:
@@ -1339,6 +1369,12 @@ def main() -> int:
     driver: webdriver.Remote | None = None
     try:
         driver, rect = connect_ready(config)
+        try:
+            bundle_id = device.get("bundle_id", "com.nianticlabs.pokemongo")
+            driver.execute_script("mobile: activateApp", {"bundleId": bundle_id})
+            time.sleep(1.0)
+        except Exception:
+            pass
         image = screenshot_image(driver)
         print(
             f"Connected: viewport {rect['width']}x{rect['height']} points; "

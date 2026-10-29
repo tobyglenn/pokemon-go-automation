@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests import support as _test_support
 
 import argparse
+import asyncio
 import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager
@@ -118,16 +119,21 @@ class CommandTests(unittest.TestCase):
 
 
 class RunTests(unittest.IsolatedAsyncioTestCase):
-    async def run_router(self, arguments: list[str], readings: dict[str, tuple[str | None, str]]):
+    async def run_router(self, arguments: list[str], readings: dict, launch=None):
         phones = {
             "android-one": spec("android-one", "android", "SERIAL1"),
             "ios-one": spec("ios-one", "ios", "UDID"),
             "android-two": spec("android-two", "android", "ELSEWHERE"),
         }
-        launched = AsyncMock(return_value=0)
+        launched = AsyncMock(return_value=0, side_effect=launch)
 
         async def read(phone, _androids):
-            return readings[phone.name]
+            reading = readings[phone.name]
+            if len(reading) == 3:
+                # A third field is how long that phone's look takes.
+                await asyncio.sleep(reading[2])
+                return reading[:2]
+            return reading
 
         with patch.object(screen_router.pokemon_fleet, "load_fleet", lambda _p: SimpleNamespace(devices=phones)), \
                 patch.object(screen_router, "attached_androids", AsyncMock(return_value={"SERIAL1": object()})), \
@@ -149,6 +155,32 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             [], {"android-one": ("gbl", "GBL"), "ios-one": ("gbl", "GBL")}
         )
         launched.assert_awaited_once_with(["gbl_day.py", "--local", "--devices", "android-one", "ios-one"])
+
+    async def test_a_slow_iphone_does_not_hold_back_the_other_phones(self) -> None:
+        # The iPhone's look is still retrying behind a Face ID prompt when the
+        # Android has been read; the Android's day must not wait for it.
+        started: list[tuple[float, list[str]]] = []
+        loop = asyncio.get_running_loop()
+        begin = loop.time()
+
+        async def record(arguments):
+            started.append((loop.time() - begin, arguments))
+            return 0
+
+        with patch.object(screen_router, "GROUP_WINDOW_SECONDS", 0.05):
+            _status, launched = await self.run_router(
+                [], {"android-one": ("gbl", "GBL"), "ios-one": ("gbl", "GBL", 0.3)},
+                launch=record,
+            )
+        self.assertEqual(
+            [arguments for _at, arguments in started],
+            [
+                ["gbl_day.py", "--local", "--devices", "android-one"],
+                ["gbl_day.py", "--local", "--devices", "ios-one"],
+            ],
+        )
+        self.assertLess(started[0][0], 0.2)
+        self.assertGreaterEqual(started[1][0], 0.3)
 
     async def test_an_unrecognised_screen_is_left_alone(self) -> None:
         _status, launched = await self.run_router(
