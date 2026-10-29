@@ -38,6 +38,7 @@ class ClassifyTests(unittest.TestCase):
         feeding: bool = False,
         gbl_card: bool = False,
         friends_header: bool = False,
+        on_map: bool = False,
     ) -> str | None:
         claim_boxes = [claim_research_android.ClaimButton(label, [1, 1], 0, 2) for label in claims]
         with ExitStack() as stack:
@@ -49,6 +50,7 @@ class ClassifyTests(unittest.TestCase):
                 (screen_router.gbl_vision, "recognize", [box(word) for word in words]),
                 (screen_router.gbl_vision, "gbl_card_visible", gbl_card),
                 (screen_router.gift_android, "is_friends_panel", friends_header),
+                (screen_router.gbl_home_recovery, "on_map", on_map),
             ):
                 stack.enter_context(patch.object(target, name, lambda *_a, _v=value, **_k: _v))
             return screen_router.classify(Image.new("RGB", (20, 40)), lambda _frame: feeding)
@@ -73,6 +75,14 @@ class ClassifyTests(unittest.TestCase):
 
     def test_the_party_picker_is_gbl_though_it_shows_a_ball(self) -> None:
         self.assertEqual(self.read(("CHOOSE YOUR PARTY",), ball=True, plate=True), screen_router.GBL)
+
+    def test_the_map_is_gbl_even_when_the_feed_check_passes(self) -> None:
+        self.assertEqual(self.read(on_map=True, feeding=True), screen_router.GBL)
+
+    def test_an_encounter_is_not_mistaken_for_the_map(self) -> None:
+        self.assertEqual(
+            self.read(ball=True, plate=True, on_map=True), screen_router.CATCH
+        )
 
     def test_the_battle_card_is_gbl(self) -> None:
         self.assertEqual(self.read(gbl_card=True), screen_router.GBL)

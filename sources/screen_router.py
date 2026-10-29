@@ -33,6 +33,7 @@ from . import (
     catch_ios,
     claim_research_android,
     config_paths,
+    gbl_home_recovery,
     gbl_vision,
     gift_android,
     pokemon_fleet,
@@ -95,6 +96,13 @@ def classify(image: Image.Image, feeding: Callable[[Frame], bool]) -> str | None
         and claim_research_android.plate_visible(image)
         and TRADE_WORD not in text
     )
+    # The map is where a phone lands after a Face ID wait, a crash or a run
+    # that walked out of its menus, and gbl_day walks from it to the GBL card
+    # (pokeball, then BATTLE, each found in the picture). The berry check came
+    # first before and read the SE's map as a gym, so the phone swiped "to the
+    # next defender" across the map instead of playing its battles.
+    if not encounter and gbl_home_recovery.on_map(image):
+        return GBL
     if not encounter and feeding(frame):
         return BERRIES
     if gbl_vision.gbl_card_visible(boxes) or any(word in text for word in GBL_WORDS):
