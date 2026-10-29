@@ -3557,6 +3557,29 @@ async def async_main(args: argparse.Namespace, config: RuntimeConfig) -> int:
                 verified_result = android_gbl.teal_result_ready(
                     raw_frame(image), TEAL_SAMPLE_X, TEAL_SAMPLE_Y
                 )
+        if (
+            state == "battle"
+            and not verified_result
+            and (
+                gbl_home_recovery.on_map(image)
+                or gbl_home_recovery.main_menu_open(image)
+            )
+        ):
+            # Started on the map or the main menu -- where play.py sends a phone
+            # it finds on the map, e.g. after a Face ID wait. The walk finds the
+            # pokeball and the menu's BATTLE disc in the picture and checks each
+            # screen before the next tap, so it cannot land on the Store. Doing
+            # it here saves the empty leg gbl_day would otherwise spend first.
+            log(device, "  Started on the map; walking to the GO BATTLE LEAGUE card")
+            if await walk_home_to_gbl(device, image):
+                await wait(device, android_gbl.MENU_SETTLE)
+                image = await device.screenshot()
+                if image is None:
+                    raise IOSGBLError("Could not read the iPhone screen")
+                state = await probe(device, image, profile)
+                verified_result = android_gbl.teal_result_ready(
+                    raw_frame(image), TEAL_SAMPLE_X, TEAL_SAMPLE_Y
+                )
         if state == "battle" and not verified_result:
             # 'battle' is the fallback verdict: no pill, no league list, no
             # reward button.  Starting there would send fast attacks at whatever
