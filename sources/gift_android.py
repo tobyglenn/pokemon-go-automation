@@ -33,7 +33,6 @@ import os
 import asyncio
 import re
 import shutil
-import struct
 import sys
 import time
 from dataclasses import dataclass
@@ -489,43 +488,14 @@ async def wait(seconds: float, use_modifier: bool = True):
 
 async def screencap_raw(device: DeviceAsyncWrapper):
     """Grabs the raw framebuffer via `adb exec-out screencap`.
-    Returns (width, height, pixel_offset, data), or None if it can't be read."""
-    args = [ADB_BINARY, '-s', device.serial, 'exec-out', 'screencap']
-    if device.display_id:
-        args += ['-d', device.display_id]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError:
-        return None
-    try:
-        data, _ = await asyncio.wait_for(proc.communicate(), SCREENCAP_TIMEOUT)
-    except asyncio.TimeoutError:
-        # `adb exec-out screencap` wedges every so often on this phone: the
-        # device stays responsive and later screencaps work, but this one never
-        # returns. Without the timeout the run just stops dead, mid-cycle, with
-        # no output at all. Kill it and let the caller carry on unguarded.
-        log(device, f'  Screen read timed out after {SCREENCAP_TIMEOUT}s, skipping the check')
-        proc.kill()
-        await proc.wait()
-        return None
-    except OSError:
-        return None
-    if len(data) < 16:
-        return None
-    width, height, pixel_format = struct.unpack('<III', data[:12])
-    # Android 9+ appends a colorspace field, making the header 16 bytes.
-    for offset in (16, 12):
-        if width * height * 4 + offset == len(data):
-            break
-    else:
-        return None
-    if pixel_format != 1:  # not RGBA_8888
-        return None
-    return width, height, offset, data
+    Returns (width, height, pixel_offset, data), or None if it can't be read.
+
+    A wedged read is killed and the caller carries on with that check unguarded.
+    """
+    data = await android_common.capture_screen(
+        device, ADB_BINARY, SCREENCAP_TIMEOUT,
+        lambda: log(device, f'  Screen read timed out after {SCREENCAP_TIMEOUT}s, skipping the check'))
+    return None if data is None else android_common.parse_framebuffer(data, exact=True)
 
 
 def frame_image(frame: tuple[int, int, int, bytes]) -> Image.Image:

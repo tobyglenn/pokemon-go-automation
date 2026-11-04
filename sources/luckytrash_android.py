@@ -61,7 +61,6 @@ the compact-layout device and can be overridden per device.
 from . import android_common
 from .android_common import find_display_id, swipe_tap as tap  # noqa: F401  re-exported for callers and tests
 import asyncio
-import struct
 
 try:
     from ppadb.client_async import ClientAsync
@@ -252,33 +251,10 @@ async def screencap_raw(device: DeviceAsyncWrapper):
 
     Returns (width, height, offset, data), or None if the screen can't be read.
     """
-    args = [ADB_BINARY, '-s', device.serial, 'exec-out', 'screencap']
-    if device.display_id:
-        args += ['-d', device.display_id]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError:
-        return None
-    try:
-        data, _ = await asyncio.wait_for(proc.communicate(), SCREENCAP_TIMEOUT)
-    except asyncio.TimeoutError:
-        print(f'    Screen read timed out after {SCREENCAP_TIMEOUT}s')
-        proc.kill()
-        await proc.wait()
-        return None
-    except OSError:
-        return None
-    if len(data) < 12:
-        return None
-    width, height, _fmt = struct.unpack('<III', data[:12])
-    offset = 16 if len(data) >= width * height * 4 + 16 else 12
-    if len(data) < width * height * 4 + offset:
-        return None
-    return width, height, offset, data
+    data = await android_common.capture_screen(
+        device, ADB_BINARY, SCREENCAP_TIMEOUT,
+        lambda: print(f'    Screen read timed out after {SCREENCAP_TIMEOUT}s'))
+    return None if data is None else android_common.parse_framebuffer(data)
 
 
 def band_of(device: DeviceAsyncWrapper, key: str, fallback: tuple[int, int]) -> tuple[float, float]:

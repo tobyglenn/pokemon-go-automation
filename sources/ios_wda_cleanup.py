@@ -11,7 +11,9 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from typing import Callable, TypeVar
+from typing import Any, Callable, Mapping, TypeVar
+
+from . import config_paths
 
 T = TypeVar("T")
 
@@ -173,6 +175,82 @@ def stale_wda_error(exc: Exception | str) -> bool:
             and "not in current view" in message
         )
     )
+
+
+def xcuitest_capabilities(
+    device: Mapping[str, Any],
+    *,
+    use_new_wda: bool = False,
+    show_xcode_log: bool | None = None,
+) -> dict[str, Any]:
+    """The Appium XCUITest capabilities for one profiled iPhone.
+
+    One builder for the workers that attach the same way, so a capability
+    added for one (say derivedDataPath, which keeps WDA's signed build) is not
+    missing from another.
+    """
+    capabilities: dict[str, Any] = {
+        "platformName": "iOS",
+        "appium:automationName": "XCUITest",
+        "appium:udid": device["udid"],
+        "appium:deviceName": device.get("name", "iPhone"),
+        "appium:bundleId": device.get("bundle_id", "com.nianticlabs.pokemongo"),
+        "appium:noReset": True,
+        "appium:shouldTerminateApp": False,
+        "appium:xcodeOrgId": device["team_id"],
+        "appium:xcodeSigningId": device.get("xcode_signing_id", "Apple Development"),
+        "appium:updatedWDABundleId": device["wda_bundle_id"],
+        "appium:allowProvisioningDeviceRegistration": True,
+        "appium:useNewWDA": use_new_wda,
+    }
+    if show_xcode_log is not None:
+        capabilities["appium:showXcodeLog"] = show_xcode_log
+    capabilities["appium:newCommandTimeout"] = 3600
+    if isinstance(device.get("platform_version"), str):
+        capabilities["platformVersion"] = device["platform_version"]
+    if isinstance(device.get("wda_local_port"), int):
+        capabilities["appium:wdaLocalPort"] = device["wda_local_port"]
+    if isinstance(device.get("wda_remote_port"), int):
+        capabilities["appium:wdaRemotePort"] = device["wda_remote_port"]
+    elif isinstance(device.get("wda_local_port"), int):
+        capabilities["appium:wdaRemotePort"] = WDA_DEFAULT_PORT
+    if isinstance(device.get("mjpeg_server_port"), int):
+        capabilities["appium:mjpegServerPort"] = device["mjpeg_server_port"]
+    if isinstance(device.get("derived_data_path"), str):
+        capabilities["appium:derivedDataPath"] = config_paths.expand_user_path(
+            device["derived_data_path"]
+        )
+    if device.get("use_preinstalled_wda"):
+        capabilities["appium:usePreinstalledWDA"] = True
+    return capabilities
+
+
+def start_session(
+    create: Callable[[], T],
+    capabilities: Mapping[str, Any],
+    *,
+    udid: str,
+    name: str = "iPhone",
+) -> T:
+    """Open an Appium session, restarting a preinstalled WDA runner once.
+
+    A preinstalled runner left over from an earlier session refuses a new one;
+    stopping it and asking again clears that.  Anything else, and any failure
+    of the second try, propagates.
+    """
+    try:
+        return create()
+    except Exception as exc:
+        if not capabilities.get("appium:usePreinstalledWDA", False):
+            raise
+        print(
+            f"[{name}] Preinstalled WebDriverAgent would not start ({exc});"
+            " restarting the installed runner once",
+            flush=True,
+        )
+        stop_wda_runner(udid)
+        time.sleep(1)
+        return create()
 
 
 def read_wda_status_payload(port: int, timeout: float = 5.0) -> dict | None:

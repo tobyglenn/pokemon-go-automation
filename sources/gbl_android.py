@@ -55,7 +55,6 @@ import asyncio
 import math
 import re
 import shlex
-import struct
 import sys
 import time
 from pathlib import Path
@@ -1203,35 +1202,10 @@ async def screencap_raw(device: DeviceAsyncWrapper):
     Raw rather than PNG because nothing here needs Pillow, which the Android
     side of requirements.txt does not carry.
     """
-    args = [ADB_BINARY, '-s', device.serial, 'exec-out', 'screencap']
-    if device.display_id:
-        args += ['-d', device.display_id]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError:
-        return None
-    try:
-        data, _ = await asyncio.wait_for(proc.communicate(), SCREENCAP_TIMEOUT)
-    except asyncio.TimeoutError:
-        # The device stays healthy and later screencaps work, but this one never
-        # returns. Without the timeout the run stops dead with no output at all.
-        log(device, '   Screen read timed out after', SCREENCAP_TIMEOUT, 's')
-        proc.kill()
-        await proc.wait()
-        return None
-    except OSError:
-        return None
-    if len(data) < 12:
-        return None
-    width, height, _fmt = struct.unpack('<III', data[:12])
-    offset = 16 if len(data) >= width * height * 4 + 16 else 12
-    if len(data) < width * height * 4 + offset:
-        return None
-    return width, height, offset, data
+    data = await android_common.capture_screen(
+        device, ADB_BINARY, SCREENCAP_TIMEOUT,
+        lambda: log(device, '   Screen read timed out after', SCREENCAP_TIMEOUT, 's'))
+    return None if data is None else android_common.parse_framebuffer(data)
 
 
 async def screencap_band(device: DeviceAsyncWrapper, frame, y0: int, y1: int):

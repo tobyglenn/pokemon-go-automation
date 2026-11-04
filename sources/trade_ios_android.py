@@ -1243,40 +1243,7 @@ class IOSController:
             device["udid"],
             device.get("wda_local_port") or ios_wda_cleanup.WDA_DEFAULT_PORT,
         )
-        capabilities = {
-            "platformName": "iOS",
-            "appium:automationName": "XCUITest",
-            "appium:udid": device["udid"],
-            "appium:deviceName": device.get("name", "iPhone"),
-            "appium:bundleId": device.get("bundle_id", "com.nianticlabs.pokemongo"),
-            "appium:noReset": True,
-            "appium:shouldTerminateApp": False,
-            "appium:xcodeOrgId": device["team_id"],
-            "appium:xcodeSigningId": device.get(
-                "xcode_signing_id", "Apple Development"
-            ),
-            "appium:updatedWDABundleId": device["wda_bundle_id"],
-            "appium:allowProvisioningDeviceRegistration": True,
-            "appium:showXcodeLog": True,
-            "appium:useNewWDA": False,
-            "appium:newCommandTimeout": 3600,
-        }
-        if isinstance(device.get("platform_version"), str):
-            capabilities["platformVersion"] = device["platform_version"]
-        if isinstance(device.get("wda_local_port"), int):
-            capabilities["appium:wdaLocalPort"] = device["wda_local_port"]
-        if isinstance(device.get("wda_remote_port"), int):
-            capabilities["appium:wdaRemotePort"] = device["wda_remote_port"]
-        elif isinstance(device.get("wda_local_port"), int):
-            capabilities["appium:wdaRemotePort"] = 8100
-        if isinstance(device.get("mjpeg_server_port"), int):
-            capabilities["appium:mjpegServerPort"] = device["mjpeg_server_port"]
-        if isinstance(device.get("derived_data_path"), str):
-            capabilities["appium:derivedDataPath"] = config_paths.expand_user_path(
-                device["derived_data_path"]
-            )
-        if device.get("use_preinstalled_wda"):
-            capabilities["appium:usePreinstalledWDA"] = True
+        capabilities = ios_wda_cleanup.xcuitest_capabilities(device, show_xcode_log=True)
 
         name = device.get("name", "iPhone")
 

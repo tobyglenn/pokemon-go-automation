@@ -1482,7 +1482,8 @@ class IOSExcellentThrowDevice:
         if device.get("use_preinstalled_wda"):
             capabilities["appium:usePreinstalledWDA"] = True
         name = device.get("name", "iPhone")
-        try:
+
+        def create_driver() -> Any:
             driver = webdriver.Remote(
                 command_executor=config.appium_server_url,
                 options=XCUITestOptions().load_capabilities(capabilities),
@@ -1491,28 +1492,14 @@ class IOSExcellentThrowDevice:
                 driver.update_settings({"mjpegServerFramerate": 30})
             except Exception:
                 pass
+            return driver
+
+        try:
+            driver = ios_wda_cleanup.start_session(
+                create_driver, capabilities, udid=device["udid"], name=name
+            )
         except Exception as exc:
-            if capabilities.get("appium:usePreinstalledWDA", False):
-                print(
-                    f"[{name}] Preinstalled WebDriverAgent would not start ({exc});"
-                    " restarting the installed runner once",
-                    flush=True,
-                )
-                ios_wda_cleanup.stop_wda_runner(device["udid"])
-                time.sleep(1)
-                try:
-                    driver = webdriver.Remote(
-                        command_executor=config.appium_server_url,
-                        options=XCUITestOptions().load_capabilities(capabilities),
-                    )
-                    try:
-                        driver.update_settings({"mjpegServerFramerate": 30})
-                    except Exception:
-                        pass
-                except Exception as retry_exc:
-                    raise ExcellentThrowError(f"Could not start Appium session for {name}: {retry_exc}") from retry_exc
-            else:
-                raise ExcellentThrowError(f"Could not start Appium session for {name}: {exc}") from exc
+            raise ExcellentThrowError(f"Could not start Appium session for {name}: {exc}") from exc
         return cls(driver, config)
 
     def screenshot(self) -> Image.Image:

@@ -8,9 +8,11 @@ tests that patch `gift_android.find_display_id` and the like keep working.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import struct
 from pathlib import Path
-from typing import Any, Collection, Iterable
+from typing import Any, Callable, Collection, Iterable
 
 import yaml
 
@@ -54,6 +56,74 @@ async def find_display_id(device: Any) -> str | None:
         return ids[0]
     except Exception:
         return None
+
+
+Frame = tuple[int, int, int, bytes]
+
+
+async def capture_screen(
+    device: Any,
+    adb_binary: str,
+    timeout: float,
+    on_timeout: Callable[[], None] | None = None,
+) -> bytes | None:
+    """The raw stdout of `adb exec-out screencap`, or None if it could not be read.
+
+    `adb exec-out screencap` wedges outright now and then: the device stays
+    healthy and later reads work, but this one never returns.  It is killed
+    after `timeout` seconds (SIGKILL: a wedged child is blocked in the transport
+    read and ignores catchable signals) and `on_timeout` reports it.
+    """
+    args = [adb_binary, '-s', device.serial, 'exec-out', 'screencap']
+    display_id = getattr(device, 'display_id', None)
+    if display_id:
+        args += ['-d', display_id]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    try:
+        data, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        if on_timeout is not None:
+            on_timeout()
+        proc.kill()
+        await proc.wait()
+        return None
+    except OSError:
+        return None
+    return data
+
+
+def parse_framebuffer(data: bytes, *, exact: bool = False) -> Frame | None:
+    """Split a screencap's stdout into (width, height, pixel_offset, data).
+
+    Android 9+ appends a colorspace field, making the header 16 bytes rather
+    than 12.  `exact` also demands the size match to the byte and RGBA_8888
+    pixels, which rejects anything with junk prepended, such as the
+    "[Warning] Multiple displays" line foldables print without a display id.
+    """
+    if len(data) < (16 if exact else 12):
+        return None
+    width, height, pixel_format = struct.unpack('<III', data[:12])
+    size = width * height * 4
+    if exact:
+        for offset in (16, 12):
+            if size + offset == len(data):
+                break
+        else:
+            return None
+        if pixel_format != 1:  # not RGBA_8888
+            return None
+        return width, height, offset, data
+    offset = 16 if len(data) >= size + 16 else 12
+    if len(data) < size + offset:
+        return None
+    return width, height, offset, data
 
 
 async def swipe_tap(device: Any, point: list[int]) -> None:

@@ -109,55 +109,24 @@ def scan_iphone_storage_with_selenium(
         raise RuntimeError("Appium Python client missing") from exc
 
     device_dict = appium_cfg["device"]
-    capabilities = {
-        "platformName": "iOS",
-        "appium:automationName": "XCUITest",
-        "appium:udid": device_dict["udid"],
-        "appium:deviceName": device_dict.get("name", "iPhone"),
-        "appium:bundleId": device_dict.get("bundle_id", "com.nianticlabs.pokemongo"),
-        "appium:noReset": True,
-        "appium:shouldTerminateApp": False,
-        "appium:xcodeOrgId": device_dict["team_id"],
-        "appium:xcodeSigningId": device_dict.get(
-            "xcode_signing_id", "Apple Development"
-        ),
-        "appium:updatedWDABundleId": device_dict["wda_bundle_id"],
-        "appium:useNewWDA": False,
-    }
-    
-    if isinstance(device_dict.get("wda_local_port"), int):
-        capabilities["appium:wdaLocalPort"] = device_dict["wda_local_port"]
-    if isinstance(device_dict.get("wda_remote_port"), int):
-        capabilities["appium:wdaRemotePort"] = device_dict["wda_remote_port"]
-    elif isinstance(device_dict.get("wda_local_port"), int):
-        capabilities["appium:wdaRemotePort"] = 8100
-    if device_dict.get("use_preinstalled_wda"):
-        capabilities["appium:usePreinstalledWDA"] = True
+    # The shared builder also carries newCommandTimeout (Appium otherwise ends
+    # an idle session after 60 s, mid-OCR) and derivedDataPath / platform
+    # version, which this scanner used to leave out.
+    capabilities = ios_wda_cleanup.xcuitest_capabilities(device_dict)
 
     server_url = appium_cfg.get("server_url", "http://127.0.0.1:4723")
     name = device_dict.get("name", "iPhone")
     print(f"[+] Connecting Selenium WebDriver session to Appium on {server_url} ({name})...")
-    try:
-        driver = webdriver.Remote(
+    driver = ios_wda_cleanup.start_session(
+        lambda: webdriver.Remote(
             command_executor=server_url,
             options=XCUITestOptions().load_capabilities(capabilities),
-        )
-    except Exception as exc:
-        if capabilities.get("appium:usePreinstalledWDA", False):
-            print(
-                f"[{name}] Preinstalled WebDriverAgent would not start ({exc});"
-                " restarting the installed runner once",
-                flush=True,
-            )
-            ios_wda_cleanup.stop_wda_runner(device_dict["udid"])
-            time.sleep(1)
-            driver = webdriver.Remote(
-                command_executor=server_url,
-                options=XCUITestOptions().load_capabilities(capabilities),
-            )
-        else:
-            raise
-    
+        ),
+        capabilities,
+        udid=device_dict["udid"],
+        name=name,
+    )
+
     all_scanned: list[tuple[str, int]] = []
 
     try:

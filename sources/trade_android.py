@@ -12,7 +12,6 @@ from .android_common import find_display_id, swipe_tap as tap  # noqa: F401  re-
 
 import asyncio
 from dataclasses import dataclass
-import struct
 import time
 from pathlib import Path
 
@@ -145,46 +144,15 @@ async def dismiss_power_up_screen(devices: list[DeviceAsyncWrapper]):
 async def _screencap_once(device: DeviceAsyncWrapper):
     """One `adb exec-out screencap`. Returns its stdout, or None if the child
     could not be started or wedged and had to be killed."""
-    args = [ADB_BINARY, '-s', device.serial, 'exec-out', 'screencap']
-    if device.display_id:
-        args += ['-d', device.display_id]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError:
-        return None
-    try:
-        data, _ = await asyncio.wait_for(proc.communicate(), SCREENCAP_TIMEOUT)
-    except asyncio.TimeoutError:
-        # SIGKILL, not terminate: a wedged child is blocked in the transport
-        # read and does not act on a catchable signal.
-        print(f'    Screen read timed out after {SCREENCAP_TIMEOUT}s')
-        proc.kill()
-        await proc.wait()
-        return None
-    return data
+    return await android_common.capture_screen(
+        device, ADB_BINARY, SCREENCAP_TIMEOUT,
+        lambda: print(f'    Screen read timed out after {SCREENCAP_TIMEOUT}s'))
 
 
 def _parse_framebuffer(data: bytes):
     """Splits a screencap's stdout into (width, height, pixel_offset, data),
     or None if it isn't a framebuffer this can read."""
-    if len(data) < 16:
-        return None
-    width, height, pixel_format = struct.unpack('<III', data[:12])
-    # Android 9+ appends a colorspace field, making the header 16 bytes.
-    # The size check also rejects anything with junk prepended, e.g. the
-    # "[Warning] Multiple displays" line foldables print without a display id.
-    for offset in (16, 12):
-        if width * height * 4 + offset == len(data):
-            break
-    else:
-        return None
-    if pixel_format != 1:  # not RGBA_8888
-        return None
-    return width, height, offset, data
+    return android_common.parse_framebuffer(data, exact=True)
 
 
 async def screencap_raw(device: DeviceAsyncWrapper):
