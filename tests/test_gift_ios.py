@@ -244,6 +244,94 @@ class LatePaintingGiftTests(unittest.TestCase):
         self.assertEqual(taps, [])
 
 
+class NothingLeftTests(unittest.TestCase):
+    """A day's gifts all sent and nothing waiting: the run must end.
+
+    The SE, 3 Nov: every cycle reopened the same top friend ("No incoming gift
+    to open; Friend cannot receive a gift; advancing") until it was stopped by
+    hand at Gift 23 of a 100-cycle cap.
+    """
+
+    def test_idle_friends_end_the_run(self) -> None:
+        points = LatePaintingGiftTests._points()
+        screen = {"name": "profile"}
+        taps: list[list[int]] = []
+
+        def available(driver, point):
+            # No incoming gift, SEND GIFT greyed out; the list's sort works.
+            return point == points["SORT_BTN"]
+
+        def tap(driver, point):
+            taps.append(point)
+            if point == points["CLOSE_BTN"]:
+                screen["name"] = "list"
+            elif point == points["NEXT_FRIEND_BTN"]:
+                screen["name"] = "profile"
+
+        with (
+            mock.patch.object(gift_ios, "coordinates", return_value=points),
+            mock.patch.object(gift_ios, "colored_action_available", side_effect=available),
+            mock.patch.object(gift_ios, "point_saturation", return_value=0.0),
+            mock.patch.object(
+                gift_ios, "is_friends_list", side_effect=lambda driver: screen["name"] == "list"
+            ),
+            mock.patch.object(gift_ios, "wait_for_screen_state", return_value=True),
+            mock.patch.object(gift_ios, "tap", side_effect=tap),
+            mock.patch.object(gift_ios.time, "sleep"),
+        ):
+            completed = gift_ios.run_gifts_v3(
+                object(), {}, 100, guard=False, dry_run=False, all_mode=True
+            )
+
+        self.assertEqual(completed, gift_ios.IDLE_CYCLE_LIMIT)
+        self.assertNotIn(points["SEND_GIFT_BTN"], taps)
+
+
+class RefusedOpenLoopTests(unittest.TestCase):
+    """The SE, 3 Nov, past the daily open cap: OPEN drops straight back to the
+    same friend's profile, the friend can be sent nothing, and the next cycle
+    reopens that friend.  58 cycles before it was stopped by hand."""
+
+    def test_refused_opens_end_the_run(self) -> None:
+        points = LatePaintingGiftTests._points()
+        screen = {"name": "profile"}
+
+        def available(driver, point):
+            # A gift card's OPEN is always lit; SEND GIFT never is.
+            return point in (points["OPEN_BTN"], points["SORT_BTN"])
+
+        def tap(driver, point):
+            if point == points["CLOSE_BTN"]:
+                screen["name"] = "list"
+            elif point == points["NEXT_FRIEND_BTN"]:
+                screen["name"] = "profile"
+
+        with (
+            mock.patch.object(gift_ios, "coordinates", return_value=points),
+            mock.patch.object(gift_ios, "colored_action_available", side_effect=available),
+            mock.patch.object(gift_ios, "point_saturation", return_value=0.0),
+            mock.patch.object(
+                gift_ios, "is_friends_list", side_effect=lambda driver: screen["name"] == "list"
+            ),
+            mock.patch.object(gift_ios, "wait_for_screen_state", return_value=True),
+            mock.patch.object(gift_ios, "ensure_screen"),
+            mock.patch.object(gift_ios, "screenshot_image"),
+            mock.patch.object(gift_ios, "choose_friend_row",
+                              return_value=gift_ios.FriendRowChoice(points["NEXT_FRIEND_BTN"], True)),
+            mock.patch.object(gift_ios, "friend_name", return_value="SameTrainer"),
+            mock.patch.object(gift_ios, "tap", side_effect=tap),
+            mock.patch.object(gift_ios.time, "sleep"),
+        ):
+            driver = mock.Mock()
+            driver.get_window_rect.return_value = {"width": 375, "height": 667}
+            completed = gift_ios.run_gifts_v3(
+                driver, {}, 100, guard=True, dry_run=False, all_mode=True
+            )
+
+        # The first cycle's open is believed; the repeats are not.
+        self.assertLessEqual(completed, 1 + gift_ios.IDLE_CYCLE_LIMIT)
+
+
 class TransientScreenTests(unittest.TestCase):
     """Screens that read wrong for a moment and right once they settle.
 
@@ -758,6 +846,7 @@ class RefusedOpenTests(unittest.TestCase):
                 ),
             ),
             mock.patch.object(gift_ios, "screenshot_image", return_value=image),
+            mock.patch.object(gift_ios, "friend_name", return_value=None),
             mock.patch.object(Image.Image, "save") as save,
             mock.patch.object(gift_ios, "tap", side_effect=fake_tap),
             mock.patch.object(gift_ios, "ensure_screen"),

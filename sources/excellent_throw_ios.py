@@ -450,6 +450,23 @@ def locate_throw_ball(
         # above it.
         if found is not None and not _gold_floor_above(frame, viewport, found):
             found = None
+    if found is None:
+        # Autumn leaves pass for the ball's red paint.  On the oneplus on
+        # 3 Nov 2026 they ran into the ball above and below, the merged band
+        # was too tall to be a ball, and a Dedenne still on screen read as a
+        # finished catch.  Leaf rows are sparse next to the ball's own, so
+        # this read keeps only rows near the densest one.  It runs only on a
+        # frame both reads above already turned down.
+        # Yellow first: an Ultra Ball's stripes are most of what shows of it
+        # on a dark shell.
+        found = _locate_throw_ball(
+            frame, viewport, yellow=True, dense_only=True
+        ) or _locate_throw_ball(frame, viewport, yellow=False, dense_only=True)
+        # This read is loose enough to take a pop-up's OK button for a ball
+        # (the oneplus's "New Mega Level" card), so it only counts on a frame
+        # that also shows the encounter's berry and ball buttons.
+        if found is not None and locate_encounter_buttons(image) is None:
+            found = None
     return found
 
 
@@ -470,8 +487,16 @@ def _gold_floor_above(
     return gold >= 0.5 * (bottom - top) * (right - left)
 
 
+# Share of the densest row a row needs in the leaf-tolerant read.
+DENSE_ROW_SHARE = 0.40
+
+
 def _locate_throw_ball(
-    frame: Image.Image, viewport: tuple[int, int], *, yellow: bool
+    frame: Image.Image,
+    viewport: tuple[int, int],
+    *,
+    yellow: bool,
+    dense_only: bool = False,
 ) -> BallDetection | None:
     width, height = viewport
     pixels = frame.load()
@@ -481,10 +506,19 @@ def _locate_throw_ball(
         (y, sum(_strong_ball_pixel(pixels[x, y], yellow) for x in range(left, right)))
         for y in range(top, bottom)
     ]
+    row_minimum = max(8, round(width * 0.03))
+    row_gap = max(3, round(height * 0.015))
+    if dense_only:
+        peak = max((count for _, count in row_counts), default=0)
+        row_minimum = max(row_minimum, round(peak * DENSE_ROW_SHARE))
+        # The ball's rows are unbroken; leaf rows come and go.  An Ultra
+        # Ball's black shell leaves its rows barely denser than the leaves
+        # (ph-1's Kyogre, 3 Nov 2026), so leaves are kept apart by their gaps.
+        row_gap = 2
     row_runs = _runs(
         row_counts,
-        minimum=max(8, round(width * 0.03)),
-        gap=max(3, round(height * 0.015)),
+        minimum=row_minimum,
+        gap=row_gap,
     )
     candidates: list[BallDetection] = []
     for row_run in row_runs:

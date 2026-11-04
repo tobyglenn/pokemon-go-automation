@@ -8,6 +8,7 @@ The repository contains the automation code and example configuration. Your phon
 
 | Workflow | Public entry point | What it does |
 | --- | --- | --- |
+| Start the day | [`starter.py`](../starter.py) | On every phone: Mega Evolve the `mega` tag's free Pokémon, play with the buddy (berries, snapshot, petting), send gifts, then the day's GBL. `--dry-run` walks the screens without acting. |
 | Whatever is on screen | [`play.py`](../play.py) | Look at every phone and start the job its screen shows: GBL for the battle card or party picker, berries for a gym defender's feeding card, gifts for the friends list or a friend's profile, catching for an award card, research CLAIM or open encounter. Other screens are left alone. `--plan` only looks. |
 | Gifts and gym berries | [`gift.py`](../gift.py) | Each phone's screen picks the job: a phone parked on a gym's feeding screen feeds the defenders, every other phone walks the friend list and opens/sends gifts. `--gifts-only` skips the look. |
 | Catching rewards | [`catch.py`](../catch.py) | Work the award queue ("You have N Pokémon left to catch") or a research screen's CLAIM buttons, whichever each phone shows. Android and iPhone. |

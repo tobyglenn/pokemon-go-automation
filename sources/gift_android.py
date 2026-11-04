@@ -27,6 +27,7 @@ see "Friends list guard" below.
 
 from . import config_paths
 import argparse
+import os
 import asyncio
 import re
 import shutil
@@ -167,7 +168,7 @@ SORT_FAB_MIN_TEAL = 0.5
 # A healthy screencap comes back in well under a second; this only fires when
 # adb has wedged. The guard stands down on a timeout rather than gating the run.
 SCREENCAP_TIMEOUT      = 4
-MAX_IDLE_CYCLES        = 15
+MAX_IDLE_CYCLES        = 5
 
 # Same availability test as the iPhone runner: active action buttons are
 # colored, while unavailable buttons are grey. Android coordinates already use
@@ -187,6 +188,11 @@ ACTION_MIN_SATURATION = 35
 SEND_POLL_READS = 4
 SEND_POLL_GAP = 0.8
 EMPTY_BAG_CYCLES = 3
+# Cycles in a row that pressed OPEN and sent nothing.  The game's daily open
+# cap is invisible: past it OPEN is refused silently, so "opened" stops meaning
+# anything.  ph-1, 3 Nov: ~50 such cycles with a full Item Bag, then 15 idle
+# ones, before the run ended.  No day allows more opens than this.
+OPEN_ONLY_LIMIT = 20
 UNLIT_ARTIFACT_DIR = config_paths.state_dir() / 'gifts'
 # --- The gift the game will not open ---
 # Once the Item Bag is full, OPEN_BTN raises "Your Item Bag is full!" instead
@@ -412,6 +418,44 @@ class DeviceAsyncWrapper(DeviceAsync):
     label: str = ''                 # set by setup(); prefixes this device's output
 
 
+class BagFullStop(Exception):
+    """OPEN met a full Item Bag; the run ends so the bag can be cleared."""
+
+
+BAG_FULL_MARKERS = config_paths.state_dir() / 'bag-full'
+# Set by starter.py: a full bag stops the run for a clear rather than opening
+# the gift for its Stardust and losing the items.
+CLEAR_BAG_ENV = 'POGO_CLEAR_BAG_ON_FULL'
+BAG_FULL_PAGE_WORDS = ('item bag is full', 'upgrade item bag')
+
+
+def bag_full_marker(serial: str) -> Path:
+    return BAG_FULL_MARKERS / re.sub(r'\W', '_', serial)
+
+
+def mark_bag_full(device: DeviceAsyncWrapper) -> None:
+    try:
+        BAG_FULL_MARKERS.mkdir(parents=True, exist_ok=True)
+        bag_full_marker(device.serial).write_text(time.strftime('%Y-%m-%d %H:%M:%S'))
+    except OSError:
+        pass
+
+
+async def bag_full_page(device: DeviceAsyncWrapper) -> bool:
+    """Whether OPEN left the phone on the full Item Bag's upgrade banner."""
+    frame = await screencap_raw(device)
+    if frame is None:
+        return False
+    from . import gbl_vision
+
+    try:
+        boxes = gbl_vision.recognize(frame_image(frame))
+    except (gbl_vision.VisionOCRError, OSError):
+        return False
+    text = gbl_vision.normalize(' '.join(gbl_vision.lines(boxes)))
+    return any(words in text for words in BAG_FULL_PAGE_WORDS)
+
+
 class AutoGifterError(Exception):
     pass
 
@@ -546,6 +590,11 @@ async def open_through_bag_full_notice(device: DeviceAsyncWrapper) -> bool:
         return False
     if BAG_FULL_PHRASE not in gbl_vision.normalize(' '.join(gbl_vision.lines(boxes))):
         return False
+    if os.environ.get(CLEAR_BAG_ENV):
+        # starter.py clears the bag instead: opening for Stardust only throws
+        # the gift's items away, which the operator does not want.
+        mark_bag_full(device)
+        raise BagFullStop('the Item Bag is full; stopping so it can be cleared')
     point = cross.find_dialog_button(image)
     if point is None:
         log(device, '  Item Bag is full, and the notice has no button to press')
@@ -1202,7 +1251,14 @@ async def gift_sequence(
         await wait(step.delay_after, step.use_delay_modifier)
 
         if all_mode and step.name == 'OPEN_BTN':
-            await open_through_bag_full_notice(device)
+            if not await open_through_bag_full_notice(device) and await bag_full_page(device):
+                # With "open for Stardust only" turned off, OPEN on a full bag
+                # drops the phone on the Item Bag under "Your Item Bag is full.
+                # Upgrade Item Bag?" and goes no further (moto-g, 3 Nov).  The
+                # run stops and leaves a marker; starter.py clears the bag and
+                # comes back.  The upgrade costs coins and is never pressed.
+                mark_bag_full(device)
+                raise BagFullStop('the Item Bag is full; stopping so it can be cleared')
     return GiftCycleResult(opened, sent, outgoing_available, open_next)
 
 
@@ -1213,6 +1269,7 @@ async def gift_process_one(
     done = 0
     idle_cycles = 0
     unlit_cycles = 0
+    open_only = 0
     # The first cycle starts on a friend nobody read off the list — whoever the
     # phone was left on — so it opens whatever it finds, as it always has.
     open_allowed = True
@@ -1246,7 +1303,8 @@ async def gift_process_one(
                     'with SEND unlit); trying the next friend',
                 )
             if all_mode:
-                if result.opened or result.sent:
+                open_only = open_only + 1 if (result.opened and not result.sent) else 0
+                if result.sent or (result.opened and open_only <= OPEN_ONLY_LIMIT):
                     idle_cycles = 0
                 else:
                     idle_cycles += 1

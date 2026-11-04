@@ -6,6 +6,7 @@ Start with the public command for the action you want. Follow it into fleet disp
 
 | File | Use |
 | --- | --- |
+| [`starter.py`](../starter.py) | Public start-of-day command: free Mega Evolutions, buddy play, then gifts and GBL on each phone. Start with `--plan`. |
 | [`play.py`](../play.py) | Public screen-driven command: reads every phone and starts GBL, berries, gifts or catching. Start with `--plan`. |
 | [`gift.py`](../gift.py) | Public gifts command; a phone parked on a gym's feeding screen feeds berries instead. Start with `--count 1 --plan`; `--gifts-only` skips the screen read. |
 | [`catch.py`](../catch.py) | Public catching command for the award queue, research CLAIM buttons and hand-opened encounters (`--mode encounter`), Android and iPhone. Start with `--dry-run`. |
@@ -72,6 +73,7 @@ Run from the checkout root, e.g. `python scripts/fleet.py status`; on another co
 | [`sources/raid_meta.py`](../sources/raid_meta.py) | Per-type rankings computed from the game master, and the species list the scan searches. |
 | [`sources/raid_plan.py`](../sources/raid_plan.py) | Turns one account's scan into the per-type candy and XL plan and its report. |
 | [`sources/vision_ocr.py`](../sources/vision_ocr.py) | Apple Vision text recognition with bounding boxes, built once into the private state directory. Bounding boxes are what let the candy rows be told apart; bare text lines cannot. |
+| [`sources/starter.py`](../sources/starter.py) | The start-of-day steps: mega tag walk, buddy play screen, heart check, and the hand-off to `gift.py` and `gbl_day.py`; reached through `starter.py`. |
 | [`sources/screen_router.py`](../sources/screen_router.py) | Classifies each phone's screen and launches the matching command; reached through `play.py`. |
 | [`sources/catch_ios.py`](../sources/catch_ios.py) | An iPhone the two catch loops drive like an Android: pixel-to-point taps, Excellent throw then flick. |
 | [`sources/catch_awarded_android.py`](../sources/catch_awarded_android.py) | Award-queue loop: reads the award card, starts each encounter, and drives the throw loop; reached through `catch.py`. |

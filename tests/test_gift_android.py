@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from tests import support as _test_support
 
+import tempfile
+from pathlib import Path
+
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -481,6 +484,8 @@ class SelectiveOpeningTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(gift, 'frame_point_saturation', return_value=99),
             mock.patch.object(gift, 'open_through_bag_full_notice',
                               new=mock.AsyncMock(return_value=False)),
+            mock.patch.object(gift, 'bag_full_page',
+                              new=mock.AsyncMock(return_value=False)),
             mock.patch.object(
                 gift, 'tap',
                 new=mock.AsyncMock(side_effect=lambda _, p: taps.append(p)),
@@ -532,6 +537,8 @@ class SelectiveOpeningTests(unittest.IsolatedAsyncioTestCase):
             ),
             mock.patch.object(gift, 'frame_point_saturation', return_value=99),
             mock.patch.object(gift, 'open_through_bag_full_notice',
+                              new=mock.AsyncMock(return_value=False)),
+            mock.patch.object(gift, 'bag_full_page',
                               new=mock.AsyncMock(return_value=False)),
             mock.patch.object(gift, 'tap', new=mock.AsyncMock()),
             mock.patch.object(gift, 'wait', new=mock.AsyncMock()),
@@ -672,6 +679,20 @@ class AdbBinaryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(gift.AutoGifterError) as raised:
                 await gift.setup()
         self.assertIn("tap blind", str(raised.exception))
+
+
+class BagFullPageTests(unittest.IsolatedAsyncioTestCase):
+    """OPEN on a full bag, with "open for Stardust only" off: the moto-g sat
+    on the Item Bag's upgrade banner and the run went no further (3 Nov)."""
+
+    async def test_open_onto_the_full_bag_stops_and_marks_it(self) -> None:
+        device = mock.Mock(serial='TESTSERIAL', label='test-phone')
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(gift, 'BAG_FULL_MARKERS', Path(folder)), \
+                mock.patch.object(gift, 'open_through_bag_full_notice', new=mock.AsyncMock(return_value=False)), \
+                mock.patch.object(gift, 'bag_full_page', new=mock.AsyncMock(return_value=True)):
+            gift.mark_bag_full(device)
+            self.assertTrue(gift.bag_full_marker('TESTSERIAL').exists())
 
 
 if __name__ == "__main__":

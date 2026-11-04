@@ -18,6 +18,23 @@ python play.py --plan
 python play.py --devices android-one ios-one
 ```
 
+## Start the day — `starter.py`
+
+Start with every phone on the map. Each phone runs four steps in order, side by side with the others:
+
+1. **mega** — Pokémon storage → TAGS → the `mega` tag, then every Pokémon in it: when its MEGA EVOLVE (or PRIMAL REVERSION) button shows the energy icon with no number, it is Mega Evolved. A number means it costs Mega Energy and it is skipped. Only one Pokémon can be Mega Evolved at a time, so each replaces the last; the point is the daily Mega Level progress. The Mega Level page's LEVEL UP is never pressed.
+2. **buddy** — the buddy's PLAY! screen: up to three berries (`--berries`, `--berry`, default Razz Berry), one snapshot, then petting until the mood ring at the top is all pink. Afterwards the buddy profile is read: *Give your buddy a treat*, *Play together* and *Take a snapshot* should each show a heart.
+3. **gifts** — the friends list, then `gift.py --all --gifts-only` for that phone.
+4. **gbl** — back to the map, then `gbl_day.py` for that phone.
+
+Buttons are found by their words (Vision OCR) and colours, not per-phone coordinates. A step that cannot reach its screen is reported and the phone moves on to the next one. `--dry-run` walks the mega and buddy screens and reports, but evolves, feeds, photographs and pets nothing (gifts and GBL are skipped); `--plan` only lists phones and steps; `--skip`/`--only` choose steps; `--tag` names another tag.
+
+```sh
+python starter.py --plan
+python starter.py --devices android-one --dry-run --only mega buddy
+python starter.py
+```
+
 ## Gifts and gym berries — `gift.py`
 
 Use an explicit `--count` for a supervised run. If neither `--count` nor `--all` is supplied, the public entry point chooses `--all`, capped at 100 cycles per phone by `--max-cycles`.

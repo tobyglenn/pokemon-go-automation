@@ -81,6 +81,15 @@ async def run_phone(device: Any, args: argparse.Namespace) -> int:
         if not args.dry_run:
             await catch_awarded_android.close_item_sheet(device)
         mode = await detect_mode(device, args)
+        if mode is None and not args.dry_run:
+            # The XP card a finished catch leaves up hides the award card
+            # behind it: ph-1 was passed over that way on 3 Nov 2026 with its
+            # queue still waiting.  Clearing only ever presses a screen it
+            # recognises, so a phone on anything else is left as it is.
+            directory = args.artifacts / device.label / "leftover"
+            directory.mkdir(parents=True, exist_ok=True)
+            await catch_awarded_android.clear_catch_screens(device, directory)
+            mode = await detect_mode(device, args)
         opening = 0
         while mode == "encounter" and not args.dry_run and opening < OPENING_ROUNDS:
             # A Pokemon already standing there belongs to whichever queue is
@@ -94,6 +103,13 @@ async def run_phone(device: Any, args: argparse.Namespace) -> int:
             await catch_awarded_android.clear_catch_screens(device, directory)
             await catch_awarded_android.close_item_sheet(device)
             mode = await detect_mode(device, args)
+        if mode is None and opening and not args.dry_run:
+            # The encounter caught above came from a queue, and its next card
+            # can take longer than the detect window to slide in: the moto
+            # called "nothing to catch" on 3 Nov 2026 with three still queued.
+            # The award loop waits for it properly.
+            print(f"[{device.label}] Caught the open encounter; waiting for its queue")
+            mode = "award"
         if mode in {None, "encounter"}:
             print(
                 f"[{device.label}] No award card, CLAIM button or encounter on screen; "

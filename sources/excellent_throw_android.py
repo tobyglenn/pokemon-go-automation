@@ -747,7 +747,10 @@ def ring_is_readable(
 
 
 def proven_throw_points(
-    ball: excellent_throw_ios.BallDetection, viewport: tuple[int, int]
+    ball: excellent_throw_ios.BallDetection,
+    viewport: tuple[int, int],
+    plate: tuple[int, int] | None = None,
+    reach: float = 1.0,
 ) -> tuple[list[int], list[int]]:
     """The moto's hand-verified flick, from wherever this ball rests.
 
@@ -760,9 +763,43 @@ def proven_throw_points(
     width, height = viewport
     end_y = max(
         round(height * PROVEN_THROW_CEILING),
-        round(ball.center_y - height * PROVEN_THROW_RISE),
+        round(ball.center_y - height * PROVEN_THROW_RISE * reach),
     )
-    return [ball.center_x, ball.center_y], [ball.center_x, end_y]
+    end_x = aimed_end_x(ball, end_y, viewport, plate)
+    return [ball.center_x, ball.center_y], [end_x, end_y]
+
+
+# A Pokemon whose plate is this close to the middle gets the straight flick.
+AIM_DEADBAND = 0.06
+# The flick never leans further sideways than this share of the width.
+AIM_MAX_LEAN = 0.25
+# The Pokemon's body sits this far below the middle of its name plate.
+PLATE_TO_BODY = 0.14
+
+
+def aimed_end_x(
+    ball: excellent_throw_ios.BallDetection,
+    end_y: int,
+    viewport: tuple[int, int],
+    plate: tuple[int, int] | None,
+) -> int:
+    """Where the flick ends sideways: under the Pokemon, not straight up.
+
+    The same rise, angled along the line from the ball to the Pokemon's body,
+    which is placed a fixed step below its plate.  A Pokemon in the middle
+    keeps the straight flick that is already proven.
+    """
+    width, height = viewport
+    if plate is None or abs(plate[0] - ball.center_x) < width * AIM_DEADBAND:
+        return ball.center_x
+    body_y = min(plate[1] + height * PLATE_TO_BODY, ball.center_y - height * 0.15)
+    # Measured on the proven length, not the swipe's: a longer reach is a
+    # harder throw, not a wider one.  Scaling it sent a +48% flick at a
+    # swaying Metang to the screen edge on 3 Nov 2026.
+    proven_rise = height * PROVEN_THROW_RISE
+    lean = (plate[0] - ball.center_x) * proven_rise / max(1.0, ball.center_y - body_y)
+    lean = max(-width * AIM_MAX_LEAN, min(width * AIM_MAX_LEAN, lean))
+    return round(ball.center_x + lean)
 
 
 async def calibrate_target(
@@ -1205,11 +1242,22 @@ async def wait_for_throw_result(device: AndroidDevice, artifact_dir: Path) -> bo
         else:
             ready_frames = 0
         await asyncio.sleep(0.30)
+    if last_image is not None and excellent_throw_ios.locate_encounter_buttons(last_image):
+        # The berry and ball buttons only stand on an open encounter; no catch
+        # summary or Pokemon page has them.  A legendary's break-out runs past
+        # this window, and on 3 Nov 2026 ph-1 called a Kyogre caught three
+        # times with its Ultra Ball still rising into the hand.
+        last_image.save(artifact_dir / "result-encounter-returned.jpg", "JPEG", quality=72)
+        print(f"[{device.label}] Encounter buttons still up; Pokemon still in encounter")
+        return False
     if last_image is not None:
         last_image.save(artifact_dir / "result-encounter-ended.jpg", "JPEG", quality=72)
     print(f"[{device.label}] Encounter ball stayed gone; catch/encounter completed")
     return True
 
+
+# The size record card's headline, as `gbl_vision.normalize` writes it.
+RECORD_CARD = re.compile(r"\bnew (?:\w+ )?record\b")
 
 # The two screens a catch leaves standing in front of the map.  Four reads is
 # the XP card, the Pokemon's own page, and one to confirm the map came back.
@@ -1282,14 +1330,21 @@ async def clear_catch_screens(device: AndroidDevice, artifact_dir: Path) -> None
             await asyncio.sleep(MENU_SETTLE)
             continue
 
+        # A "New Height Record" / "New Weight Record" card can slide up over
+        # the caught Pokemon's page and hide it, and its X sits where the
+        # page's own X does.  ph-1 sat on one for five minutes on 3 Nov 2026.
+        record = any(
+            RECORD_CARD.search(gbl_vision.normalize(box.text)) for box in boxes
+        )
         blocked = gbl_vision.blocked_label(boxes)
-        if blocked is not None and gbl_vision.normalize(blocked) == "power up":
+        if record or (blocked is not None and gbl_vision.normalize(blocked) == "power up"):
             if close is None:
                 close = await handset_close_button(device)
             if close is None:
                 print(f"[{device.label}] Caught Pokemon page, but no CLOSE_BTN on the phone")
                 return
-            print(f"[{device.label}] Caught Pokemon page, closing it at {close}")
+            what = "Size record card" if record else "Caught Pokemon page"
+            print(f"[{device.label}] {what}, closing it at {close}")
             await device.tap(close)
             await asyncio.sleep(MENU_SETTLE)
             continue
@@ -1307,6 +1362,9 @@ async def run_once(
     ring_hold: bool = False,
     lone_ball_reading: bool = False,
     berry: str = "nanab",
+    plate: tuple[int, int] | None = None,
+    plate_reader: Any = None,
+    reach: float = 1.0,
 ) -> bool:
     ball = await detect_encounter_ball(
         device, wait_seconds, artifact_dir, lone_reading_ok=lone_ball_reading
@@ -1356,7 +1414,14 @@ async def run_once(
     # A curve bonus is worth nothing next to a ball that actually leaves the
     # hand.
     if target is None:
-        start, end = proven_throw_points(ball, device.viewport)
+        # Read where the Pokemon stands now, just before the flick: a Metang
+        # on the oneplus on 3 Nov 2026 swung side to side, and a plate read
+        # before the ball settled sent two balls to where it had been.
+        if plate_reader is not None:
+            fresh = await plate_reader()
+            if fresh is not None:
+                plate = fresh
+        start, end = proven_throw_points(ball, device.viewport, plate, reach)
     else:
         start, end = excellent_throw_ios.straight_throw_points(
             ball, target, device.viewport, runtime

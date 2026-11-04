@@ -228,8 +228,15 @@ async def close_item_sheet(device: excellent_throw_android.AndroidDevice) -> boo
     image, _ts = await capture_frame(device)
     from . import berry_android
 
+    from . import trade_android
+
     rgba = image.convert("RGBA")
-    if berry_android.picker_sheet_top(rgba.width, rgba.height, 0, rgba.tobytes()) is None:
+    data = rgba.tobytes()
+    if berry_android.picker_sheet_top(rgba.width, rgba.height, 0, data) is None:
+        return False
+    # The size record card's bright panel reads as a sheet too, and the tap
+    # that puts a sheet away would land on the caught Pokemon's name.
+    if trade_android.has_record_card(rgba.width, rgba.height, 0, data):
         return False
     print(f"[{device.label}] An item sheet is up; putting it away")
     await device.tap(
@@ -257,7 +264,44 @@ async def encounter_open(device: excellent_throw_android.AndroidDevice) -> bool:
 
 
 async def read_legendary(device: Any, reads: int) -> tuple[bool, str | None]:
-    """(whether the name plate was read, the legendary it names if any).
+    """(whether the name plate was read, the legendary it names if any)."""
+    named, legendary, _plate = await read_plate(device, reads)
+    return named, legendary
+
+
+def plate_point(boxes: list[Any], scale: float) -> tuple[int, int] | None:
+    """Middle of the name plate, in full-frame pixels, or None.
+
+    The plate sits just above the Pokemon and follows it across the screen, so
+    its middle is where the Pokemon is standing.  The plate is read as one box
+    or as the name and "CP 343" apart, so every box on the CP box's line counts.
+    """
+    cp_box = next(
+        (
+            box
+            for box in boxes
+            if box.confidence >= OCR_CONFIDENCE
+            and PLATE.search(gbl_vision.normalize(box.text))
+        ),
+        None,
+    )
+    if cp_box is None:
+        return None
+    line = [
+        box
+        for box in boxes
+        if box.confidence >= OCR_CONFIDENCE
+        and abs(box.center_y - cp_box.center_y) <= max(cp_box.height, 1)
+    ]
+    left = min(box.x for box in line)
+    right = max(box.x + box.width for box in line)
+    return round((left + right) / 2 * scale), round(cp_box.center_y * scale)
+
+
+async def read_plate(
+    device: Any, reads: int
+) -> tuple[bool, str | None, tuple[int, int] | None]:
+    """(whether the name plate was read, the legendary it names, where it is).
 
     Every box, not just the plate's: the plate is sometimes read as "CP 2056"
     alone, with the name as a box of its own.
@@ -267,9 +311,11 @@ async def read_legendary(device: Any, reads: int) -> tuple[bool, str | None]:
             await asyncio.sleep(PLATE_POLL)
         image, _ts = await capture_frame(device)
         source = image
+        scale = 1.0
         if image.width > OCR_WIDTH:
+            scale = image.width / OCR_WIDTH
             source = image.resize(
-                (OCR_WIDTH, max(1, round(image.height * OCR_WIDTH / image.width)))
+                (OCR_WIDTH, max(1, round(image.height / scale)))
             )
         try:
             boxes = await asyncio.to_thread(gbl_vision.recognize, source)
@@ -277,8 +323,20 @@ async def read_legendary(device: Any, reads: int) -> tuple[bool, str | None]:
             continue
         texts = [box.text for box in boxes if box.confidence >= OCR_CONFIDENCE]
         if any(PLATE.search(gbl_vision.normalize(text)) for text in texts):
-            return True, legendary_pokemon.legendary_named(texts)
-    return False, None
+            return True, legendary_pokemon.legendary_named(texts), plate_point(boxes, scale)
+    return False, None, None
+
+
+# Each miss at the same Pokemon lengthens the flick by this much, up to
+# REACH_STEPS steps, then starts again from the proven length.  The user saw
+# every ball fall short of a Metang on the oneplus on 3 Nov 2026: the proven
+# length is right for most Pokemon but not for one standing further back.
+REACH_STEP = 0.12
+REACH_STEPS = 5
+
+
+def throw_reach(misses: int) -> float:
+    return 1.0 + REACH_STEP * (misses % REACH_STEPS)
 
 
 async def catch_one(
@@ -300,22 +358,38 @@ async def catch_one(
     fresh_encounter = args.nanab
     berry = "nanab"
     named = False
+    misses = 0
     for attempt in range(1, args.throws + 1):
         throw_dir = artifact_dir / f"throw-{attempt:02d}"
         throw_dir.mkdir(parents=True, exist_ok=True)
+        # The plate is read before every throw, not just the first: it says
+        # where the Pokemon is standing now.  ph-1 threw twelve balls straight
+        # up the middle on 3 Nov 2026 at a Tympole standing at the left edge.
+        plate_named, legendary, plate = await read_plate(
+            device, PLATE_READS if attempt == 1 else 1
+        )
         if not named:
-            named, legendary = await read_legendary(
-                device, PLATE_READS if attempt == 1 else 1
-            )
+            named = plate_named
             if legendary is not None:
                 print(
                     f"[{device.label}] {legendary} is legendary; "
                     "Silver Pinap and an Ultra Ball for every throw"
                 )
                 berry = "silver"
+        async def fresh_plate() -> tuple[int, int] | None:
+            return (await read_plate(device, 1))[2]
+
+        # The same aim on both platforms: the plate's position, read again
+        # just before the throw, and a longer flick after every miss.
+        aim = {
+            "plate": plate,
+            "plate_reader": fresh_plate,
+            "reach": throw_reach(misses),
+        }
         try:
             ended = await throw_once(
                 device,
+                **aim,
                 wait_seconds=args.wait,
                 artifact_dir=throw_dir,
                 dry_run=False,
@@ -344,6 +418,7 @@ async def catch_one(
             await asyncio.sleep(0.8)
             continue
         fresh_encounter = False
+        misses += 1
         if ended:
             return True
     print(f"[{device.label}] Encounter still open after {args.throws} throws")

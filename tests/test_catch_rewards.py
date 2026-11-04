@@ -125,7 +125,7 @@ class IPhoneThrowTests(unittest.IsolatedAsyncioTestCase):
         fed.assert_awaited_once()
         self.assertEqual(
             flick.await_args.kwargs,
-            {"rise": catch_ios.FLICK_RISE, "step_ms": catch_ios.FLICK_STEP_MS, "trust_hand": False},
+            {"rise": catch_ios.FLICK_RISE, "step_ms": catch_ios.FLICK_STEP_MS, "trust_hand": False, "aim_x": None},
         )
 
     async def test_a_ball_refused_twice_is_thrown_anyway(self) -> None:
@@ -142,6 +142,55 @@ class IPhoneThrowTests(unittest.IsolatedAsyncioTestCase):
             [call.kwargs["trust_hand"] for call in flick.await_args_list], [False, True]
         )
         self.assertEqual(phone.hand_refusals, 0)
+
+
+class IPhonePortedFixTests(unittest.IsolatedAsyncioTestCase):
+    """The SE, 3 Nov 2026: thirty balls at one Pokemon, and misses called catches."""
+
+    async def test_buttons_up_means_still_in_encounter(self) -> None:
+        phone = iphone()
+        with patch.object(catch_ios.excellent_throw_ios, "locate_throw_ball", lambda *_a: None), \
+                patch.object(catch_ios.excellent_throw_ios, "locate_encounter_buttons", lambda _i: ([1, 1], [2, 2])), \
+                patch("asyncio.sleep", AsyncMock()), \
+                patch.object(catch_ios, "RESULT_WINDOW", 0.05):
+            self.assertFalse(await phone.throw_result(Path(tempfile.mkdtemp())))
+
+    async def test_a_miss_flicks_harder_instead_of_the_curve(self) -> None:
+        phone = iphone()
+        thrower = type("Thrower", (), {"thrower": None, "stream": None, "berry": "nanab", "close": lambda self: None})()
+        curve = AsyncMock()
+        flick = AsyncMock(return_value=True)
+        with patch.object(catch_ios.gbl_ios, "open_excellent_thrower", lambda _s: thrower), \
+                patch.object(catch_ios.excellent_throw_ios, "run_once", curve), \
+                patch.object(catch_ios.gbl_ios, "throw_ball", flick):
+            self.assertTrue(await phone.throw(frame(), Path(tempfile.mkdtemp()), False, 1.24))
+        curve.assert_not_awaited()
+        self.assertAlmostEqual(flick.await_args.kwargs["rise"], catch_ios.FLICK_RISE * 1.24)
+        self.assertFalse(phone.flicking, "one encounter's misses do not end the curve for the run")
+
+
+class IPhoneAimTests(unittest.IsolatedAsyncioTestCase):
+    async def test_the_flick_leans_toward_a_fresh_plate_in_points(self) -> None:
+        phone = iphone()
+        phone.flicking = True
+        phone.plate = (375, 300)
+        phone.plate_reader = AsyncMock(return_value=(100, 300))  # pixels; 50 points
+        flick = AsyncMock(return_value=True)
+        with patch.object(catch_ios.gbl_ios, "throw_ball", flick):
+            self.assertTrue(await phone.throw(frame(), Path(tempfile.mkdtemp()), False))
+        aim_x = flick.await_args.kwargs["aim_x"]
+        ball = catch_ios.excellent_throw_ios.BallDetection(1.0, 187, 600, 56)
+        end_x = aim_x(ball, 200, (375, 667))
+        self.assertLess(end_x, 187)
+        self.assertGreaterEqual(end_x, 187 - round(375 * catch_ios.excellent_throw_android.AIM_MAX_LEAN))
+
+    async def test_no_plate_flicks_straight(self) -> None:
+        phone = iphone()
+        phone.flicking = True
+        flick = AsyncMock(return_value=True)
+        with patch.object(catch_ios.gbl_ios, "throw_ball", flick):
+            await phone.throw(frame(), Path(tempfile.mkdtemp()), False)
+        self.assertIsNone(flick.await_args.kwargs["aim_x"])
 
 
 class SelectionTests(unittest.TestCase):
@@ -191,11 +240,23 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         award.assert_not_awaited()
 
     async def test_an_unknown_screen_is_left_alone(self) -> None:
-        status, award, research, catch_one = await self.run_phone([None])
+        status, award, research, catch_one = await self.run_phone([None, None])
         self.assertEqual(status, 0)
         award.assert_not_awaited()
         research.assert_not_awaited()
         catch_one.assert_not_awaited()
+
+    async def test_a_caught_open_encounter_waits_for_its_queue(self) -> None:
+        """The moto, 3 Nov 2026: the card after a Kyogre came after the detect
+        window, and the run said there was nothing to catch."""
+        _status, award, _research, catch_one = await self.run_phone(["encounter", None])
+        catch_one.assert_awaited_once()
+        award.assert_awaited_once()
+
+    async def test_a_leftover_xp_card_is_cleared_to_reach_the_queue(self) -> None:
+        """ph-1 on 3 Nov 2026: the XP card hid the award card behind it."""
+        _status, award, _research, _catch = await self.run_phone([None, "award"])
+        award.assert_awaited_once()
 
     async def test_an_open_encounter_is_caught_before_the_queue_behind_it(self) -> None:
         _status, award, _research, catch_one = await self.run_phone(["encounter", "award"])

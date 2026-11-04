@@ -86,6 +86,13 @@ GUARD_RECOVER_DELAY = 3
 # run that cannot get through this many friends in a row is wedged, not unlucky,
 # and stopping is then the honest answer.
 GIFT_CYCLE_RETRIES = 3
+# Cycles in a row that open nothing and send nothing.  The list is re-sorted
+# "can receive a gift" first every cycle, so a top friend who can be sent
+# nothing means nobody can, and the next cycle reopens that same friend --
+# forever, as the SE did on 3 Nov with every gift for the day already sent.
+IDLE_CYCLE_LIMIT = 3
+# Cycles in a row that opened and sent nothing; no day allows more opens.
+OPEN_ONLY_LIMIT = 20
 # A flung profile keeps moving after the drag returns; tap before it settles
 # and the close X is still travelling under the finger.
 SCROLL_SETTLE = 1.5
@@ -997,6 +1004,27 @@ def run_gifts(
 
     return completed
 
+def friend_name(driver: webdriver.Remote) -> str | None:
+    """The trainer name at the top of a friend's profile or gift card, or None.
+
+    The tallest line of text in the top third; any failure is None, which only
+    means this cycle cannot be compared with the last.
+    """
+    try:
+        from . import gbl_vision
+
+        image = screenshot_image(driver)
+        if not isinstance(image, Image.Image):
+            return None
+        boxes = gbl_vision.recognize(image, (0, 0, image.width, image.height // 3))
+        named = [box for box in boxes if box.confidence >= 0.4 and len(box.text.strip()) >= 3]
+        if not named:
+            return None
+        return max(named, key=lambda box: box.height).text.strip()
+    except Exception:
+        return None
+
+
 def run_gifts_v3(
     driver: webdriver.Remote,
     config: dict[str, Any],
@@ -1019,6 +1047,12 @@ def run_gifts_v3(
     send_min_saturation = float(config.get("send_button_min_saturation", 60))
     completed = 0
     failures = 0
+    idle_cycles = 0
+    open_only = 0
+    # Past the invisible daily open cap OPEN is refused silently and the same
+    # top friend comes back every cycle (the SE, 3 Nov, 58 cycles).  An "open"
+    # of the friend the last cycle had is no progress.
+    last_friend: str | None = None
     outgoing_available = True
     # Last cycle's read of this friend's row. The send half never consults it.
     open_allowed = True
@@ -1161,9 +1195,11 @@ def run_gifts_v3(
             print(f"Gift {label}", flush=True)
             opened = False
             sent = False
+            friend: str | None = None
 
             if guard and not dry_run:
                 ensure_screen(driver, points, "OPEN_BTN", scroll, probe)
+                friend = friend_name(driver)
 
             if dry_run:
                 for name in (
@@ -1294,6 +1330,20 @@ def run_gifts_v3(
             completed += 1
             failures = 0
             if not outgoing_available:
+                return completed
+            open_only = open_only + 1 if (opened and not sent) else 0
+            repeat = friend is not None and friend == last_friend
+            if repeat and opened and not sent:
+                print(f"  Same friend as last cycle ({friend}); that open went nowhere", flush=True)
+            last_friend = friend
+            progressed = sent or (opened and not repeat and open_only <= OPEN_ONLY_LIMIT)
+            idle_cycles = 0 if progressed else idle_cycles + 1
+            if idle_cycles >= IDLE_CYCLE_LIMIT:
+                print(
+                    f"Stopping: {idle_cycles} friends in a row had no gift to open "
+                    "and could not be sent one; nothing is left to do",
+                    flush=True,
+                )
                 return completed
             if not sent and not colored_action_available(
                 driver, points["SORT_BTN"]

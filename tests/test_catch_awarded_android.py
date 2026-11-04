@@ -135,3 +135,40 @@ class AwardCardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlatePointTests(unittest.TestCase):
+    def test_the_plate_middle_spans_name_and_cp(self) -> None:
+        from sources import gbl_vision
+
+        boxes = [
+            gbl_vision.OCRBox("Tympole", 1.0, 10, 150, 80, 20),
+            gbl_vision.OCRBox("CP 343", 1.0, 110, 152, 60, 18),
+            gbl_vision.OCRBox("3894", 1.0, 300, 800, 40, 20),
+        ]
+        self.assertEqual(awarded.plate_point(boxes, 2.0), (180, 322))
+
+    def test_no_cp_means_no_plate(self) -> None:
+        from sources import gbl_vision
+
+        boxes = [gbl_vision.OCRBox("Tympole", 1.0, 10, 150, 80, 20)]
+        self.assertIsNone(awarded.plate_point(boxes, 1.0))
+
+
+class ThrowReachTests(unittest.TestCase):
+    """Every ball fell short of a Metang on 3 Nov 2026; misses lengthen the flick."""
+
+    def test_reach_grows_with_misses_then_starts_over(self) -> None:
+        reaches = [awarded.throw_reach(miss) for miss in range(6)]
+        self.assertEqual(reaches[0], 1.0)
+        self.assertTrue(all(b > a for a, b in zip(reaches[:4], reaches[1:5])))
+        self.assertEqual(reaches[5], 1.0)
+
+    def test_a_longer_reach_ends_the_flick_higher(self) -> None:
+        from sources import excellent_throw_android as throw, excellent_throw_ios
+
+        ball = excellent_throw_ios.BallDetection(0.9, 540, 2200, 200)
+        _start, proven = throw.proven_throw_points(ball, (1080, 2412))
+        _start, longer = throw.proven_throw_points(ball, (1080, 2412), None, 1.48)
+        self.assertLess(longer[1], proven[1])
+        self.assertGreaterEqual(longer[1], round(2412 * throw.PROVEN_THROW_CEILING))

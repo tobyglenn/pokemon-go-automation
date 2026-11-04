@@ -5,6 +5,7 @@ from tests import support as _test_support
 import asyncio
 import struct
 import time
+import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -891,7 +892,8 @@ class ThrowGeometryTests(unittest.TestCase):
         throw has to reach it -- that is the Regirock case."""
         source = Path(throw.__file__).read_text()
         run_once = source[source.index("async def run_once("):]
-        self.assertIn("if target is None:\n        start, end = proven_throw_points(", run_once)
+        self.assertIn("if target is None:\n", run_once)
+        self.assertIn("start, end = proven_throw_points(", run_once)
         self.assertIn("excellent_throw_ios.straight_throw_points(", run_once)
 
     def test_the_shadow_is_not_aimed_at_when_the_ring_is_unread(self) -> None:
@@ -977,3 +979,79 @@ class EmptyNanabPocketTests(unittest.IsolatedAsyncioTestCase):
             self.berry_android.pocket_known_empty("other-phone", "nanab"),
             "an empty bag on one phone was read onto the whole fleet",
         )
+
+
+class AimedThrowTests(unittest.TestCase):
+    """ph-1 threw twelve balls straight up at a Tympole standing at the left
+    edge on 3 Nov 2026.  The flick now leans toward the name plate."""
+
+    def ball(self, center_x, center_y, radius=180):
+        return excellent_throw_ios.BallDetection(0.9, center_x, center_y, radius)
+
+    def test_a_pokemon_off_to_the_left_is_thrown_at(self) -> None:
+        # Measured from ph-1's frame: plate at (324, 869), body near x=280.
+        start, end = throw.proven_throw_points(
+            self.ball(658, 2281), (1316, 2560), (324, 869)
+        )
+        self.assertEqual(start, [658, 2281])
+        self.assertLessEqual(end[0], 658 - round(1316 * throw.AIM_MAX_LEAN) + 1)
+        _start, straight = throw.proven_throw_points(self.ball(658, 2281), (1316, 2560))
+        self.assertEqual(end[1], straight[1], "the aim keeps the proven rise")
+
+    def test_a_longer_reach_leans_no_wider(self) -> None:
+        ball = self.ball(540, 2229)
+        _s, normal = throw.proven_throw_points(ball, (1080, 2412), (300, 800))
+        _s, longer = throw.proven_throw_points(ball, (1080, 2412), (300, 800), 1.48)
+        self.assertEqual(normal[0], longer[0])
+
+    def test_a_centred_pokemon_keeps_the_straight_flick(self) -> None:
+        _start, end = throw.proven_throw_points(
+            self.ball(540, 2229), (1080, 2412), (536, 814)
+        )
+        self.assertEqual(end[0], 540)
+
+    def test_the_aim_never_leaves_the_screen(self) -> None:
+        _start, end = throw.proven_throw_points(
+            self.ball(540, 2229), (1080, 2412), (5, 1700)
+        )
+        self.assertGreaterEqual(end[0], round(1080 * 0.05))
+
+
+class ThrowResultButtonsTests(unittest.IsolatedAsyncioTestCase):
+    """ph-1's Kyogre, 3 Nov 2026: no ball in the window, but the encounter's
+    berry and ball buttons were up, so the encounter was still open."""
+
+    async def result(self, buttons):
+        from unittest.mock import AsyncMock, patch
+        from PIL import Image
+
+        device = SimpleNamespace(
+            label="fake", viewport=(1080, 2400),
+            config=SimpleNamespace(result_capture_seconds=0.0),
+        )
+        frame = Image.new("RGB", (1080, 2400))
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(throw.asyncio, "sleep", AsyncMock()), \
+                patch.object(throw, "capture_frame", AsyncMock(return_value=(frame, 0.0))), \
+                patch.object(throw.excellent_throw_ios, "locate_throw_ball", return_value=None), \
+                patch.object(throw.excellent_throw_ios, "locate_encounter_buttons", return_value=buttons), \
+                patch.object(throw.time, "monotonic", side_effect=[0.0, 0.0, 99.0, 99.0]):
+            return await throw.wait_for_throw_result(device, Path(directory))
+
+    async def test_buttons_up_means_still_in_encounter(self) -> None:
+        self.assertFalse(await self.result(([160, 2280], [1150, 2280])))
+
+    async def test_no_ball_and_no_buttons_is_a_catch(self) -> None:
+        self.assertTrue(await self.result(None))
+
+
+class SizeRecordCardTests(unittest.TestCase):
+    """ph-1, 3 Nov 2026: a New Height Record card hid the caught page."""
+
+    def test_the_headlines_are_recognised(self) -> None:
+        from sources import gbl_vision
+
+        for text in ("New Height Record", "New Weight Record", "NEW SIZE RECORD"):
+            self.assertTrue(throw.RECORD_CARD.search(gbl_vision.normalize(text)), text)
+        for text in ("Pokemon caught", "Record a GO Snapshot", "Misdreavus"):
+            self.assertFalse(throw.RECORD_CARD.search(gbl_vision.normalize(text)), text)

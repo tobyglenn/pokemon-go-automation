@@ -610,3 +610,33 @@ class SilverPinapFeedTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutumnLeavesBallTests(unittest.TestCase):
+    """The oneplus on 3 Nov 2026: orange leaves above and below the ball read
+    as red paint, the merged band was too tall, and a Dedenne still on screen
+    was called a finished catch."""
+
+    def test_the_ball_is_found_among_leaves(self) -> None:
+        from PIL import Image, ImageDraw
+
+        frame = Image.new("RGB", (420, 938), (90, 110, 40))
+        draw = ImageDraw.Draw(frame)
+        for y in range(657, 910):
+            for x in range(120, 300, 5):
+                frame.putpixel((x, y), (210, 110, 40))
+        draw.ellipse((130, 672, 290, 832), fill=(60, 85, 225))
+        self.assertIsNone(
+            thrower._locate_throw_ball(frame, (420, 938), yellow=False)
+        )
+        from unittest.mock import patch
+
+        buttons = ([50, 850], [370, 850])
+        with patch.object(thrower, "locate_encounter_buttons", return_value=buttons):
+            found = thrower.locate_throw_ball(frame, (420, 938))
+        self.assertIsNotNone(found)
+        self.assertLess(abs(found.center_y - 752), 12)
+        # Without the encounter's corner buttons the loose read does not count:
+        # a pop-up's OK button passed it on the oneplus.
+        with patch.object(thrower, "locate_encounter_buttons", return_value=None):
+            self.assertIsNone(thrower.locate_throw_ball(frame, (420, 938)))

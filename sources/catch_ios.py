@@ -70,6 +70,10 @@ class IOSCatchPhone:
         self.berry = "nanab"
         # Flicks refused in a row for a ball that reads as an item.
         self.hand_refusals = 0
+        # Where the Pokemon's name plate is, in frame pixels, and how to read
+        # it again just before a flick.  Set per throw by `run_once`.
+        self.plate: tuple[int, int] | None = None
+        self.plate_reader: Any = None
 
     @classmethod
     def connect(cls, spec: pokemon_fleet.DeviceSpec) -> "IOSCatchPhone":
@@ -140,6 +144,9 @@ class IOSCatchPhone:
         ring_hold: bool = False,
         lone_ball_reading: bool = False,
         berry: str = "nanab",
+        reach: float = 1.0,
+        plate: tuple[int, int] | None = None,
+        plate_reader: Any = None,
     ) -> bool:
         """One ball: True when the encounter ended, as the Android routine says.
 
@@ -159,7 +166,9 @@ class IOSCatchPhone:
         if dry_run:
             print(f"[{self.label}] Dry-run: encounter detected, no touch sent")
             return False
-        if not await self.throw(image, artifact_dir, use_nanab):
+        self.plate = plate
+        self.plate_reader = plate_reader
+        if not await self.throw(image, artifact_dir, use_nanab, reach):
             # Most often a berry left in hand, which the flick has just swapped
             # back for a ball.  The loop counts it and looks again.
             raise excellent_throw_android.AndroidExcellentThrowError("no ball in hand to throw")
@@ -181,7 +190,9 @@ class IOSCatchPhone:
                 return None
             await asyncio.sleep(ENCOUNTER_POLL)
 
-    async def throw(self, image: Image.Image, artifact_dir: Path, use_nanab: bool) -> bool:
+    async def throw(
+        self, image: Image.Image, artifact_dir: Path, use_nanab: bool, reach: float = 1.0
+    ) -> bool:
         """The excellent routine while it will lock the circle, then the flick.
 
         Says whether a ball went.  The excellent routine stays open after it
@@ -194,7 +205,10 @@ class IOSCatchPhone:
                 self.flicking = True
         if self.thrower is not None:
             self.thrower.berry = self.berry
-        if self.thrower is not None and not self.flicking:
+        # After a miss, this encounter is flicked, each miss a little harder:
+        # the curve aims at a measured circle and has no length to lengthen,
+        # and the SE spent thirty balls at one Pokemon on 3 Nov 2026.
+        if self.thrower is not None and not self.flicking and reach <= 1.0:
             directory = artifact_dir / "excellent"
             directory.mkdir(parents=True, exist_ok=True)
             try:
@@ -232,15 +246,37 @@ class IOSCatchPhone:
         thrown = await gbl_ios.throw_ball(
             self.session,
             image,
-            rise=FLICK_RISE,
+            rise=FLICK_RISE * reach,
             step_ms=FLICK_STEP_MS,
             trust_hand=self.hand_refusals >= 1,
+            aim_x=await self.flick_aim(),
         )
         if thrown:
             self.hand_refusals = 0
         elif self.ball_visible(image):
             self.hand_refusals += 1
         return thrown
+
+    async def flick_aim(self) -> Any:
+        """The sideways lean for the next flick, or None to flick straight.
+
+        As on Android: the plate rides with the Pokemon, and a swaying Metang
+        on the SE took nineteen straight flicks on 3 Nov 2026 without one
+        landing.  Read again just before the flick, and capped.
+        """
+        plate = self.plate
+        if self.plate_reader is not None:
+            fresh = await self.plate_reader()
+            if fresh is not None:
+                plate = fresh
+        if plate is None:
+            return None
+        target = tuple(self._points(*plate))
+
+        def aim_x(ball: Any, end_y: int, viewport: tuple[int, int]) -> int:
+            return excellent_throw_android.aimed_end_x(ball, end_y, viewport, target)
+
+        return aim_x
 
     async def feed_nanab(self, image: Image.Image, artifact_dir: Path) -> Image.Image:
         """Feed a Nanab before a flick; hand back the frame to throw from."""
@@ -273,6 +309,12 @@ class IOSCatchPhone:
             else:
                 returned = 0
             await asyncio.sleep(RESULT_POLL)
+        if last is not None and excellent_throw_ios.locate_encounter_buttons(last):
+            # As on Android: the berry and ball buttons only stand on an open
+            # encounter, so a ball not yet back in hand is not a catch.
+            last.save(artifact_dir / "result-encounter-returned.jpg", "JPEG", quality=72)
+            print(f"[{self.label}] Encounter buttons still up; Pokemon still in encounter")
+            return False
         if last is not None:
             last.save(artifact_dir / "result-encounter-ended.jpg", "JPEG", quality=72)
         print(f"[{self.label}] Encounter ball stayed gone; catch/encounter completed")

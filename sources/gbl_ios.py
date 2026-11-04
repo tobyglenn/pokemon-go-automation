@@ -1819,8 +1819,12 @@ async def throw_ball(
     rise: float = ENCOUNTER_THROW_RISE,
     step_ms: int = ENCOUNTER_THROW_MS,
     trust_hand: bool = False,
+    aim_x: Any = None,
 ) -> bool:
     """Flick the encounter ball straight up the screen.  Says whether it went.
+
+    `aim_x(ball, end_y, viewport)` leans the flick sideways to the x it
+    returns, in points; GBL leaves it unset and keeps the straight flick.
 
     `trust_hand` skips the ball-or-item test, for a caller that has already
     swapped a ball in and seen the test refuse it anyway.
@@ -1850,9 +1854,14 @@ async def throw_ball(
         int(viewport[1] * ENCOUNTER_THROW_CEILING),
         ball.center_y - int(viewport[1] * rise),
     )
+    end_x = ball.center_x if aim_x is None else aim_x(ball, end_y, viewport)
     rise = end_y - ball.center_y
+    lean = end_x - ball.center_x
     path = [
-        [ball.center_x, ball.center_y + round(rise * step / ENCOUNTER_THROW_STEPS)]
+        [
+            ball.center_x + round(lean * step / ENCOUNTER_THROW_STEPS),
+            ball.center_y + round(rise * step / ENCOUNTER_THROW_STEPS),
+        ]
         for step in range(ENCOUNTER_THROW_STEPS + 1)
     ]
     await device.trace_path(path, step_ms)
