@@ -32,6 +32,7 @@ Run from the checkout root, e.g. `python scripts/fleet.py status`; on another co
 | [`scripts/inventory_scanner_ios.py`](../scripts/inventory_scanner_ios.py) | iOS storage scan feeding the evaluator. |
 | [`scripts/build_backend.py`](../scripts/build_backend.py) | Build-only delegation to setuptools, with source-archive ownership header metadata normalized before release. |
 | [`scripts/check_public_tree.py`](../scripts/check_public_tree.py) | Privacy check of staged content and reachable history. |
+| [`scripts/raid_prep.py`](../scripts/raid_prep.py) | Supervised raid-attacker preparation (evolve, power up to level 40, tag, Mega Evolve). Spends candy and Stardust: start with `--plan`. Runs on this computer only. |
 
 `scripts/send_gifts.py`, `scripts/battle_league.py`, `scripts/trade_pokemon.py`, `scripts/transfer_pokemon.py`, `scripts/feed_berries.py`, and `scripts/pokemon_fleet.py` are the older long command names, kept for compatibility; they run exactly what `gift.py`, `gbl.py`, `trade.py`, `luckytrash.py`, `scripts/berry.py`, and `scripts/fleet.py` run.
 
@@ -45,7 +46,8 @@ Run from the checkout root, e.g. `python scripts/fleet.py status`; on another co
 | [`sources/config_paths.py`](../sources/config_paths.py) | Resolve external private config and state paths independently of the current working directory. |
 | [`sources/fleet_watchdog.py`](../sources/fleet_watchdog.py) | Monitor automation progress and attached hardware; stop stalled or disconnected runs. |
 | [`sources/ios_attached_devices.py`](../sources/ios_attached_devices.py) | Discover attached iOS devices for readiness and selection. |
-| [`sources/ios_wda_cleanup.py`](../sources/ios_wda_cleanup.py) | Handle WebDriverAgent cleanup associated with iOS sessions. |
+| [`sources/ios_wda_cleanup.py`](../sources/ios_wda_cleanup.py) | WebDriverAgent cleanup, plus what every iOS worker shares: the XCUITest capabilities, the one-retry session start for a preinstalled runner, stale-session detection, and the per-iPhone lock file. |
+| [`sources/android_common.py`](../sources/android_common.py) | ADB plumbing every Android worker shares: the adb binary (the same one the fleet layer uses), the foldable display probe, the swipe tap, screen capture and framebuffer parsing, and pulling/validating the on-phone `AutoTraderConfig.yaml` into private state. |
 | [`pokemon_go_automation/`](../pokemon_go_automation/) | Installable package and `pogo` console interface. |
 
 ## Workflow workers
@@ -72,6 +74,8 @@ Run from the checkout root, e.g. `python scripts/fleet.py status`; on another co
 | [`sources/raid_math.py`](../sources/raid_math.py) | CP/HP, the level-and-IV solver, power-up costs, and the raid DPS/TDO rating. |
 | [`sources/raid_meta.py`](../sources/raid_meta.py) | Per-type rankings computed from the game master, and the species list the scan searches. |
 | [`sources/raid_plan.py`](../sources/raid_plan.py) | Turns one account's scan into the per-type candy and XL plan and its report. |
+| [`sources/raid_prep_android.py`](../sources/raid_prep_android.py), [`sources/raid_prep_ios.py`](../sources/raid_prep_ios.py) | Platform hands for `scripts/raid_prep.py`. They refuse rather than guess: an expected CP that is not on the grid, a power-up dialog that did not open, or a missing confirm button stops the step. |
+| [`sources/raid_prep_common.py`](../sources/raid_prep_common.py) | Result types and power-up dialog reads both raid-prep workers share. |
 | [`sources/vision_ocr.py`](../sources/vision_ocr.py) | Apple Vision text recognition with bounding boxes, built once into the private state directory. Bounding boxes are what let the candy rows be told apart; bare text lines cannot. |
 | [`sources/starter.py`](../sources/starter.py) | The start-of-day steps: mega tag walk, buddy play screen, heart check, and the hand-off to `gift.py` and `gbl_day.py`; reached through `starter.py`. |
 | [`sources/screen_router.py`](../sources/screen_router.py) | Classifies each phone's screen and launches the matching command; reached through `play.py`. |
