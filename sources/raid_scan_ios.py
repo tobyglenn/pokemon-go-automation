@@ -87,7 +87,7 @@ IOS_APP_FRONTMOST = 4
 DELETE_KEY = chr(0xE003)
 # Android clears the field with 48 DELs; the iPhone SE keyboard is shorter than
 # any species name in the roster, so the same run is enough here too.
-CLEAR_KEYS = 48
+CLEAR_KEYS = 120  # trade filters run past 48
 
 # A cell may be tapped between these two fractions of the screen height.  The
 # band is wide because the scan types with the keyboard still up, and the

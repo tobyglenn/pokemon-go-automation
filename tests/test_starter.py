@@ -162,7 +162,8 @@ class ColourTests(unittest.TestCase):
 
 class ArgumentTests(unittest.TestCase):
     def test_steps(self):
-        self.assertEqual(starter.parse_args([]).steps, list(starter.STEPS))
+        self.assertEqual(starter.parse_args([]).steps, ["mega", "buddy", "bag", "gifts", "gbl"])
+        self.assertIn("trade", starter.parse_args(["--trade"]).steps)
         self.assertEqual(starter.parse_args(["--skip", "gbl"]).steps, ["mega", "buddy", "bag", "gifts"])
         self.assertEqual(starter.parse_args(["--only", "buddy", "mega"]).steps, ["mega", "buddy"])
         with self.assertRaises(SystemExit):

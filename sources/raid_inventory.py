@@ -449,6 +449,13 @@ def search_text_matches(boxes: Sequence[vision_ocr.TextBox], term: str, height: 
         for candidate in candidates:
             if candidate == wanted or (loose and re.sub(r"[*,&!]", "", candidate) == loose):
                 return True
+            # A long filter overflows the field, which then shows only its end.
+            # The end is accepted when it is long and carries the whole last
+            # clause -- the species, which trade searches put last.
+            last = wanted.rsplit("&", 1)[-1]
+            if (len(candidate) >= 16 and len(wanted) > len(candidate) and wanted.endswith(candidate)
+                    and len(last) >= 3 and candidate.endswith(last) and "&" in candidate):
+                return True
     return False
 
 

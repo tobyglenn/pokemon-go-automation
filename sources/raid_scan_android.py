@@ -210,7 +210,7 @@ class AndroidPhone:
         clear glyph would need its position, and that position is not the same
         fraction of the screen on a 720x1600 handset as on a 1316x2560 one.
         """
-        keys = ["KEYCODE_MOVE_END"] + ["KEYCODE_DEL"] * 48
+        keys = ["KEYCODE_MOVE_END"] + ["KEYCODE_DEL"] * 120  # trade filters run past 48
         self._run("shell", "input", "keyevent", *keys, timeout=25)
         time.sleep(settle)
 

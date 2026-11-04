@@ -35,7 +35,10 @@ from PIL import Image
 from . import config_paths, gbl_home_recovery as home, gbl_vision, gift_android, pokemon_fleet, screen_router
 
 ROOT = Path(__file__).resolve().parent.parent
-STEPS = ("mega", "buddy", "bag", "gifts", "gbl")
+STEPS = ("mega", "buddy", "bag", "gifts", "trade", "gbl")
+# Run on every phone before the pair trades, and after it.
+BEFORE_TRADE = {"mega", "buddy", "bag", "gifts"}
+AFTER_TRADE = {"gbl"}
 OCRBox = gbl_vision.OCRBox
 
 POLL_GAP = 1.0
@@ -99,7 +102,7 @@ BERRY_CHIP_X = (0.139, 0.075)   # the X on the berry chip, top-left (moto-g, one
 # XP bar, opened by a mistimed FRIENDS tap on the SE, 4 Nov) has a teal X where
 # the Poke Ball would be, and GBL then took its panels for league cards.
 MAP_OVERLAY_WORDS = ("use lucky egg", "new bonuses unlocked", "see details",
-                     "level requirements")
+                     "level requirements", "caught while using incense")
 GOLDEN_RAZZ = "golden razz"   # its tile wraps: "GOLDEN RAZZ" / "BERRY"
 GOLDEN_KEEP = 15     # Golden Razz feeds the buddy only above this many
 GIFT_BAG_ROUNDS = 6   # bag clears between gift runs before giving up
@@ -512,6 +515,15 @@ class Phone:
                 return False, image, boxes
             await asyncio.sleep(POLL_GAP)
 
+    async def ios_keyboard(self) -> bool:
+        """The SE's dark keyboard draws no key OCR can read; WDA knows it is up."""
+        if not self.ios:
+            return False
+        try:
+            return bool(await asyncio.to_thread(lambda: self.target.device.driver.is_keyboard_shown()))
+        except Exception:
+            return False
+
     async def go_home(self) -> Image.Image:
         """Back out to the map; a few tries, then the game's own restore."""
         for attempt in range(7):
@@ -527,6 +539,25 @@ class Phone:
                 await self.tap(close_button(image) or [image.width // 2, int(image.height * 0.933)], image)
                 await asyncio.sleep(2)
                 continue
+            boxes = await asyncio.to_thread(gbl_vision.recognize, image)
+            # Cards whose only way off is their own button: the Weekly
+            # Challenge (SE, 4 Nov) and similar progress cards say LET'S GO!.
+            go = find_box(boxes, "let s go", "lets go") if find_box(boxes, "weekly challenge", "challenge") else None
+            if go is not None:
+                self.say("pressing LET'S GO! on a challenge card")
+                await self.tap_box(go, image)
+                await asyncio.sleep(2)
+                continue
+            # An egg hatching ("Oh?", then the Pokemon) waits for taps, and
+            # BACK does nothing to it (oneplus, 4 Nov).
+            if find_box(boxes, "oh", exact=True) or find_box(boxes, "hatched"):
+                if keyboard_up(boxes) and not self.ios:
+                    await asyncio.to_thread(self.target._adb, "shell", "input keyevent 4")
+                self.say("an egg is hatching; tapping through it")
+                for _ in range(6):
+                    await asyncio.sleep(3)
+                    await self.tap([image.width // 2, int(image.height * 0.45)], image)
+                continue
             if attempt == 3:
                 await self.target.restore()
                 await asyncio.sleep(3)
@@ -535,20 +566,37 @@ class Phone:
                 # A confirmation card left by an interrupted run covers the
                 # close button; its NO is the safe way off it.
                 boxes = await asyncio.to_thread(gbl_vision.recognize, image)
-                if keyboard_up(boxes):
+                if keyboard_up(boxes) or await self.ios_keyboard():
                     # Storage's search field took focus (seen on the SE); the
                     # keyboard covers the close button until it goes.
                     if self.ios:
                         # WDA refuses hide_keyboard in the game; the grey X
                         # beside the search field cancels it (SE, 375x667).
-                        if not await self.target.device.hide_keyboard():
+                        # A hide WDA reports as done can leave it up (4 Nov), so look again.
+                        hidden = await self.target.device.hide_keyboard()
+                        if hidden:
+                            await asyncio.sleep(1)
+                            image = await self.look()
+                            hidden = not (keyboard_up(await asyncio.to_thread(gbl_vision.recognize, image))
+                                          or await self.ios_keyboard())
+                        if not hidden:
                             await self.tap([int(image.width * SEARCH_CANCEL[0]),
                                             int(image.height * SEARCH_CANCEL[1])], image)
                     else:
                         await asyncio.to_thread(self.target._adb, "shell", "input keyevent 4")
+                        await asyncio.sleep(1.5)
+                        if keyboard_up(await asyncio.to_thread(gbl_vision.recognize, await self.look())):
+                            # Gboard can stay drawn over the game with nothing
+                            # focused, and BACK then reaches the game's exit
+                            # prompt instead (oneplus, 4 Nov).  Stopping the
+                            # keyboard app is the one thing that took it down.
+                            await asyncio.to_thread(self.target._adb, "shell",
+                                                    "am force-stop com.google.android.inputmethod.latin")
                     await asyncio.sleep(1.5)
                     continue
-                no = find_box(boxes, "no", exact=True)
+                # "Do you want to exit Pokemon GO?" answers to CANCEL; its OK quits.
+                no = find_box(boxes, "no", exact=True) or (
+                    find_box(boxes, "cancel", exact=True) if find_box(boxes, "exit pokemon go") else None)
                 if no is not None and find_box(boxes, "do you") is not None:
                     await self.tap_box(no, image)
                     await asyncio.sleep(1.5)
@@ -591,16 +639,21 @@ class Report:
 
 
 async def open_storage(phone: Phone) -> tuple[Image.Image, list[OCRBox]]:
-    image = await phone.go_home()
-    ball = home.find_pokeball(image)
-    if ball is None:
-        raise StepFailed("no Poke Ball button on the map")
-    await phone.tap(ball, image)
-    # The menu animates in: wait for the POKEMON label itself, not just any two.
-    ok, image, boxes = await phone.settle(
-        lambda _i, b: gbl_vision.main_menu_visible(b) and find_box(b, "pokemon", exact=True) is not None)
-    if not ok:
-        raise StepFailed("the main menu did not open")
+    for attempt in range(3):
+        image = await phone.go_home()
+        ball = home.find_pokeball(image)
+        if ball is None:
+            raise StepFailed("no Poke Ball button on the map")
+        await phone.tap(ball, image)
+        # The menu animates in: wait for the POKEMON label itself, not just any two.
+        ok, image, boxes = await phone.settle(
+            lambda _i, b: gbl_vision.main_menu_visible(b) and find_box(b, "pokemon", exact=True) is not None)
+        if ok:
+            break
+        # A tap the map swallowed (ph-1, oneplus, 4 Nov): look again and retry.
+        phone.say(f"the main menu did not open; trying again ({attempt + 1}/3)")
+    else:
+        raise StepFailed(f"the main menu did not open (screen saved: {phone.save(image, 'no-menu')})")
     label = find_box(boxes, "pokemon", exact=True)
     if label is None:
         raise StepFailed("no POKEMON button on the main menu")
@@ -1507,8 +1560,10 @@ async def with_phone(spec: pokemon_fleet.DeviceSpec, args: argparse.Namespace,
             await target.close()
 
 
-async def run_phone(spec: pokemon_fleet.DeviceSpec, args: argparse.Namespace) -> list[Report]:
+async def run_phone(spec: pokemon_fleet.DeviceSpec, args: argparse.Namespace,
+                    phase: set[str] | None = None) -> list[Report]:
     name = spec.name
+    wanted = [step for step in args.steps if phase is None or step in phase]
     reports: list[Report] = []
 
     async def step(label: str, work: Callable[[Phone], Awaitable[Report | None]]) -> bool:
@@ -1525,13 +1580,13 @@ async def run_phone(spec: pokemon_fleet.DeviceSpec, args: argparse.Namespace) ->
             return report.ok
         return True
 
-    if "mega" in args.steps:
+    if "mega" in wanted:
         await step("mega", lambda phone: mega_step(phone, args.tag))
-    if "buddy" in args.steps:
+    if "buddy" in wanted:
         await step("buddy", lambda phone: buddy_step(phone, args.berries, args.berry))
-    if "bag" in args.steps:
+    if "bag" in wanted:
         await step("bag", bag_step)
-    if "gifts" in args.steps and not args.dry_run:
+    if "gifts" in wanted and not args.dry_run:
         async def to_friends(phone: Phone) -> None:
             await walk_to_friends(phone)
         # gift.py stops when OPEN meets a full Item Bag and leaves a marker;
@@ -1556,13 +1611,32 @@ async def run_phone(spec: pokemon_fleet.DeviceSpec, args: argparse.Namespace) ->
                 break
         else:
             reports.append(Report("gifts", False, f"stopped after {GIFT_BAG_ROUNDS} bag clears"))
-    if "gbl" in args.steps and not args.dry_run:
+    if "gbl" in wanted and not args.dry_run:
         async def to_map(phone: Phone) -> None:
             await phone.go_home()
         if await step("walk to map", to_map):
             code = await launch(name, gbl_command(name))
             reports.append(Report("gbl", code == 0, f"gbl_day.py exited {code}"))
     return reports
+
+
+async def trade_here(here: Sequence[pokemon_fleet.DeviceSpec], args: argparse.Namespace) -> Report | None:
+    """The two phones on this computer trade each other (sources/starter_trade.py)."""
+    if len(here) != 2:
+        print(f"[trade] skipped: {len(here)} phone(s) on this computer; trading needs exactly two", flush=True)
+        return Report("trade", True, f"skipped: {len(here)} phone(s) here, trading needs a pair")
+    from . import starter_trade
+    print(f"[trade] {here[0].name} + {here[1].name}: counting raid families", flush=True)
+    try:
+        report = await starter_trade.trade_step(here, args)
+    except (StepFailed, home.HomeRecoveryError, pokemon_fleet.FleetError) as exc:
+        report = Report("trade", False, str(exc))
+    except Exception as exc:  # the pair's surprise must not stop GBL
+        report = Report("trade", False, f"{type(exc).__name__}: {exc}")
+    for line in report.lines:
+        print(f"[trade]   {line}", flush=True)
+    print(f"[trade] {'done' if report.ok else 'PROBLEM'}: {report.detail}", flush=True)
+    return report
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -1585,7 +1659,15 @@ async def run(args: argparse.Namespace) -> int:
             if "gbl" in args.steps:
                 print(f"[{spec.name}]   then " + " ".join(gbl_command(spec.name)))
         return 0
-    results = await asyncio.gather(*(run_phone(spec, args) for spec in here))
+    results = await asyncio.gather(*(run_phone(spec, args, BEFORE_TRADE) for spec in here))
+    if "trade" in args.steps and not args.dry_run:
+        pair_report = await trade_here(here, args)
+        if pair_report is not None:
+            for reports in results:
+                reports.append(pair_report)
+    after = await asyncio.gather(*(run_phone(spec, args, AFTER_TRADE) for spec in here))
+    for reports, more in zip(results, after):
+        reports.extend(more)
     print("\nSummary", flush=True)
     failed = False
     for spec, reports in zip(here, results):
@@ -1605,13 +1687,22 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--berry", default="razz berry", help="which berry to feed (default: razz berry)")
     parser.add_argument("--shots", type=Path, default=None, help="where to keep step screenshots")
     parser.add_argument("--plan", action="store_true", help="list the phones and steps; touch nothing")
+    parser.add_argument("--trade", action="store_true",
+                        help="include the trade step (off by default until proven live)")
+    parser.add_argument("--trades", type=int, default=100,
+                        help="most trades the pair makes today (default: 100, the game's limit)")
+    parser.add_argument("--reuse-counts", action="store_true",
+                        help="trade from the counts an earlier run saved in the last two hours")
+    parser.add_argument("--trade-plan", dest="trade_plan_only", action="store_true",
+                        help="count and print the trades, but make none")
     parser.add_argument("--dry-run", action="store_true",
                         help="walk the mega and buddy screens and report, but evolve, feed, "
                              "photograph and pet nothing; gifts and GBL are skipped")
     args = parser.parse_args(arguments)
     if not 0 <= args.berries <= 3:
         parser.error("--berries must be 0 to 3")
-    chosen = args.only or list(STEPS)
+    # Trading stays opt-in until a whole trade has been seen through live.
+    chosen = args.only or [step for step in STEPS if step != "trade" or args.trade]
     args.steps = [step for step in STEPS if step in chosen and step not in args.skip]
     if not args.steps:
         parser.error("no steps left to run")
