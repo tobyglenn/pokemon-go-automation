@@ -13,16 +13,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import deque
-from contextlib import contextmanager
 import dataclasses
 from dataclasses import dataclass
-import fcntl
 import io
 import math
 from pathlib import Path
 import threading
 import time
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, ContextManager, Iterable, Sequence
 import urllib.request
 
 import yaml
@@ -823,6 +821,36 @@ def _ring_pixel(rgb: tuple[int, int, int]) -> float:
     return 1.0 if green_to_yellow or orange_to_red else 0.0
 
 
+def _ring_mask(frame: Image.Image, viewport: tuple[int, int]) -> Image.Image:
+    """`_ring_pixel` over the whole viewport as an "L" mask, from channel operations.
+
+    The per-pixel Python version cost a large share of each frame in the throw
+    loop, where a late read is a late release.
+    """
+    width, height = viewport
+    red, green, blue = frame.convert("RGB").crop((0, 0, width, height)).split()
+    lighter, darker, subtract = ImageChops.lighter, ImageChops.darker, ImageChops.subtract
+
+    def above(channel: Image.Image, floor: int) -> Image.Image:
+        return channel.point(lambda value: 255 if value > floor else 0)
+
+    def below(channel: Image.Image, ceiling: int) -> Image.Image:
+        return channel.point(lambda value: 255 if value < ceiling else 0)
+
+    def both(*masks: Image.Image) -> Image.Image:
+        result = masks[0]
+        for mask in masks[1:]:
+            result = ImageChops.multiply(result, mask)
+        return result
+
+    high = lighter(lighter(red, green), blue)
+    low = darker(darker(red, green), blue)
+    colourful = both(above(high, 135), above(subtract(high, low), 50))
+    green_to_yellow = both(above(green, 120), below(blue, 135), above(subtract(green, blue), 35))
+    orange_to_red = both(above(red, 140), below(green, 200), below(blue, 130))
+    return both(colourful, lighter(green_to_yellow, orange_to_red))
+
+
 def _circle_score(
     pixels: Any, center_x: int, center_y: int, radius: int, width: int, height: int
 ) -> float:
@@ -887,15 +915,7 @@ def _ring_component_seeds(
     """Find saturated ring-shaped components before doing precise circle scoring."""
     width, height = viewport
     pixels = frame.load()
-    mask = Image.new("L", (width, height))
-    mask.putdata(
-        [
-            255 if _ring_pixel(pixels[x, y]) else 0
-            for y in range(height)
-            for x in range(width)
-        ]
-    )
-    expanded = mask.filter(ImageFilter.MaxFilter(5))
+    expanded = _ring_mask(frame, viewport).filter(ImageFilter.MaxFilter(5))
     expanded_pixels = expanded.load()
     left, right = round(width * 0.16), round(width * 0.84)
     top, bottom = round(height * 0.10), round(height * 0.70)
@@ -2735,18 +2755,10 @@ async def run_single_shot(
     return False
 
 
-@contextmanager
-def device_lock(udid: str) -> Iterator[None]:
-    LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    handle = (LOCK_DIR / f"{udid}.lock").open("a+")
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ExcellentThrowError("This iPhone is already controlled by another automation") from exc
-        yield
-    finally:
-        handle.close()
+def device_lock(udid: str) -> ContextManager[None]:
+    return ios_wda_cleanup.device_lock(
+        udid, LOCK_DIR, ExcellentThrowError, "This iPhone is already controlled by another automation"
+    )
 
 
 

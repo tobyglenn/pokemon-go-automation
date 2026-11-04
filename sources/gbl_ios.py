@@ -30,15 +30,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
 import io
 import os
-import subprocess
 from pathlib import Path
 import time
-from typing import Any, Iterator, Sequence
+from typing import Any, ContextManager, Sequence
 
 import yaml
 from PIL import Image
@@ -441,7 +438,12 @@ class IOSGBLDevice:
         def _start_session_via_devicectl(prefer_devicectl: str) -> Any:
             os.environ["APPIUM_XCUITEST_PREFER_DEVICECTL"] = prefer_devicectl
             if prefer_devicectl == "false":
-                subprocess.run(["pkill", "-f", "appium"], check=False)
+                # The setting is read when Appium starts, so the server has to
+                # restart -- but only this one, and only while no other phone
+                # is using it.
+                from . import pokemon_fleet
+
+                pokemon_fleet.stop_idle_appium_server(config.appium_server_url)
             return _start_session_once()
 
         def _connect_and_create() -> "IOSGBLDevice":
@@ -3448,19 +3450,10 @@ async def probe(
     return state
 
 
-@contextmanager
-def device_lock(udid: str) -> Iterator[None]:
-    LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    path = LOCK_DIR / f"{udid}.lock"
-    handle = path.open("a+")
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise IOSGBLError("This iPhone is already controlled by another fleet command") from exc
-        yield
-    finally:
-        handle.close()
+def device_lock(udid: str) -> ContextManager[None]:
+    return ios_wda_cleanup.device_lock(
+        udid, LOCK_DIR, IOSGBLError, "This iPhone is already controlled by another fleet command"
+    )
 
 
 def parse_args() -> argparse.Namespace:

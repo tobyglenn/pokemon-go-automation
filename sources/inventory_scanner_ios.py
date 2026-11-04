@@ -8,55 +8,30 @@ using native Apple Vision OCR / Tesseract, and feeds the scanned inventory into 
 
 from __future__ import annotations
 
+import io
 import re
-import subprocess
 import time
 from pathlib import Path
 
-from . import config_paths, gbl_evaluator, ios_wda_cleanup, pokemon_fleet
+from PIL import Image
 
-SWIFT_OCR_PATH = Path("/tmp/ocr_mac")
+from . import config_paths, gbl_evaluator, ios_wda_cleanup, pokemon_fleet, vision_ocr
 
 
-def ensure_ocr_utility() -> Path:
-    """Compiles native Swift Vision OCR utility if not already compiled."""
-    if SWIFT_OCR_PATH.is_file():
-        return SWIFT_OCR_PATH
-    
-    swift_code = """
-import Foundation
-import Vision
-import AppKit
+def ocr_lines(image: Image.Image) -> list[str]:
+    """The text lines Apple Vision reads in `image`, in its reading order.
 
-guard CommandLine.arguments.count > 1 else { exit(1) }
-let path = CommandLine.arguments[1]
-guard let image = NSImage(contentsOfFile: path),
-      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { exit(1) }
-
-let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-let request = VNRecognizeTextRequest { req, err in
-    guard let results = req.results as? [VNRecognizedTextObservation] else { return }
-    for obs in results {
-        if let text = obs.topCandidates(1).first?.string {
-            print(text)
-        }
-    }
-}
-request.recognitionLevel = .accurate
-try? handler.perform([request])
-"""
-    code_path = Path("/tmp/ocr.swift")
-    code_path.write_text(swift_code)
-    subprocess.run(["swiftc", str(code_path), "-o", str(SWIFT_OCR_PATH)], check=True)
-    return SWIFT_OCR_PATH
+    Uses the shared helper in vision_ocr, which builds into the private state
+    directory.  This module used to compile its own copy to /tmp/ocr_mac and
+    run whatever binary it found at that shared path.
+    """
+    return [box.text.strip() for box in vision_ocr.ocr(image) if box.text.strip()]
 
 
 def ocr_image_text(image_path: Path) -> list[str]:
-    """Extracts text lines from an image using native Apple Vision OCR."""
-    ocr_bin = ensure_ocr_utility()
-    res = subprocess.run([str(ocr_bin), str(image_path)], capture_output=True, text=True, check=False)
-    lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-    return lines
+    """Extracts text lines from an image file using native Apple Vision OCR."""
+    with Image.open(image_path) as image:
+        return ocr_lines(image)
 
 
 def parse_pokemon_and_cp_from_text(lines: list[str]) -> list[tuple[str, int]]:
@@ -145,12 +120,10 @@ def scan_iphone_storage_with_selenium(
             print(f"[+] Running Selenium search query: '{query}'...")
             
             # Take screenshot of current screen
+            # Read in memory: account screenshots do not belong in a shared /tmp
             png_bytes = driver.get_screenshot_as_png()
-            tmp_img_path = Path(f"/tmp/scan_{query.replace('*', 'star')}.png")
-            tmp_img_path.write_bytes(png_bytes)
-            
-            # Run OCR on captured screen
-            lines = ocr_image_text(tmp_img_path)
+            with Image.open(io.BytesIO(png_bytes)) as screen:
+                lines = ocr_lines(screen)
             scanned = parse_pokemon_and_cp_from_text(lines)
             
             print(f"    Scanned {len(scanned)} Pokemon candidates from query '{query}'.")

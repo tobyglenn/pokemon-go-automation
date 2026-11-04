@@ -197,5 +197,92 @@ class WorkerMarkerTests(unittest.TestCase):
             )
 
 
+class AppiumRestartTests(unittest.TestCase):
+    URL = "http://127.0.0.1:4800"
+
+    def test_port_and_host_come_from_the_url(self) -> None:
+        from sources import pokemon_fleet
+
+        self.assertEqual(pokemon_fleet._appium_port(self.URL), 4800)
+        self.assertEqual(pokemon_fleet._appium_port("http://localhost"), 4723)
+        self.assertEqual(pokemon_fleet._appium_host(self.URL), "127.0.0.1")
+
+    def test_a_server_serving_other_phones_is_not_stopped(self) -> None:
+        from sources import pokemon_fleet
+
+        with mock.patch.object(pokemon_fleet, "appium_ready", return_value=True), \
+                mock.patch.object(pokemon_fleet, "appium_sessions", return_value=[{"id": "other"}]), \
+                mock.patch.object(pokemon_fleet.os, "kill") as kill:
+            with self.assertRaisesRegex(pokemon_fleet.FleetError, "1 other session"):
+                pokemon_fleet.stop_idle_appium_server(self.URL)
+        kill.assert_not_called()
+
+    def test_an_idle_server_stops_only_its_listener(self) -> None:
+        from sources import pokemon_fleet
+
+        ready = iter([True, False])
+        with mock.patch.object(pokemon_fleet, "appium_ready", side_effect=lambda _url: next(ready)), \
+                mock.patch.object(pokemon_fleet, "appium_sessions", return_value=[]), \
+                mock.patch.object(pokemon_fleet, "appium_listener_pids", return_value=[4321]), \
+                mock.patch.object(pokemon_fleet.os, "kill") as kill:
+            pokemon_fleet.stop_idle_appium_server(self.URL)
+        kill.assert_called_once_with(4321, pokemon_fleet.signal.SIGTERM)
+
+
+class VectorisedMaskTests(unittest.TestCase):
+    def random_image(self, size, low=(0, 0, 0), high=(256, 256, 256), seed=7):
+        import random
+        from PIL import Image
+
+        rng = random.Random(seed)
+        image = Image.new("RGB", size)
+        image.putdata([
+            tuple(rng.randrange(low[c], high[c]) for c in range(3))
+            for _ in range(size[0] * size[1])
+        ])
+        return image
+
+    def test_orange_mask_matches_the_pixel_test(self) -> None:
+        from sources import claim_research_android as claim
+
+        image = self.random_image((120, 90), low=(180, 100, 0), high=(256, 225, 170))
+        mask, pixels = claim.orange_mask(image).load(), image.load()
+        for y in range(image.height):
+            for x in range(image.width):
+                self.assertEqual(mask[x, y] == 255, claim.is_orange(pixels[x, y]), (x, y))
+
+    def test_ring_mask_matches_the_pixel_test(self) -> None:
+        from sources import excellent_throw_ios as thrower
+
+        image = self.random_image((100, 80))
+        mask, pixels = thrower._ring_mask(image, image.size).load(), image.load()
+        for y in range(image.height):
+            for x in range(image.width):
+                self.assertEqual(mask[x, y] == 255, bool(thrower._ring_pixel(pixels[x, y])), (x, y))
+
+
+class RoutingLookupTests(unittest.TestCase):
+    def test_each_device_is_located_once(self) -> None:
+        machines = {"one": {}, "two": {}, "three": {}}
+        owner = {"a": "one", "b": "two"}
+        with mock.patch.object(fleet_entrypoint, "machine_configs", return_value=machines), \
+                mock.patch.object(fleet_entrypoint, "_machine_for_device",
+                                  side_effect=lambda name, _m: owner[name]) as locate:
+            routed = fleet_entrypoint.route_machine_arguments(["--devices", "a", "b"])
+        self.assertEqual(routed, {"one": ["--devices", "a"], "two": ["--devices", "b"]})
+        self.assertEqual(locate.call_count, 2)
+
+
+class InventoryOcrTests(unittest.TestCase):
+    def test_lines_come_from_the_shared_vision_helper(self) -> None:
+        from PIL import Image
+        from sources import inventory_scanner_ios, vision_ocr
+
+        boxes = [vision_ocr.TextBox(text=" CP 1450 ", x=0, y=0, w=1, h=1),
+                 vision_ocr.TextBox(text="  ", x=0, y=0, w=1, h=1)]
+        with mock.patch.object(inventory_scanner_ios.vision_ocr, "ocr", return_value=boxes):
+            self.assertEqual(inventory_scanner_ios.ocr_lines(Image.new("RGB", (2, 2))), ["CP 1450"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -243,9 +243,12 @@ def route_machine_arguments(arguments: Sequence[str], *, dynamic_all: bool = Tru
         return {name: forwarded[:] for name in machines}
     if not devices or "all" in devices:
         raise pokemon_fleet.FleetError("Use --devices all by itself")
+    # One lookup per device: each reads the registry and the bus survey, so
+    # asking again for every machine multiplied that work by the host count.
+    owners = {device: _machine_for_device(device, machines) for device in dict.fromkeys(devices)}
     routed: dict[str, list[str]] = {}
     for name in machines:
-        selected = [device for device in devices if _machine_for_device(device, machines) == name]
+        selected = [device for device in devices if owners[device] == name]
         if selected:
             routed[name] = _replace_multi_option(forwarded, "--devices", selected)
     return routed

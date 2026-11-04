@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 from . import catch_awarded_android, excellent_throw_android, gbl_vision
 
@@ -106,6 +106,32 @@ def is_orange(pixel: tuple[int, ...]) -> bool:
     )
 
 
+def _at_least(channel: Image.Image, floor: int) -> Image.Image:
+    return channel.point(lambda value: 255 if value >= floor else 0)
+
+
+def orange_mask(image: Image.Image) -> Image.Image:
+    """An "L" mask, 255 where `is_orange` holds, built from whole-channel operations.
+
+    The per-pixel Python test took seconds on a full-resolution phone frame,
+    and the screen router reads one of these on every look.
+    """
+    red, green, blue = image.convert("RGB").split()
+    low, high = ORANGE_GREEN_RANGE
+    tests = (
+        _at_least(red, ORANGE_MIN_RED),
+        green.point(lambda value: 255 if low <= value <= high else 0),
+        blue.point(lambda value: 255 if value <= ORANGE_MAX_BLUE else 0),
+        # subtract() clips at 0, which is harmless against these positive floors
+        _at_least(ImageChops.subtract(red, blue), ORANGE_RED_OVER_BLUE),
+        _at_least(ImageChops.subtract(green, blue), ORANGE_GREEN_OVER_BLUE),
+    )
+    mask = tests[0]
+    for test in tests[1:]:
+        mask = ImageChops.multiply(mask, test)
+    return mask
+
+
 def orange_bands(image: Image.Image) -> list[tuple[int, int, int, int]]:
     """Every wide orange horizontal band in this frame, top first.
 
@@ -114,19 +140,13 @@ def orange_bands(image: Image.Image) -> list[tuple[int, int, int, int]]:
     reward tiles on the GO Pass page are the same orange as a claim button and
     only their words tell them apart.
     """
-    pixels = image.convert("RGB").load()
     width, height = image.size
+    data = orange_mask(image).tobytes()
     rows: list[tuple[int, int, int]] = []
     for y in range(height):
-        count = 0
-        left = width
-        right = -1
-        for x in range(width):
-            if is_orange(pixels[x, y]):
-                count += 1
-                left = min(left, x)
-                right = max(right, x)
-        rows.append((count, left, right))
+        row = data[y * width:(y + 1) * width]
+        count = row.count(255)
+        rows.append((count, row.find(255) if count else width, row.rfind(255)))
 
     bands: list[tuple[int, int, int, int]] = []
     start: int | None = None

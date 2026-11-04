@@ -432,8 +432,6 @@ def recovery_tap(
         return (button.cx / image.width, button.cy / image.height)
     return None
 
-    return None
-
 
 def looks_like_loading(boxes: Sequence[vision_ocr.TextBox]) -> bool:
     """The game's cold-start screen: a coach tip over artwork and a progress bar.

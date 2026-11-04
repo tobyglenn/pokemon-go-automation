@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
@@ -11,7 +12,9 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Mapping, TypeVar
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Callable, Iterator, Mapping, TypeVar
 
 from . import config_paths
 
@@ -175,6 +178,27 @@ def stale_wda_error(exc: Exception | str) -> bool:
             and "not in current view" in message
         )
     )
+
+
+@contextmanager
+def device_lock(
+    udid: str, lock_dir: Path, error: type[Exception], message: str
+) -> Iterator[None]:
+    """Hold this iPhone's fleet lock file for the block, or raise `error(message)`.
+
+    The same file `pokemon_fleet.acquire_device_locks` takes, so a worker run
+    by hand and a fleet command never drive one phone at once.
+    """
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    handle = (lock_dir / f"{udid}.lock").open("a+")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise error(message) from exc
+        yield
+    finally:
+        handle.close()
 
 
 def xcuitest_capabilities(

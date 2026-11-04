@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
 import io
 from pathlib import Path
 import random
 import subprocess
-from typing import Any, Iterator
+from typing import Any, ContextManager
 
 import yaml
 from PIL import Image
@@ -641,19 +639,10 @@ def gift_runner_pids() -> list[int]:
     return [int(value) for value in result.stdout.split() if value.isdigit()]
 
 
-@contextmanager
-def device_lock(udid: str) -> Iterator[None]:
-    LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    path = LOCK_DIR / f"{udid}.lock"
-    handle = path.open("a+")
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise IOSBerryError("This iPhone is already controlled by another fleet command") from exc
-        yield
-    finally:
-        handle.close()
+def device_lock(udid: str) -> ContextManager[None]:
+    return ios_wda_cleanup.device_lock(
+        udid, LOCK_DIR, IOSBerryError, "This iPhone is already controlled by another fleet command"
+    )
 
 
 def parse_args() -> argparse.Namespace:

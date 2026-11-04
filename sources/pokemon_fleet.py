@@ -26,6 +26,7 @@ import tempfile
 import time
 from typing import Any, Callable, Iterator, Sequence
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import yaml
@@ -546,6 +547,66 @@ def appium_ready(url: str) -> bool:
 # died at "launcher was not found" even though a working 3.6.0 sat in
 # node_modules. Those local copies are `.bin` shims with a `#!/usr/bin/env
 # node` line, so node has to be on PATH for them -- it is on both Macs.
+def appium_sessions(url: str) -> list[Any] | None:
+    """The sessions an Appium server is holding, or None if it would not say."""
+    try:
+        with urlopen(f"{url.rstrip('/')}/appium/sessions", timeout=3) as response:
+            value = json.load(response)
+    except (OSError, URLError, ValueError):
+        return None
+    sessions = value.get("value") if isinstance(value, dict) else None
+    return sessions if isinstance(sessions, list) else None
+
+
+def appium_listener_pids(url: str) -> list[int]:
+    """The processes listening on the Appium server's own port."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{_appium_port(url)}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [int(value) for value in result.stdout.split() if value.isdigit()]
+
+
+def stop_idle_appium_server(url: str, timeout: float = 10.0) -> None:
+    """Stop the Appium server at `url` so it restarts with a new environment.
+
+    One Appium server serves every iPhone on this Mac, so stopping it ends
+    every other phone's session too.  It is only stopped when it reports no
+    sessions, and only the process listening on its port is signalled -- never
+    every process whose command line happens to mention appium.
+    """
+    if not appium_ready(url):
+        return
+    sessions = appium_sessions(url)
+    if sessions:
+        raise FleetError(
+            f"Appium at {url} is serving {len(sessions)} other session(s); not restarting it. "
+            "Retry once the other iPhone runs finish."
+        )
+    for pid in appium_listener_pids(url):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+    deadline = time.time() + timeout
+    while time.time() < deadline and appium_ready(url):
+        time.sleep(0.25)
+
+
+def _appium_port(url: str) -> int:
+    return urlparse(url).port or 4723
+
+
+def _appium_host(url: str) -> str:
+    return urlparse(url).hostname or "127.0.0.1"
+
+
 def appium_launcher_candidates() -> list[Path]:
     override = os.environ.get("POKEMON_GO_APPIUM_BIN")
     candidates = [Path(override)] if override else []
@@ -584,7 +645,7 @@ def ensure_appium_server(url: str = "http://127.0.0.1:4723", timeout: float = 12
         if appium_bin.parent.name == ".bin" and appium_bin.parent.parent.name == "node_modules":
             env.setdefault("APPIUM_HOME", str(appium_bin.parent.parent.parent))
         subprocess.Popen(
-            [str(appium_bin), "--address", "127.0.0.1", "--port", "4723"],
+            [str(appium_bin), "--address", _appium_host(url), "--port", str(_appium_port(url))],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -704,12 +765,11 @@ def select_devices(
             if spec.enabled and spec.supports(operation)
         ]
         selected = candidates
-        skipped: list[str] = []
         if not allow_unready:
             adb_binary = default_adb_binary()
             android = adb_states(adb_binary)
             ios = ios_connected_udids()
-            connected = [
+            selected = [
                 spec
                 for spec in candidates
                 if (
@@ -718,25 +778,23 @@ def select_devices(
                     else android.get(spec.identifier) == "device"
                 )
             ]
-            if not allow_unready or (operation in {"trade", "battle"} and len(connected) == 2):
-                selected = connected
+            # Connected Android phones missing from the registry join "all".
+            selected_ids = {spec.identifier for spec in selected}
+            configured_android_ids = {
+                spec.identifier
+                for spec in fleet.devices.values()
+                if spec.platform == "android"
+            }
+            for serial, state in android.items():
+                if (
+                    state == "device"
+                    and serial not in configured_android_ids
+                    and serial not in selected_ids
+                ):
+                    selected.append(dynamic_android(serial, fleet.path.parent))
+                    selected_ids.add(serial)
 
-                selected_ids = {spec.identifier for spec in selected}
-                configured_android_ids = {
-                    spec.identifier
-                    for spec in fleet.devices.values()
-                    if spec.platform == "android"
-                }
-                for serial, state in android.items():
-                    if (
-                        state == "device"
-                        and serial not in configured_android_ids
-                        and serial not in selected_ids
-                    ):
-                        selected.append(dynamic_android(serial, fleet.path.parent))
-                        selected_ids.add(serial)
-
-                skipped = [spec.name for spec in candidates if spec not in selected]
+            skipped = [spec.name for spec in candidates if spec not in selected]
             print(
                 attachment_summary(
                     operation,
@@ -746,21 +804,20 @@ def select_devices(
                 ),
                 flush=True,
             )
-            if not allow_unready:
-                ready: list[DeviceSpec] = []
-                unready: list[str] = []
-                for spec in selected:
-                    readiness = operation_readiness(spec, operation)
-                    if readiness.startswith("ready"):
-                        ready.append(spec)
-                    else:
-                        unready.append(f"{spec.name} ({readiness})")
-                selected = ready
-                if unready:
-                    print(
-                        "Skipping unready configured device(s): " + ", ".join(unready),
-                        flush=True,
-                    )
+            ready: list[DeviceSpec] = []
+            unready: list[str] = []
+            for spec in selected:
+                readiness = operation_readiness(spec, operation)
+                if readiness.startswith("ready"):
+                    ready.append(spec)
+                else:
+                    unready.append(f"{spec.name} ({readiness})")
+            selected = ready
+            if unready:
+                print(
+                    "Skipping unready configured device(s): " + ", ".join(unready),
+                    flush=True,
+                )
     else:
         selected = []
         for name in names:
