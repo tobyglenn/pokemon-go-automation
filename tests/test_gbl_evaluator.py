@@ -2,7 +2,6 @@
 from tests import support as _test_support
 #!/usr/bin/env python3
 import unittest
-from pathlib import Path
 
 from sources import gbl_evaluator
 

@@ -32,7 +32,6 @@ from sources import (  # noqa: E402
     raid_prep_ios,
     raid_scan_android,
     raid_scan_ios,
-    screen_router,
 )
 
 logging.basicConfig(
@@ -74,7 +73,12 @@ def load_tasks(path: Path | None) -> list[PrepTask]:
     return tasks
 
 
-def run_ios_task(worker: raid_prep_ios.IOSRaidPrepWorker, task: PrepTask, phase: str) -> dict:
+def run_task(
+    worker: raid_prep_ios.IOSRaidPrepWorker | raid_prep_android.AndroidRaidPrepWorker,
+    task: PrepTask,
+    phase: str,
+) -> dict:
+    """Run one task's phases on either platform's worker; both share one interface."""
     result = {"task": task.name, "term": task.search_term, "actions": []}
     logger.info("Starting task: %s (%s)", task.name, task.search_term)
 
@@ -125,55 +129,9 @@ def run_ios_task(worker: raid_prep_ios.IOSRaidPrepWorker, task: PrepTask, phase:
     return result
 
 
-def run_android_task(worker: raid_prep_android.AndroidRaidPrepWorker, task: PrepTask, phase: str) -> dict:
-    result = {"task": task.name, "term": task.search_term, "actions": []}
-    logger.info("Starting task: %s (%s)", task.name, task.search_term)
-
-    opened = worker.search_and_open(task.search_term, expected_cp=task.expected_cp)
-    if not opened:
-        result["actions"].append({"action": "open", "status": "failed", "note": "Could not open Pokémon"})
-        return result
-
-    # Phase 1: Evolutions
-    if phase in ("evolve", "all") and task.evolve_count > 0:
-        for stage in range(task.evolve_count):
-            logger.info("Evolving %s stage %d/%d", task.name, stage + 1, task.evolve_count)
-            evo_res = worker.evolve()
-            result["actions"].append(
-                {"action": f"evolve_{stage + 1}", "status": "ok" if evo_res.success else "failed", "cp": evo_res.new_cp}
-            )
-            if not evo_res.success:
-                break
-
-    # Phase 2: Power Up to Level 40
-    if phase in ("power_up", "all") and task.target_cp:
-        logger.info("Powering up %s to target CP %s", task.name, task.target_cp)
-        pwr_res = worker.power_up_to_level_40(target_cp=task.target_cp)
-        result["actions"].append(
-            {
-                "action": "power_up",
-                "status": "ok" if pwr_res.success else "failed",
-                "initial_cp": pwr_res.initial_cp,
-                "final_cp": pwr_res.final_cp,
-                "stardust": pwr_res.stardust_cost,
-                "candy": pwr_res.candy_cost,
-            }
-        )
-
-    # Phase 3: Tagging
-    if phase in ("tag", "all") and task.tag_name:
-        logger.info("Tagging %s with '%s'", task.name, task.tag_name)
-        tagged = worker.tag_pokemon(task.tag_name)
-        result["actions"].append({"action": "tag", "tag": task.tag_name, "status": "ok" if tagged else "failed"})
-
-    # Phase 4: Mega Evolution
-    if phase in ("mega_evolve", "all") and task.mega_evolve:
-        logger.info("Mega evolving %s", task.name)
-        mega_ok = worker.mega_evolve()
-        result["actions"].append({"action": "mega_evolve", "status": "ok" if mega_ok else "failed"})
-
-    worker.close_detail()
-    return result
+# The platform-specific names this module first shipped with.
+run_ios_task = run_task
+run_android_task = run_task
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -203,6 +161,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         for spec in fleet.devices.values()
         if spec.enabled and ("all" in wanted or spec.name in wanted)
     ]
+    unknown = sorted(wanted - {"all"} - {spec.name for spec in specs})
+    if unknown:
+        print(f"Error: not an enabled fleet device: {', '.join(unknown)}", file=sys.stderr)
+        return 2
 
     # Collect tasks
     tasks = load_tasks(args.tasks_file)
@@ -249,13 +211,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             phone = raid_scan_ios.IOSPhone(spec.identifier)
             worker = raid_prep_ios.IOSRaidPrepWorker(phone)
             for t in tasks:
-                res = run_ios_task(worker, t, args.phase)
+                res = run_task(worker, t, args.phase)
                 logger.info("Result for %s: %s", t.name, res)
         elif spec.platform == "android":
             phone = raid_scan_android.AndroidPhone(spec.identifier)
             worker = raid_prep_android.AndroidRaidPrepWorker(phone)
             for t in tasks:
-                res = run_android_task(worker, t, args.phase)
+                res = run_task(worker, t, args.phase)
                 logger.info("Result for %s: %s", t.name, res)
 
     return 0

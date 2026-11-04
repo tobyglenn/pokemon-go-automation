@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import importlib
 from importlib import resources
-import os
 from pathlib import Path
 import sys
 

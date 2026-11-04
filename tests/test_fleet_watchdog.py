@@ -8,7 +8,6 @@ import sys
 import threading
 import unittest
 
-from pathlib import Path
 import unittest.mock
 
 from sources import fleet_watchdog, pokemon_fleet

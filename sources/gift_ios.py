@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from PIL import Image
@@ -25,7 +25,10 @@ from selenium.webdriver.common.actions import interaction
 from selenium.webdriver.common.actions.action_builder import ActionBuilder
 from selenium.webdriver.common.actions.pointer_input import PointerInput
 
-from . import config_paths, ios_wda_cleanup, pokemon_fleet
+from . import config_paths, ios_wda_cleanup
+
+if TYPE_CHECKING:
+    from appium import webdriver
 
 
 DEFAULT_CONFIG = config_paths.default_config("ios-gifter.yaml")
@@ -1460,14 +1463,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import os
-    from . import fleet_entrypoint, pokemon_fleet
-    try:
-        if os.environ.get("POKEMON_FLEET_CHILD") == "1" or "--fleet-child" in sys.argv:
-            raise SystemExit(main())
-        raise SystemExit(fleet_entrypoint.run_operation('gifts', 'gift.py'))
-    except KeyboardInterrupt:
-        raise SystemExit(130)
-    except (RuntimeError, OSError, ValueError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    from . import fleet_entrypoint
+    raise SystemExit(fleet_entrypoint.run_worker_module(main, 'gifts', 'gift.py'))

@@ -27,7 +27,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 import time
 from typing import Any, Iterator
 from urllib.error import URLError
@@ -865,14 +864,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import os
-    from . import fleet_entrypoint, pokemon_fleet
-    try:
-        if os.environ.get("POKEMON_FLEET_CHILD") == "1" or "--fleet-child" in sys.argv:
-            raise SystemExit(main())
-        raise SystemExit(fleet_entrypoint.run_operation('delete', 'luckytrash.py'))
-    except KeyboardInterrupt:
-        raise SystemExit(130)
-    except (RuntimeError, OSError, ValueError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    from . import fleet_entrypoint
+    raise SystemExit(fleet_entrypoint.run_worker_module(main, 'delete', 'luckytrash.py'))

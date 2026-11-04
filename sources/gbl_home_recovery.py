@@ -39,7 +39,6 @@ from datetime import datetime
 import io
 from pathlib import Path
 import subprocess
-import sys
 import time
 from typing import Any, Sequence
 

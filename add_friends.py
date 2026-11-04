@@ -1315,7 +1315,6 @@ def send_friend_request(
     print(f"[{controller.label}] confirming friend request", flush=True)
     controller.tap(confirm, confirmation)
 
-    saw_animation = False
     result_deadline = min(deadline, time.monotonic() + 7)
     while time.monotonic() < result_deadline:
         time.sleep(0.45)
@@ -1335,7 +1334,6 @@ def send_friend_request(
             return True
         share = dialog_height_share(outcome)
         if share < 0.08:
-            saw_animation = True
             continue
     raise FriendScreenError(f"{controller.label}: timed out waiting for friend-request result")
 

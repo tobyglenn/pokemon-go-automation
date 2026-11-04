@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from tests import support as _test_support
 
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 

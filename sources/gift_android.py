@@ -26,6 +26,8 @@ see "Friends list guard" below.
 """
 
 from . import config_paths
+from . import android_common
+from .android_common import find_display_id  # noqa: F401  re-exported for callers and tests
 import argparse
 import os
 import asyncio
@@ -43,7 +45,6 @@ try:
     from ppadb.client_async import ClientAsync
     from ppadb.device_async import DeviceAsync
     from PIL import Image
-    import yaml
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
@@ -57,7 +58,7 @@ from . import gbl_home_recovery
 
 CONFIG_FILE_DIR  = '/storage/self/primary/'
 CONFIG_FILE_NAME = 'AutoTraderConfig.yaml'
-TMP_FILE_NAME    = 'tmp_gift_{}.yaml'  # per device: configs are pulled concurrently
+TMP_FILE_NAME = 'tmp_gift_{}.yaml'  # per device, under the private state dir
 CONFIG = dict[str, list[int]]
 
 SLEEP_MODIFIER = 0
@@ -115,8 +116,7 @@ GIFT_KEYS = {step.name for step in GIFT_STEPS}
 
 # Used for the framebuffer grab in the friends list guard. This script lives in
 # platform-tools, so prefer the adb binary sitting next to it.
-_ADB = Path(__file__).resolve().parent.parent / 'adb'
-ADB_BINARY = str(_ADB) if _ADB.exists() else 'adb'
+ADB_BINARY = android_common.adb_binary()
 
 # --- Friends list guard ---
 # SORT_BTN and BATTLE land on the same point. On the android-one the config holds
@@ -487,36 +487,6 @@ async def wait(seconds: float, use_modifier: bool = True):
     await asyncio.sleep(max(seconds + (SLEEP_MODIFIER if use_modifier else 0), 0))
 
 
-async def find_display_id(device: DeviceAsyncWrapper) -> str | None:
-    """The display to capture, or None when the device only has one.
-
-    Foldables report two displays, and `screencap` with no -d prints
-    "[Warning] Multiple displays found, but no display id specified!" onto
-    stdout ahead of the framebuffer. That warning is 351 bytes, so the header
-    unpack below reads the words "[War"/"ning" as the width and height and every
-    screen read fails. On the android-three that meant screencap_raw() returned None for
-    the whole run, silently leaving the friends list guard switched off while
-    the script tapped on regardless.
-
-    The *active* display, not simply the first: folding the phone shut hands
-    over to the cover display, which is a different size and coordinate space.
-    """
-    try:
-        listed = await device.shell('dumpsys SurfaceFlinger --display-id')
-        ids = re.findall(r'^Display (\d+)', listed, re.M)
-        if len(ids) < 2:
-            return None
-        for viewport in (await device.shell('dumpsys display')).split('DisplayViewport{')[1:]:
-            if 'isActive=true' not in viewport:
-                continue
-            match = re.search(r"uniqueId='local:(\d+)'", viewport)
-            if match and match.group(1) in ids:
-                return match.group(1)
-        return ids[0]
-    except Exception:
-        return None
-
-
 async def screencap_raw(device: DeviceAsyncWrapper):
     """Grabs the raw framebuffer via `adb exec-out screencap`.
     Returns (width, height, pixel_offset, data), or None if it can't be read."""
@@ -558,8 +528,8 @@ async def screencap_raw(device: DeviceAsyncWrapper):
     return width, height, offset, data
 
 
-def frame_image(frame) -> Image.Image:
-    """The raw framebuffer as a picture, for the tests that work on shapes."""
+def frame_image(frame: tuple[int, int, int, bytes]) -> Image.Image:
+    """The raw framebuffer as a PIL image, for the shape and colour detectors."""
     width, height, offset, data = frame
     return Image.frombytes(
         'RGBA', (width, height), data[offset:offset + width * height * 4]
@@ -770,12 +740,6 @@ def sort_control_showing(
             total += 1
             teal += _sort_control_teal((data[i], data[i + 1], data[i + 2]))
     return bool(total) and teal / total >= SORT_FAB_MIN_TEAL
-
-
-def frame_image(frame: tuple[int, int, int, bytes]) -> Image.Image:
-    """The framebuffer as a PIL image, for the gbl_home_recovery detectors."""
-    width, height, offset, data = frame
-    return Image.frombytes('RGBA', (width, height), data[offset:]).convert('RGB')
 
 
 def name_screen(frame: tuple[int, int, int, bytes], config: CONFIG) -> str:
@@ -1349,24 +1313,8 @@ async def gift_process(
 
 async def get_config(device: DeviceAsyncWrapper) -> CONFIG:
     """Pulls config file from device and parses it. Sets the `config` attribute on success."""
-    config_file_path = CONFIG_FILE_DIR + CONFIG_FILE_NAME
-    tmp_file_path = Path(TMP_FILE_NAME.format(re.sub(r'\W', '_', device.serial)))
-    try:
-        await device.pull(config_file_path, tmp_file_path)
-        content = tmp_file_path.read_text() if tmp_file_path.exists() else ''
-    finally:
-        tmp_file_path.unlink(missing_ok=True)
-    if not content:
-        raise AutoGifterError(f'Found no config file at {config_file_path}')
-    config: CONFIG = yaml.safe_load(content)
-    assert isinstance(config, dict), 'Incorrect config file format (should be an object with keys)'
-    if not GIFT_KEYS <= set(config.keys()):
-        raise AutoGifterError(f'Missing config key(s): {GIFT_KEYS - set(config.keys())}')
-    for coords in config.values():
-        assert isinstance(coords, list) and len(coords) == 2 and all(isinstance(i, int) for i in coords),\
-            'Invalid coords format in config (should be list with two integers)'
-    device.config = config
-    return config
+    return await android_common.pull_config(
+        device, CONFIG_FILE_DIR + CONFIG_FILE_NAME, TMP_FILE_NAME, GIFT_KEYS, AutoGifterError)
 
 
 async def setup() -> list[DeviceAsyncWrapper]:

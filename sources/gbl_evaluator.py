@@ -11,16 +11,14 @@ calculates type synergy, and generates an exact actionable step-by-step list:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import io
+from dataclasses import dataclass
 import json
 from pathlib import Path
-import sys
-from typing import Any, Sequence
+from typing import Any
 
 import yaml
 
-from . import config_paths, gbl_ios, pokemon_fleet
+from . import config_paths, pokemon_fleet
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = config_paths.private_config_dir()
@@ -92,7 +90,6 @@ POKEMON_DATABASE: dict[str, MetaPokemon] = {
     "Lickitung": MetaPokemon("Lickitung", ["Normal"], 97.0, "Lick", ["Body Slam", "Power Whip"], 99.0, 98.0, "Safe Switch", 50000),
     "Quagsire": MetaPokemon("Quagsire", ["Water", "Ground"], 94.0, "Mud Shot", ["Aqua Tail", "Stone Edge"], 88.0, 96.0, "Lead", 10000),
     "Umbreon": MetaPokemon("Umbreon", ["Dark"], 94.0, "Snarl", ["Foul Play", "Last Resort"], 100.0, 97.0, "Safe Switch", 75000),
-    "Chesnaught": MetaPokemon("Chesnaught", ["Grass", "Fighting"], 91.0, "Vine Whip", ["Superpower", "Frenzy Plant"], 83.0, 91.0, "Flex", 10000),
     "Serperior": MetaPokemon("Serperior", ["Grass"], 92.5, "Vine Whip", ["Frenzy Plant", "Aerial Ace"], 92.0, 94.0, "Flex", 10000),
     "Talonflame": MetaPokemon("Talonflame", ["Fire", "Flying"], 92.0, "Incinerate", ["Flame Charge", "Fly"], 78.0, 89.0, "Lead", 10000),
     "Wigglytuff": MetaPokemon("Wigglytuff", ["Normal", "Fairy"], 91.5, "Charm", ["Icy Wind", "Disarming Voice"], 93.0, 98.0, "Closer", 10000),

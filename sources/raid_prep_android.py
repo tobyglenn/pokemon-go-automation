@@ -12,31 +12,18 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass
 from typing import Sequence
 
-from PIL import Image
 from sources import raid_scan_android, vision_ocr
+from sources.raid_prep_common import (  # noqa: F401  re-exported
+    EvolveResult,
+    PowerUpResult,
+    overshot,
+    powered_up,
+    preview_cp,
+)
 
 logger = logging.getLogger("raid_prep_android")
-
-
-@dataclass
-class PowerUpResult:
-    success: bool
-    initial_cp: int | None = None
-    final_cp: int | None = None
-    stardust_cost: int = 0
-    candy_cost: int = 0
-    note: str = ""
-
-
-@dataclass
-class EvolveResult:
-    success: bool
-    old_cp: int | None = None
-    new_cp: int | None = None
-    note: str = ""
 
 
 class AndroidRaidPrepWorker:
@@ -59,11 +46,13 @@ class AndroidRaidPrepWorker:
         w, h = self.phone.viewport
 
         target_entry = None
-        if expected_cp is not None and grid_entries:
+        if expected_cp is not None:
+            # The CP names the individual to spend on.  The nearest CP is a
+            # different Pokémon, so a miss is a refusal, not a guess.
             target_entry = next((e for e in grid_entries if e.cp == expected_cp), None)
             if not target_entry:
-                # Select candidate with nearest CP
-                target_entry = min(grid_entries, key=lambda e: abs(e.cp - expected_cp))
+                logger.warning("No '%s' result at CP %s; touching nothing", term, expected_cp)
+                return False
         elif grid_entries:
             target_entry = grid_entries[0]
 
@@ -91,6 +80,20 @@ class AndroidRaidPrepWorker:
         has_cp = any(re.search(r"CP\s*\d+", b.text, re.I) for b in detail_boxes)
         has_hp = any(re.search(r"\d+\s*/\s*\d+\s*HP", b.text, re.I) for b in detail_boxes)
         return has_cp or has_hp
+
+    def _overshot(
+        self, boxes: Sequence[vision_ocr.TextBox], current_cp: int | None, target_cp: int | None
+    ) -> bool:
+        h = self.phone.viewport[1]
+        return overshot(boxes, current_cp, target_cp, (h * 0.45, h * 0.85))
+
+    def _cancel_dialog(self, boxes: Sequence[vision_ocr.TextBox]) -> None:
+        w, h = self.phone.viewport
+        cancel_box = next((b for b in boxes if "CANCEL" in b.text.upper()), None)
+        if cancel_box:
+            self.phone.tap((cancel_box.cx / w, cancel_box.cy / h), settle=1.0)
+        else:
+            self.phone.back(settle=1.0)
 
     def close_detail(self) -> None:
         """Close Pokémon detail sheet and return to grid."""
@@ -129,18 +132,20 @@ class AndroidRaidPrepWorker:
         self.phone.tap((pwr_box.cx / w, pwr_box.cy / h), settle=1.5)
         d_img, d_boxes = self.phone.read()
 
-        # Check if dialog is open: "POWER UP: ..." or arrow
-        dialog_title = next((b for b in d_boxes if "POWER UP" in b.text.upper() and b.y > h * 0.40), None)
+        # The dialog is open when it shows its "CP a → b" preview.  A bare
+        # "POWER UP" caption is not proof: the detail page's own button reads
+        # the same, so that test passed with no dialog and the loop below then
+        # tapped a guessed "+" point on the detail page.
         has_arrow = any("→" in b.text or "->" in b.text for b in d_boxes)
+        dialog_title = next((b for b in d_boxes if "POWER UP:" in b.text.upper()), None)
         if not dialog_title and not has_arrow:
             return PowerUpResult(False, initial_cp, note="Power up dialog did not open")
 
         plus_box = next((b for b in d_boxes if b.text.strip() == "+" and b.y > h * 0.50), None)
-        if plus_box:
-            plus_pt = (plus_box.cx / w, plus_box.cy / h)
-        else:
-            # Standard + button coordinates
-            plus_pt = (0.742, 0.759)
+        if not plus_box:
+            self._cancel_dialog(d_boxes)
+            return PowerUpResult(False, initial_cp, note="No + button (may be maxed)")
+        plus_pt = (plus_box.cx / w, plus_box.cy / h)
 
         # Tap + button in increments while checking for target CP and Candy XL
         taps_done = 0
@@ -161,24 +166,26 @@ class AndroidRaidPrepWorker:
             time.sleep(0.25)
             d_img, d_boxes = self.phone.read()
 
-            for b in d_boxes:
-                m = re.search(r"→\s*(\d+)", b.text)
-                if m:
-                    current_target_cp = int(m.group(1))
+            current_target_cp = preview_cp(d_boxes, current_target_cp)
 
-            # Guard against Candy XL consumption: step back if XL candy appeared
-            has_xl = any(
-                re.search(r"\bXL\b", b.text) or "CANDY XL" in b.text.upper()
-                for b in d_boxes
-                if h * 0.45 <= b.y <= h * 0.85
-            )
-            if has_xl:
-                logger.info("Reached Candy XL threshold at CP %s; stepping back.", current_target_cp)
+            # A batch can carry the preview past the target or into Candy XL
+            # levels.  Step back one level at a time, re-reading, until it no
+            # longer does; the whole batch is the most that can be undone.
+            if self._overshot(d_boxes, current_target_cp, target_cp):
                 minus_pt = (1.0 - plus_pt[0], plus_pt[1])
-                self.phone.tap(minus_pt, settle=0.3)
-                self.phone.tap(minus_pt, settle=0.3)
-                time.sleep(0.3)
-                d_img, d_boxes = self.phone.read()
+                for _ in range(batch):
+                    self.phone.tap(minus_pt, settle=0.3)
+                    time.sleep(0.3)
+                    d_img, d_boxes = self.phone.read()
+                    current_target_cp = preview_cp(d_boxes, current_target_cp)
+                    if not self._overshot(d_boxes, current_target_cp, target_cp):
+                        break
+                else:
+                    self._cancel_dialog(d_boxes)
+                    return PowerUpResult(
+                        False, initial_cp, note="Could not step back below Candy XL / target CP"
+                    )
+                logger.info("Stopped below Candy XL / target at CP %s", current_target_cp)
                 break
 
             # Stop if we hit target_cp
@@ -201,7 +208,10 @@ class AndroidRaidPrepWorker:
         confirm_btn = next(
             (b for b in d_boxes if b.text.strip().upper() == "POWER UP" and b.y > h * 0.70), None
         )
-        confirm_pt = (confirm_btn.cx / w, confirm_btn.cy / h) if confirm_btn else (0.50, 0.876)
+        if not confirm_btn:
+            self._cancel_dialog(d_boxes)
+            return PowerUpResult(False, initial_cp, note="No confirm button on dialog")
+        confirm_pt = (confirm_btn.cx / w, confirm_btn.cy / h)
 
         logger.info(
             "Confirming Power Up to %s (Dust: %s, Candy: %s)",
@@ -214,15 +224,17 @@ class AndroidRaidPrepWorker:
         # Secondary confirmation popup: "YES" / "NO"
         pop_img, pop_boxes = self.phone.read()
         yes_btn = next((b for b in pop_boxes if b.text.strip().upper() == "YES"), None)
-        yes_pt = (yes_btn.cx / w, yes_btn.cy / h) if yes_btn else (0.50, 0.60)
-        self.phone.tap(yes_pt, settle=3.0)
+        if yes_btn:
+            self.phone.tap((yes_btn.cx / w, yes_btn.cy / h), settle=3.0)
+        else:
+            time.sleep(2.0)
 
-        # Re-read detail screen for final CP
+        # Re-read detail screen for final CP: success is what the page shows
         final_img, final_boxes = self.phone.read()
-        final_cp = self.read_current_cp(final_boxes) or current_target_cp
+        final_cp = self.read_current_cp(final_boxes)
 
         return PowerUpResult(
-            success=True,
+            success=powered_up(initial_cp, final_cp),
             initial_cp=initial_cp,
             final_cp=final_cp,
             stardust_cost=stardust_cost,
@@ -250,7 +262,12 @@ class AndroidRaidPrepWorker:
         # Confirmation popup: "YES" / "NO"
         pop_img, pop_boxes = self.phone.read()
         yes_btn = next((b for b in pop_boxes if b.text.strip().upper() == "YES"), None)
-        yes_pt = (yes_btn.cx / w, yes_btn.cy / h) if yes_btn else (0.50, 0.60)
+        if not yes_btn:
+            no_btn = next((b for b in pop_boxes if b.text.strip().upper() == "NO"), None)
+            if no_btn:
+                self.phone.tap((no_btn.cx / w, no_btn.cy / h), settle=1.0)
+            return EvolveResult(False, old_cp=old_cp, note="Could not find YES confirmation button")
+        yes_pt = (yes_btn.cx / w, yes_btn.cy / h)
 
         # Confirm evolution
         logger.info("Confirming evolution (tapping YES at %s)", yes_pt)
@@ -267,7 +284,8 @@ class AndroidRaidPrepWorker:
         # Verify new detail screen
         detail_img, detail_boxes = self.phone.read()
         new_cp = self.read_current_cp(detail_boxes)
-        return EvolveResult(success=(new_cp is not None and new_cp != old_cp) or True, old_cp=old_cp, new_cp=new_cp)
+        return EvolveResult(success=new_cp is not None, old_cp=old_cp, new_cp=new_cp,
+                            note="" if new_cp is not None else "No detail page after evolving")
 
     def tag_pokemon(self, tag_name: str = "mega") -> bool:
         """Apply a tag (e.g. mega) via the detail hamburger menu."""

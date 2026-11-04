@@ -12,32 +12,22 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass
 from typing import Sequence
 
 from PIL import Image
 from sources import raid_scan_ios, vision_ocr
+from sources.raid_prep_common import (  # noqa: F401  re-exported
+    EvolveResult,
+    PowerUpResult,
+    overshot,
+    powered_up,
+    preview_cp,
+)
+
+# Where the power-up dialog's cost rows sit, in screenshot pixels.
+XL_BAND = (800, 1050)
 
 logger = logging.getLogger("raid_prep_ios")
-
-
-@dataclass
-class PowerUpResult:
-    success: bool
-    initial_cp: int | None = None
-    final_cp: int | None = None
-    stardust_cost: int = 0
-    candy_cost: int = 0
-    note: str = ""
-
-
-@dataclass
-class EvolveResult:
-    success: bool
-    old_species: str = ""
-    new_species: str = ""
-    new_cp: int | None = None
-    note: str = ""
 
 
 class IOSRaidPrepWorker:
@@ -59,11 +49,16 @@ class IOSRaidPrepWorker:
         # If expected_cp is provided, find the cell nearest to that CP
         target_pt = (0.25, 0.40)  # default first cell
         if expected_cp is not None:
+            # The CP names the individual to spend on: never fall back to
+            # whichever Pokémon happens to sit in the first cell.
             for b in boxes:
                 m = re.search(r"CP\s*(\d+)", b.text)
                 if m and int(m.group(1)) == expected_cp:
                     target_pt = (b.cx / img.width, (b.cy + 30) / img.height)
                     break
+            else:
+                logger.warning("No '%s' result at CP %s; touching nothing", term, expected_cp)
+                return False
 
         self.phone.tap(target_pt, img, settle=1.5)
         # Verify detail page opened
@@ -130,32 +125,34 @@ class IOSRaidPrepWorker:
 
         while taps_done < max_taps:
             # Batch tap 4 times for speed
-            for _ in range(min(4, max_taps - taps_done)):
+            batch = min(4, max_taps - taps_done)
+            for _ in range(batch):
                 self.phone.tap(plus_pt, d_img, settle=0.35)
                 taps_done += 1
 
             time.sleep(0.4)
             d_img, d_boxes = self.phone.read()
-
-            # Check if XL candy requirement appeared
-            has_xl = any(
-                re.search(r"\bXL\b", b.text) or "CANDY XL" in b.text.upper()
-                for b in d_boxes
-                if 800 <= b.y <= 1050
-            )
             # Read target CP: e.g. "CP 547 →610"
-            for b in d_boxes:
-                m = re.search(r"→\s*(\d+)", b.text)
-                if m:
-                    current_target_cp = int(m.group(1))
+            current_target_cp = preview_cp(d_boxes, current_target_cp)
 
-            if has_xl:
-                logger.info("Reached Candy XL threshold at CP %s; stepping back.", current_target_cp)
+            # A batch can carry the preview past the target or into Candy XL
+            # levels.  Step back one level at a time, re-reading, until it no
+            # longer does; the whole batch is the most that can be undone.
+            if overshot(d_boxes, current_target_cp, target_cp, XL_BAND):
                 minus_pt = (1.0 - plus_pt[0], plus_pt[1])
-                self.phone.tap(minus_pt, d_img, settle=0.4)
-                self.phone.tap(minus_pt, d_img, settle=0.4)
-                time.sleep(0.4)
-                d_img, d_boxes = self.phone.read()
+                for _ in range(batch):
+                    self.phone.tap(minus_pt, d_img, settle=0.4)
+                    time.sleep(0.4)
+                    d_img, d_boxes = self.phone.read()
+                    current_target_cp = preview_cp(d_boxes, current_target_cp)
+                    if not overshot(d_boxes, current_target_cp, target_cp, XL_BAND):
+                        break
+                else:
+                    self._cancel_dialog(d_img, d_boxes)
+                    return PowerUpResult(
+                        False, initial_cp, note="Could not step back below Candy XL / target CP"
+                    )
+                logger.info("Stopped below Candy XL / target at CP %s", current_target_cp)
                 break
 
             if target_cp is not None and current_target_cp and current_target_cp >= target_cp:
@@ -197,12 +194,12 @@ class IOSRaidPrepWorker:
         else:
             time.sleep(2.0)
 
-        # Re-read detail screen for final CP
+        # Re-read detail screen for final CP: success is what the page shows
         final_img, final_boxes = self.phone.read()
-        final_cp = self.read_current_cp(final_boxes) or current_target_cp
+        final_cp = self.read_current_cp(final_boxes)
 
         return PowerUpResult(
-            success=True,
+            success=powered_up(initial_cp, final_cp),
             initial_cp=initial_cp,
             final_cp=final_cp,
             stardust_cost=stardust_cost,
@@ -228,7 +225,7 @@ class IOSRaidPrepWorker:
             img, boxes = self.phone.read()
             evolve_box = next((b for b in boxes if b.text.strip().upper() == "EVOLVE"), None)
             if not evolve_box:
-                return EvolveResult(False, note="EVOLVE button not visible")
+                return EvolveResult(False, old_cp=old_cp, note="EVOLVE button not visible")
 
         logger.info("Tapping EVOLVE button")
         self.phone.tap((evolve_box.cx / img.width, evolve_box.cy / img.height), img, settle=1.5)
@@ -249,7 +246,7 @@ class IOSRaidPrepWorker:
             no_btn = next((b for b in pop_boxes if b.text.strip().upper() == "NO"), None)
             if no_btn:
                 self.phone.tap((no_btn.cx / pop_img.width, no_btn.cy / pop_img.height), pop_img, settle=1.0)
-            return EvolveResult(False, note="Could not find YES confirmation button")
+            return EvolveResult(False, old_cp=old_cp, note="Could not find YES confirmation button")
 
         # Confirm evolution
         logger.info("Confirming evolution (tapping YES at %s, %s)", yes_btn.cx, yes_btn.cy)
@@ -267,7 +264,8 @@ class IOSRaidPrepWorker:
         # Verify new detail screen
         detail_img, detail_boxes = self.phone.read()
         new_cp = self.read_current_cp(detail_boxes)
-        return EvolveResult(success=True, new_cp=new_cp)
+        return EvolveResult(success=new_cp is not None, old_cp=old_cp, new_cp=new_cp,
+                            note="" if new_cp is not None else "No detail page after evolving")
 
     def tag_pokemon(self, tag_name: str = "Mega") -> bool:
         """Apply a tag (e.g. Mega) via the detail hamburger menu."""

@@ -58,15 +58,14 @@ TRANSFER_NO_BTN. The screen-reading bands fall back to the values measured on
 the compact-layout device and can be overridden per device.
 """
 
+from . import android_common
+from .android_common import find_display_id, swipe_tap as tap  # noqa: F401  re-exported for callers and tests
 import asyncio
-import re
 import struct
-from pathlib import Path
 
 try:
     from ppadb.client_async import ClientAsync
     from ppadb.device_async import DeviceAsync
-    import yaml
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
@@ -75,7 +74,7 @@ except ModuleNotFoundError as e:
 
 CONFIG_FILE_DIR  = '/storage/self/primary/'
 CONFIG_FILE_NAME = 'AutoTraderConfig.yaml'
-TMP_FILE_NAME    = 'tmp_trash_{}.yaml'
+TMP_FILE_NAME = 'tmp_trash_{}.yaml'  # per device, under the private state dir
 CONFIG = dict[str, list[int]]
 
 TRASH_KEYS = {'FIRST_PKMN_BTN', 'X_BTN', 'TILE_PITCH', 'TRASH_MENU_BTN',
@@ -97,8 +96,7 @@ MAX_DIALOGS    = 4     # two are expected; the cap only bounds a misread
 
 SCREENCAP_TIMEOUT = 20   # adb exec-out screencap wedges outright now and then
 
-_ADB = Path(__file__).resolve().parent.parent / 'adb'
-ADB_BINARY = str(_ADB) if _ADB.exists() else 'adb'
+ADB_BINARY = android_common.adb_binary()
 
 # --- Telling the four screens apart -----------------------------------------
 # Measured on the compact-layout device (720x1600) across one saved frame of each screen:
@@ -245,38 +243,8 @@ def log(device: DeviceAsyncWrapper, *parts):
     print(f'[{device.label}]', *parts)
 
 
-async def tap(device: DeviceAsyncWrapper, point: list[int]):
-    """Sends a tap at point to device."""
-    x, y = point
-    # Uses a tiny swipe over 100 ms for increased reliability, as in trade.py.
-    await device.shell(f'input swipe {x} {y} {x+1} {y+1} 100')
-
-
 async def wait(seconds: float, use_modifier: bool = True):
     await asyncio.sleep(max(seconds + (SLEEP_MODIFIER if use_modifier else 0), 0))
-
-
-async def find_display_id(device: DeviceAsyncWrapper) -> str | None:
-    """The display to capture, or None when the device only has one.
-
-    Foldables report two displays, and `screencap` with no -d prints a warning
-    onto stdout ahead of the framebuffer, so the header unpack reads that text
-    as the width and height and every screen read fails.
-    """
-    try:
-        listed = await device.shell('dumpsys SurfaceFlinger --display-id')
-        ids = re.findall(r'^Display (\d+)', listed, re.M)
-        if len(ids) < 2:
-            return None
-        for viewport in (await device.shell('dumpsys display')).split('DisplayViewport{')[1:]:
-            if 'isActive=true' not in viewport:
-                continue
-            match = re.search(r"uniqueId='local:(\d+)'", viewport)
-            if match and match.group(1) in ids:
-                return match.group(1)
-        return ids[0]
-    except Exception:
-        return None
 
 
 async def screencap_raw(device: DeviceAsyncWrapper):
@@ -701,24 +669,8 @@ async def trash_process(device: DeviceAsyncWrapper, limit: int):
 
 async def get_config(device: DeviceAsyncWrapper) -> CONFIG:
     """Pulls config file from device and parses it. Sets the `config` attribute on success."""
-    config_file_path = CONFIG_FILE_DIR + CONFIG_FILE_NAME
-    tmp_file_path = Path(TMP_FILE_NAME.format(re.sub(r'\W', '_', device.serial)))
-    try:
-        await device.pull(config_file_path, tmp_file_path)
-        content = tmp_file_path.read_text() if tmp_file_path.exists() else ''
-    finally:
-        tmp_file_path.unlink(missing_ok=True)
-    if not content:
-        raise LuckyTrashError(f'Found no config file at {config_file_path}')
-    config: CONFIG = yaml.safe_load(content)
-    assert isinstance(config, dict), 'Incorrect config file format (should be an object with keys)'
-    if not TRASH_KEYS <= set(config.keys()):
-        raise LuckyTrashError(f'Missing config key(s): {TRASH_KEYS - set(config.keys())}')
-    for coords in config.values():
-        assert isinstance(coords, list) and len(coords) == 2 and all(isinstance(i, int) for i in coords),\
-            'Invalid coords format in config (should be list with two integers)'
-    device.config = config
-    return config
+    return await android_common.pull_config(
+        device, CONFIG_FILE_DIR + CONFIG_FILE_NAME, TMP_FILE_NAME, TRASH_KEYS, LuckyTrashError)
 
 
 async def setup(serials: list[str] | None = None) -> list[DeviceAsyncWrapper]:

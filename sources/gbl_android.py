@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
-from . import config_paths
-
 """
 AutoGBL — Plays Go Battle League sets in Pokémon GO on every connected Android
 phone at once.
@@ -48,6 +44,13 @@ play_device), so a phone that has fallen out to the map stops instead of
 tapping at the map.
 """
 
+from __future__ import annotations
+
+from . import config_paths
+from . import android_common
+from .android_common import find_display_id  # noqa: F401  re-exported for callers and tests
+
+
 import asyncio
 import math
 import re
@@ -68,13 +71,11 @@ from . import (
     gbl_strategy,
     gbl_vision,
     legendary_pokemon,
-    pokemon_fleet,
 )
 
 try:
     from ppadb.client_async import ClientAsync
     from ppadb.device_async import DeviceAsync
-    import yaml
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
@@ -83,7 +84,7 @@ except ModuleNotFoundError as e:
 
 CONFIG_FILE_DIR = '/storage/self/primary/'
 CONFIG_FILE_NAME = 'AutoTraderConfig.yaml'
-TMP_FILE_NAME = str(config_paths.temporary_file("tmp_gbl_{}.yaml"))   # per device: configs are pulled concurrently
+TMP_FILE_NAME = 'tmp_gbl_{}.yaml'  # per device, under the private state dir
 CONFIG = dict[str, list[int]]
 
 # The only coordinate the loop cannot find for itself. Every button it taps is
@@ -732,8 +733,7 @@ REWARD_PANEL_TOP = (0.40, 0.62)
 REWARD_SCROLL_LIMIT = 3
 
 # Prefer the bundled adb binary from platform-tools.
-_ADB = Path(__file__).resolve().parent.parent / 'adb'
-ADB_BINARY = str(_ADB) if _ADB.exists() else pokemon_fleet.default_adb_binary()
+ADB_BINARY = android_common.adb_binary()
 
 
 class DeviceAsyncWrapper(DeviceAsync):
@@ -1194,33 +1194,6 @@ async def tap(device: DeviceAsyncWrapper, point: list[int]):
 
 async def wait(seconds: float, use_modifier: bool = True):
     await asyncio.sleep(max(seconds + (SLEEP_MODIFIER if use_modifier else 0), 0))
-
-
-async def find_display_id(device: DeviceAsyncWrapper) -> str | None:
-    """The display to capture, or None when the device only has one.
-
-    Foldables report two displays, and `screencap` with no -d prints
-    "[Warning] Multiple displays found, but no display id specified!" onto
-    stdout ahead of the framebuffer, so the header unpack reads that text as the
-    width and height and every screen read fails.
-
-    The *active* display, not simply the first: folding the phone shut hands
-    over to the cover display, which is a different size and coordinate space.
-    """
-    try:
-        listed = await device.shell('dumpsys SurfaceFlinger --display-id')
-        ids = re.findall(r'^Display (\d+)', listed, re.M)
-        if len(ids) < 2:
-            return None
-        for viewport in (await device.shell('dumpsys display')).split('DisplayViewport{')[1:]:
-            if 'isActive=true' not in viewport:
-                continue
-            match = re.search(r"uniqueId='local:(\d+)'", viewport)
-            if match and match.group(1) in ids:
-                return match.group(1)
-        return ids[0]
-    except Exception:
-        return None
 
 
 async def screencap_raw(device: DeviceAsyncWrapper):
@@ -2467,8 +2440,6 @@ async def encounter_behind_battle(frame) -> str | None:
     minigame is the one battle frame measured with a ball-like shape, and its
     top plates stay up.  'ball' is weaker, so the caller wants it twice.
     """
-    from . import excellent_throw_ios
-
     image = frame_image(frame)
     top, bottom = gbl_vision.ENCOUNTER_PLATE_BAND
     crop = (0, int(image.height * top), image.width, int(image.height * bottom))
@@ -3174,7 +3145,6 @@ def excellent_thrower(device: DeviceAsyncWrapper, image):
     routine is driven over them rather than shelled out, the same way the iOS
     side drives it over its live WDA session.
     """
-    from . import excellent_throw_android
 
     config = excellent_throw_android.load_config(
         None, excellent_throw_android.parse_args([])
@@ -3208,7 +3178,6 @@ async def throw_ball(
     drives it over its live WDA session.
     """
     # None means no throw was sent; False is a sent throw without a catch.
-    from . import excellent_throw_android
 
     image = frame_image(frame)
     thrower = excellent_thrower(device, image)
@@ -5239,26 +5208,9 @@ async def probe(devices: list[DeviceAsyncWrapper]):
 
 
 async def get_config(device: DeviceAsyncWrapper) -> CONFIG:
-    config_file_path = CONFIG_FILE_DIR + CONFIG_FILE_NAME
-    tmp_file_path = Path(TMP_FILE_NAME.format(re.sub(r'\W', '_', device.serial)))
-    try:
-        await device.pull(config_file_path, tmp_file_path)
-        content = tmp_file_path.read_text() if tmp_file_path.exists() else ''
-    finally:
-        tmp_file_path.unlink(missing_ok=True)
-    if not content:
-        raise AutoGBLError(f'Found no config file at {config_file_path}')
-    config: CONFIG = yaml.safe_load(content)
-    assert isinstance(config, dict), 'Incorrect config file (should be an object of keys)'
-    if not GBL_KEYS <= set(config.keys()):
-        raise AutoGBLError(f'Missing config key(s): {GBL_KEYS - set(config.keys())}')
-    for key in GBL_KEYS:
-        coords = config[key]
-        assert isinstance(coords, list) and len(coords) == 2 \
-            and all(isinstance(i, int) for i in coords), \
-            f'Invalid coords format for {key} (should be a list of two integers)'
-    device.config = config
-    return config
+    """Pulls config file from device and parses it. Sets the `config` attribute on success."""
+    return await android_common.pull_config(
+        device, CONFIG_FILE_DIR + CONFIG_FILE_NAME, TMP_FILE_NAME, GBL_KEYS, AutoGBLError, coordinate_keys=GBL_KEYS)
 
 
 async def setup() -> list[DeviceAsyncWrapper]:

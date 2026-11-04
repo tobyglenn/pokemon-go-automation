@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-import yaml
 from PIL import Image, ImageDraw
 
 from sources import gbl_android, gbl_day, gbl_home_recovery, gbl_ios, gbl_vision

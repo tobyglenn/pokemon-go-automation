@@ -7,7 +7,6 @@ import asyncio
 import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 

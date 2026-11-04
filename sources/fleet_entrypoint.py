@@ -8,7 +8,7 @@ import socket
 import subprocess
 import sys
 import threading
-from typing import Sequence
+from typing import Callable, Sequence
 from . import config_paths, device_owners, fleet_watchdog, pokemon_fleet
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -410,14 +410,37 @@ def run_operation(operation: str, script_name: str, arguments: Sequence[str] | N
         fleet_watchdog.install()
     return pokemon_fleet.main()
 
-def direct_module_operation(operation: str, script_name: str) -> int | None:
-    """Platform modules are fleet entrypoints unless the controller marked a worker."""
-    if os.environ.get("POKEMON_FLEET_CHILD") == "1":
-        return None
+def is_worker_invocation(arguments: Sequence[str] | None = None) -> bool:
+    """True when the fleet controller launched this process as a worker.
+
+    The controller marks its children with POKEMON_FLEET_CHILD=1, and passes
+    `--fleet-child` to the iOS workers. Either marker stops a worker from
+    fanning out to the fleet again.
+    """
+    argv = sys.argv if arguments is None else arguments
+    return os.environ.get("POKEMON_FLEET_CHILD") == "1" or "--fleet-child" in argv
+
+
+def _run_guarded(action: Callable[[], int | None]) -> int | None:
     try:
-        return run_operation(operation, script_name)
+        return action()
     except KeyboardInterrupt:
         return 130
     except (RuntimeError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def direct_module_operation(operation: str, script_name: str) -> int | None:
+    """Platform modules are fleet entrypoints unless the controller marked a worker."""
+    if is_worker_invocation():
+        return None
+    return _run_guarded(lambda: run_operation(operation, script_name))
+
+
+def run_worker_module(main: Callable[[], int | None], operation: str, script_name: str) -> int | None:
+    """`python -m sources.<worker>`: run the worker itself when the fleet launched
+    it, otherwise route the command through the fleet like the public script."""
+    if is_worker_invocation():
+        return _run_guarded(main)
+    return _run_guarded(lambda: run_operation(operation, script_name))

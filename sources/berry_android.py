@@ -24,17 +24,16 @@ The game picks the next berry type itself when a stack runs out, so nothing
 here tracks berry stock.
 """
 
+from . import android_common
+from .android_common import find_display_id, swipe_tap as tap  # noqa: F401  re-exported for callers and tests
 import asyncio
 import random
-import re
 import struct
 import sys
-from pathlib import Path
 
 try:
     from ppadb.client_async import ClientAsync
     from ppadb.device_async import DeviceAsync
-    import yaml
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
@@ -43,7 +42,7 @@ except ModuleNotFoundError as e:
 
 CONFIG_FILE_DIR  = '/storage/self/primary/'
 CONFIG_FILE_NAME = 'AutoTraderConfig.yaml'
-TMP_FILE_NAME    = 'tmp_berry_{}.yaml'  # per device: configs are pulled concurrently
+TMP_FILE_NAME = 'tmp_berry_{}.yaml'  # per device, under the private state dir
 CONFIG = dict[str, list[int]]
 
 BERRY_KEYS = {'BERRY_BTN', 'NEXT_MON_FROM', 'NEXT_MON_TO'}
@@ -114,8 +113,7 @@ MAX_TURNS_PER_DEFENDER = 3   # the carousel revisits cards, so allow slack
 # This script lives in platform-tools, so prefer the adb binary next to it.
 SWIPE_PROFILES = ((1.0, 150), (0.78, 250), (0.60, 400))
 
-_ADB = Path(__file__).resolve().parent.parent / 'adb'
-ADB_BINARY = str(_ADB) if _ADB.exists() else 'adb'
+ADB_BINARY = android_common.adb_binary()
 
 # --- Defender card fingerprint ---
 # The fingerprint identifies which defender is on screen. It is used to tell a
@@ -342,13 +340,6 @@ def log(device: DeviceAsyncWrapper, *parts):
     print(f'[{device.label}]', *parts)
 
 
-async def tap(device: DeviceAsyncWrapper, point: list[int]):
-    """Sends a tap at point to device."""
-    x, y = point
-    # Uses a tiny swipe over 100 ms for increased reliability, as in trade.py.
-    await device.shell(f'input swipe {x} {y} {x+1} {y+1} 100')
-
-
 async def swipe(device: DeviceAsyncWrapper, start: list[int], end: list[int], ms: int = SWIPE_MS):
     """Sends a swipe from start to end over `ms` milliseconds."""
     x0, y0 = start
@@ -375,34 +366,6 @@ async def pointer(device: DeviceAsyncWrapper, on: bool):
 
 async def wait(seconds: float, use_modifier: bool = True):
     await asyncio.sleep(max(seconds + (SLEEP_MODIFIER if use_modifier else 0), 0))
-
-
-async def find_display_id(device: DeviceAsyncWrapper) -> str | None:
-    """The display to capture, or None when the device only has one.
-
-    Foldables report two displays, and `screencap` with no -d prints
-    "[Warning] Multiple displays found, but no display id specified!" onto
-    stdout ahead of the framebuffer, so the header unpack reads that text as the
-    width and height and every screen read fails. Seen on the android-three, where it
-    left gift.py's guard switched off for a whole run.
-
-    The *active* display, not simply the first: folding the phone shut hands
-    over to the cover display, which is a different size and coordinate space.
-    """
-    try:
-        listed = await device.shell('dumpsys SurfaceFlinger --display-id')
-        ids = re.findall(r'^Display (\d+)', listed, re.M)
-        if len(ids) < 2:
-            return None
-        for viewport in (await device.shell('dumpsys display')).split('DisplayViewport{')[1:]:
-            if 'isActive=true' not in viewport:
-                continue
-            match = re.search(r"uniqueId='local:(\d+)'", viewport)
-            if match and match.group(1) in ids:
-                return match.group(1)
-        return ids[0]
-    except Exception:
-        return None
 
 
 async def screencap_raw(device: DeviceAsyncWrapper):
@@ -1593,24 +1556,8 @@ async def berry_process(devices: list[DeviceAsyncWrapper]):
 
 async def get_config(device: DeviceAsyncWrapper) -> CONFIG:
     """Pulls config file from device and parses it. Sets the `config` attribute on success."""
-    config_file_path = CONFIG_FILE_DIR + CONFIG_FILE_NAME
-    tmp_file_path = Path(TMP_FILE_NAME.format(re.sub(r'\W', '_', device.serial)))
-    try:
-        await device.pull(config_file_path, tmp_file_path)
-        content = tmp_file_path.read_text() if tmp_file_path.exists() else ''
-    finally:
-        tmp_file_path.unlink(missing_ok=True)
-    if not content:
-        raise AutoBerryError(f'Found no config file at {config_file_path}')
-    config: CONFIG = yaml.safe_load(content)
-    assert isinstance(config, dict), 'Incorrect config file format (should be an object with keys)'
-    if not BERRY_KEYS <= set(config.keys()):
-        raise AutoBerryError(f'Missing config key(s): {BERRY_KEYS - set(config.keys())}')
-    for coords in config.values():
-        assert isinstance(coords, list) and len(coords) == 2 and all(isinstance(i, int) for i in coords),\
-            'Invalid coords format in config (should be list with two integers)'
-    device.config = config
-    return config
+    return await android_common.pull_config(
+        device, CONFIG_FILE_DIR + CONFIG_FILE_NAME, TMP_FILE_NAME, BERRY_KEYS, AutoBerryError)
 
 
 async def setup() -> list[DeviceAsyncWrapper]:

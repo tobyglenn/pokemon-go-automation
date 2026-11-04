@@ -2280,7 +2280,6 @@ class BattleController(TradeController):
 
 
 async def connect_battle_controller(spec: DeviceSpec) -> BattleController:
-    from . import trade_android as android_trade
     from . import trade_ios_android as cross
 
     op = spec.operation("battle")

@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 from . import config_paths
+from .android_common import find_display_id  # noqa: F401  re-exported for callers and tests
 
 import argparse
 import asyncio
-import contextlib
 import io
-import os
 import re
 import struct
 import time
@@ -528,31 +527,6 @@ def analysis_view(viewport: tuple[int, int]) -> AnalysisView:
     return AnalysisView(
         (ANALYSIS_WIDTH, small_height), width / ANALYSIS_WIDTH, height / small_height
     )
-
-
-async def find_display_id(device: "DeviceAsync") -> str | None:
-    """The display to capture, or None when the phone only has one.
-
-    Foldables report two, and `screencap` with no -d prints a warning line onto
-    stdout ahead of the framebuffer, so the header unpack reads that text as
-    the width and height and every read fails.  The *active* display: folding
-    the phone shut hands over to the cover display, a different coordinate
-    space.  Same probe as `gbl_android.find_display_id`.
-    """
-    try:
-        listed = await device.shell("dumpsys SurfaceFlinger --display-id")
-        ids = re.findall(r"^Display (\d+)", listed, re.M)
-        if len(ids) < 2:
-            return None
-        for viewport in (await device.shell("dumpsys display")).split("DisplayViewport{")[1:]:
-            if "isActive=true" not in viewport:
-                continue
-            match = re.search(r"uniqueId=\'local:(\d+)\'", viewport)
-            if match and match.group(1) in ids:
-                return match.group(1)
-        return ids[0]
-    except Exception:
-        return None
 
 
 def decode_raw_framebuffer(data: bytes) -> Image.Image | None:

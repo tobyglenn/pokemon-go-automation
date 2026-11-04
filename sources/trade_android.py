@@ -7,10 +7,11 @@ Author: jonaro00
 from __future__ import annotations
 
 from . import config_paths
+from . import android_common
+from .android_common import find_display_id, swipe_tap as tap  # noqa: F401  re-exported for callers and tests
 
 import asyncio
 from dataclasses import dataclass
-import re
 import struct
 import time
 from pathlib import Path
@@ -18,7 +19,6 @@ from pathlib import Path
 try:
     from ppadb.client_async import ClientAsync
     from ppadb.device_async import DeviceAsync
-    import yaml
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
@@ -27,7 +27,7 @@ except ModuleNotFoundError as e:
 
 CONFIG_FILE_DIR  = '/storage/self/primary/'
 CONFIG_FILE_NAME = 'AutoTraderConfig.yaml'
-TMP_FILE_PATH    = Path('tmp.yaml')
+TMP_FILE_NAME = 'tmp_trade_{}.yaml'  # per device, under the private state dir
 CONFIG = dict[str, list[int]]
 
 
@@ -78,8 +78,7 @@ SLEEP_MODIFIER = 0
 
 # Used for the framebuffer grab in dismiss_record_screen. This script lives in
 # platform-tools, so prefer the adb binary sitting next to it.
-_ADB = Path(__file__).resolve().parent.parent / 'adb'
-ADB_BINARY = str(_ADB) if _ADB.exists() else 'adb'
+ADB_BINARY = android_common.adb_binary()
 
 # --- Size record card ---
 # After a trade, the game sometimes slides a full width "New Height Record" /
@@ -131,14 +130,6 @@ class AutoTraderError(Exception):
     pass
 
 
-async def tap(device: DeviceAsyncWrapper, point: list[int]):
-    """Sends a tap at point to device."""
-    x, y = point
-    # Uses a tiny swipe over 100 ms for increased reliability
-    # and visibility on the Pointer Location tool.
-    await device.shell(f'input swipe {x} {y} {x+1} {y+1} 100')
-
-
 async def dismiss_power_up_screen(devices: list[DeviceAsyncWrapper]):
     """Check each device for the post-trade Power Up screen and cancel it if found."""
     for device in devices:
@@ -149,34 +140,6 @@ async def dismiss_power_up_screen(devices: list[DeviceAsyncWrapper]):
             print('    Power Up screen detected on', device.serial, '— cancelling')
             await tap(device, device.config['POWER_UP_CANCEL_BTN'])
             await asyncio.sleep(1)
-
-
-async def find_display_id(device: DeviceAsyncWrapper) -> str | None:
-    """The display to capture, or None when the device only has one.
-
-    Foldables report two displays, and `screencap` with no -d prints
-    "[Warning] Multiple displays found, but no display id specified!" onto
-    stdout ahead of the framebuffer, so the header unpack reads that text as the
-    width and height and every screen read fails. Seen on the android-three, where it
-    left gift.py's guard switched off for a whole run.
-
-    The *active* display, not simply the first: folding the phone shut hands
-    over to the cover display, which is a different size and coordinate space.
-    """
-    try:
-        listed = await device.shell('dumpsys SurfaceFlinger --display-id')
-        ids = re.findall(r'^Display (\d+)', listed, re.M)
-        if len(ids) < 2:
-            return None
-        for viewport in (await device.shell('dumpsys display')).split('DisplayViewport{')[1:]:
-            if 'isActive=true' not in viewport:
-                continue
-            match = re.search(r"uniqueId='local:(\d+)'", viewport)
-            if match and match.group(1) in ids:
-                return match.group(1)
-        return ids[0]
-    except Exception:
-        return None
 
 
 async def _screencap_once(device: DeviceAsyncWrapper):
@@ -311,7 +274,6 @@ async def trade_sequence(devices: list[DeviceAsyncWrapper]):
     """Sends taps to devices in a sequence with delays
     to complete a trade process. Device must have
     button coordinates stored in attribute `config`."""
-    global SLEEP_MODIFIER
     for btn in BUTTONS:
         delay = max(btn.delay_after + (SLEEP_MODIFIER if btn.use_delay_modifier else 0), 0)
         commands = (tap(dev, dev.config.get(btn.name, btn.default_coords)) for dev in devices)
@@ -338,21 +300,8 @@ async def trade_process(devices: list[DeviceAsyncWrapper], n_trades: int):
 
 async def get_config(device: DeviceAsyncWrapper) -> CONFIG:
     """Pulls config file from device and parses it. Sets the `config` attribute on success."""
-    config_file_path = CONFIG_FILE_DIR + CONFIG_FILE_NAME
-    await device.pull(config_file_path, TMP_FILE_PATH)
-    content = TMP_FILE_PATH.read_text()
-    TMP_FILE_PATH.unlink()
-    if not content:
-        raise AutoTraderError(f'Found no config file at {config_file_path}')
-    config: CONFIG = yaml.safe_load(content)
-    assert isinstance(config, dict), f'Incorrect config file format (should be an object with keys)'
-    if not BUTTON_NAMES <= set(config.keys()):
-        raise AutoTraderError(f'Missing config key(s): {BUTTON_NAMES - set(config.keys())}')
-    for coords in config.values():
-        assert isinstance(coords, list) and all(map(lambda i: isinstance(i, int), coords)),\
-            f'Invalid coords format in config (should be list with two integers)'
-    device.config = config
-    return config
+    return await android_common.pull_config(
+        device, CONFIG_FILE_DIR + CONFIG_FILE_NAME, TMP_FILE_NAME, BUTTON_NAMES, AutoTraderError)
 
 
 async def set_setting(device: DeviceAsyncWrapper, namespace_and_key: str, value):

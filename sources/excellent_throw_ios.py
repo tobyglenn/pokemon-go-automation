@@ -1581,38 +1581,6 @@ class IOSExcellentThrowDevice:
         source.create_pointer_up(button=0)
         actions.perform()
 
-    def curve_throw(
-        self,
-        start: Sequence[int],
-        path: Sequence[tuple[int, int, int]],
-        *,
-        initial_pause: float | None = None,
-    ) -> None:
-        from selenium.webdriver.common.actions.action_builder import ActionBuilder
-        from selenium.webdriver.common.actions.interaction import POINTER_TOUCH
-        from selenium.webdriver.common.actions.pointer_input import PointerInput
-
-        finger = PointerInput(POINTER_TOUCH, "curve-finger")
-        actions = ActionBuilder(self.driver, mouse=finger)
-        source = actions.pointer_action.source
-        source.create_pointer_move(
-            duration=0, x=int(start[0]), y=int(start[1]), origin="viewport"
-        )
-        source.create_pointer_down(button=0)
-        pause_seconds = (
-            self.config.initial_spin_pause_seconds
-            if initial_pause is None
-            else initial_pause
-        )
-        if pause_seconds > 0:
-            source.create_pause(float(pause_seconds))
-        for x, y, duration_ms in path:
-            source.create_pointer_move(
-                duration=int(duration_ms), x=int(x), y=int(y), origin="viewport"
-            )
-        source.create_pointer_up(button=0)
-        actions.perform()
-
     def _pointer_down_action(self, point: Sequence[int]) -> None:
         from selenium.webdriver.common.actions.action_builder import ActionBuilder
         from selenium.webdriver.common.actions.interaction import POINTER_TOUCH
@@ -2609,9 +2577,6 @@ def _detect_immediate_target(
         cluster_x = round(
             sum(c.center_x for c in pool) / len(pool)
         )
-        cluster_y = round(
-            sum(c.center_y for c in pool) / len(pool)
-        )
         target_y = max(
             round(height * 0.30),
             min(
@@ -2829,66 +2794,6 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         help="record one press-hold-release HOLD seconds exit; spends no ball",
     )
     return parser.parse_args(arguments)
-
-
-def await_attached_throw_configs(delay_seconds: float = 5.0) -> list[Path]:
-    """Wait until all configured throw profiles match USB-attached phones."""
-    while True:
-        profiles = known_configs()
-        expected: list[str] = []
-        for path in profiles:
-            udid = config_udid(path)
-            if udid is not None and udid not in expected:
-                expected.append(udid)
-
-        if not expected:
-            raise ExcellentThrowError(
-                f"No {CONFIG_GLOB} profiles found in: "
-                + ", ".join(str(item) for item in config_paths.search_dirs())
-            )
-
-        try:
-            attached = ios_attached_devices.attached_devices()
-        except ios_attached_devices.AttachedDeviceError as exc:
-            print(f"Could not read attached iPhones: {exc}; retrying", flush=True)
-            time.sleep(delay_seconds)
-            continue
-
-        usb = {udid for udid, connection in attached.items() if connection == "USB"}
-        if not usb:
-            non_usb = [
-                f"{udid} via {connection}"
-                for udid, connection in attached.items()
-                if connection != "USB"
-            ]
-            print(
-                "Waiting for USB-attached iPhones. Connected phones are not on USB cable: "
-                + (
-                    ", ".join(non_usb)
-                    if non_usb
-                    else "none"
-                ),
-                flush=True,
-            )
-            time.sleep(delay_seconds)
-            continue
-
-        missing = [udid for udid in expected if udid not in usb]
-        if missing:
-            print(
-                f"Waiting for throw devices: {', '.join(missing)}",
-                flush=True,
-            )
-            time.sleep(delay_seconds)
-            continue
-
-        selected = select_configs()
-        if not selected:
-            print("Devices attached but no throw config matches yet; retrying", flush=True)
-            time.sleep(delay_seconds)
-            continue
-
-    return selected
 
 
 def await_attached_throw_configs(delay_seconds: float = 5.0) -> list[Path]:

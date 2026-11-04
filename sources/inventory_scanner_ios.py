@@ -8,21 +8,12 @@ using native Apple Vision OCR / Tesseract, and feeds the scanned inventory into 
 
 from __future__ import annotations
 
-import base64
-import io
-import json
-import os
 import re
 import subprocess
-import sys
 import time
 from pathlib import Path
-from typing import Any
 
-from PIL import Image
-import yaml
-
-from . import config_paths, gbl_evaluator, gbl_ios, gift_ios, pokemon_fleet
+from . import config_paths, gbl_evaluator, ios_wda_cleanup, pokemon_fleet
 
 SWIFT_OCR_PATH = Path("/tmp/ocr_mac")
 

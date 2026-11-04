@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from PIL import Image
 from scripts import raid_prep
-from sources import raid_prep_android, raid_prep_ios, vision_ocr
+from sources import raid_prep_android, raid_prep_common, raid_prep_ios, vision_ocr
 
 
 class TaskLoadingTests(unittest.TestCase):
@@ -107,6 +107,80 @@ class IOSRaidPrepTests(unittest.TestCase):
         )
         self.assertTrue(res.success)
         self.assertEqual(res.final_cp, 2741)
+
+
+def _box(text: str, y: int, x: int = 300) -> vision_ocr.TextBox:
+    return vision_ocr.TextBox(text=text, x=x, y=y, w=80, h=30)
+
+
+class SharedRaidPrepRuleTests(unittest.TestCase):
+    def test_power_up_needs_a_higher_cp_on_the_page(self) -> None:
+        self.assertFalse(raid_prep_common.powered_up(2000, None))
+        self.assertFalse(raid_prep_common.powered_up(2000, 2000))
+        self.assertTrue(raid_prep_common.powered_up(2000, 2100))
+        self.assertTrue(raid_prep_common.powered_up(None, 2100))
+
+    def test_overshoot_is_xl_or_past_the_target(self) -> None:
+        band = (800, 1050)
+        self.assertTrue(raid_prep_common.overshot([_box("Candy XL", 900)], 100, None, band))
+        self.assertFalse(raid_prep_common.overshot([_box("Candy XL", 200)], 100, None, band))
+        self.assertTrue(raid_prep_common.overshot([], 3900, 3830, band))
+        self.assertFalse(raid_prep_common.overshot([], 3830, 3830, band))
+
+    def test_preview_cp_reads_the_arrow(self) -> None:
+        self.assertEqual(raid_prep_common.preview_cp([_box("CP 547 → 610", 500)], None), 610)
+        self.assertEqual(raid_prep_common.preview_cp([], 42), 42)
+
+
+class AndroidFailClosedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.phone = MagicMock()
+        self.phone.viewport = (720, 1600)
+        self.worker = raid_prep_android.AndroidRaidPrepWorker(self.phone)
+
+    def test_search_refuses_a_cp_that_is_not_on_the_grid(self) -> None:
+        self.worker.scanner = MagicMock()
+        self.worker.scanner.search.return_value = (2, [], Image.new("RGB", (720, 1600)), [])
+        entry = MagicMock(cp=2700, x=100, y=400)
+        with patch.object(raid_prep_android.raid_scan_android, "parse_grid_entries", return_value=[entry]):
+            self.assertFalse(self.worker.search_and_open("tyranitar", expected_cp=2718))
+        self.phone.tap.assert_not_called()
+
+    def test_power_up_without_dialog_taps_nothing_more(self) -> None:
+        image = Image.new("RGB", (720, 1600))
+        detail = [_box("CP 2718", 100), _box("POWER UP", 1100)]
+        self.phone.read.side_effect = [(image, detail), (image, detail)]
+        result = self.worker.power_up_to_level_40(target_cp=3830)
+        self.assertFalse(result.success)
+        self.assertEqual(result.note, "Power up dialog did not open")
+        self.assertEqual(self.phone.tap.call_count, 1)  # only the POWER UP button
+
+    def test_evolve_without_yes_does_not_tap_blind(self) -> None:
+        image = Image.new("RGB", (720, 1600))
+        detail = [_box("CP 900", 100), _box("EVOLVE", 1200)]
+        popup = [_box("NO", 1000)]
+        self.phone.read.side_effect = [(image, detail), (image, popup)]
+        result = self.worker.evolve()
+        self.assertFalse(result.success)
+        tapped = [call.args[0] for call in self.phone.tap.call_args_list]
+        self.assertNotIn((0.50, 0.60), tapped)
+
+    def test_power_up_steps_back_from_an_overshoot(self) -> None:
+        image = Image.new("RGB", (720, 1600))
+        h = 1600
+        detail = [_box("CP 1000", 100), _box("POWER UP", int(h * 0.6))]
+        dialog = [_box("POWER UP: 2", int(h * 0.3)), _box("+", int(h * 0.75), x=530), _box("CP 1000 → 1000", 500)]
+        over = dialog[:2] + [_box("CP 1000 → 1300", 500)]
+        back = dialog[:2] + [_box("CP 1000 → 1200", 500), _box("POWER UP", int(h * 0.8))]
+        final = [_box("CP 1200", 100)]
+        popup: list = []
+        self.phone.read.side_effect = [
+            (image, detail), (image, dialog), (image, over), (image, back), (image, popup), (image, final)
+        ]
+        with patch.object(raid_prep_android.time, "sleep"):
+            result = self.worker.power_up_to_level_40(target_cp=1250)
+        self.assertTrue(result.success)
+        self.assertEqual(result.final_cp, 1200)
 
 
 if __name__ == "__main__":

@@ -15,14 +15,14 @@ Rematch cycle:
   5. Pause 3 seconds, back to 1.
 """
 
+from . import android_common
+from .android_common import swipe_tap as tap  # noqa: F401  re-exported for callers and tests
 import asyncio
 import time
-from pathlib import Path
 
 try:
     from ppadb.client_async import ClientAsync
     from ppadb.device_async import DeviceAsync
-    import yaml
     from yaml.parser import ParserError
 except ModuleNotFoundError as e:
     print(e)
@@ -31,7 +31,7 @@ except ModuleNotFoundError as e:
 
 CONFIG_FILE_DIR  = '/storage/self/primary/'
 CONFIG_FILE_NAME = 'AutoTraderConfig.yaml'
-TMP_FILE_PATH    = Path('tmp_battle.yaml')
+TMP_FILE_NAME = 'tmp_battle_{}.yaml'  # per device, under the private state dir
 CONFIG = dict[str, list[int]]
 
 BATTLE_KEYS    = {'BATTLE_BTN', 'USE_PARTY_BTN', 'REMATCH_BTN'}
@@ -51,14 +51,6 @@ class DeviceAsyncWrapper(DeviceAsync):
 
 class AutoBattlerError(Exception):
     pass
-
-
-async def tap(device: DeviceAsyncWrapper, point: list[int]):
-    """Sends a tap at point to device."""
-    x, y = point
-    # Uses a tiny swipe over 100 ms for increased reliability
-    # and visibility on the Pointer Location tool.
-    await device.shell(f'input swipe {x} {y} {x+1} {y+1} 100')
 
 
 async def pointer(devices: list[DeviceAsyncWrapper], on: bool):
@@ -116,21 +108,8 @@ async def battle_process(devices: list[DeviceAsyncWrapper], n: int, first_battle
 
 async def get_config(device: DeviceAsyncWrapper) -> CONFIG:
     """Pulls config file from device and parses it. Sets the `config` attribute on success."""
-    config_file_path = CONFIG_FILE_DIR + CONFIG_FILE_NAME
-    await device.pull(config_file_path, TMP_FILE_PATH)
-    content = TMP_FILE_PATH.read_text()
-    TMP_FILE_PATH.unlink(missing_ok=True)
-    if not content:
-        raise AutoBattlerError(f'Found no config file at {config_file_path}')
-    config: CONFIG = yaml.safe_load(content)
-    assert isinstance(config, dict), 'Incorrect config file format (should be an object with keys)'
-    if not BATTLE_KEYS <= set(config.keys()):
-        raise AutoBattlerError(f'Missing config key(s): {BATTLE_KEYS - set(config.keys())}')
-    for coords in config.values():
-        assert isinstance(coords, list) and len(coords) == 2 and all(isinstance(i, int) for i in coords),\
-            'Invalid coords format in config (should be list with two integers)'
-    device.config = config
-    return config
+    return await android_common.pull_config(
+        device, CONFIG_FILE_DIR + CONFIG_FILE_NAME, TMP_FILE_NAME, BATTLE_KEYS, AutoBattlerError)
 
 
 async def setup() -> list[DeviceAsyncWrapper]:
