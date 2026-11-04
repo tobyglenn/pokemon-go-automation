@@ -52,7 +52,8 @@ class PullConfigTests(unittest.TestCase):
         config = self.pull(device)
         self.assertEqual(config, {"A_BTN": [1, 2], "B_BTN": [3, 4]})
         self.assertIs(device.config, config)
-        self.assertTrue(str(device.pulled_to).startswith(self.state.name))
+        # state_dir() resolves the path; macOS temp dirs sit behind /private.
+        self.assertTrue(str(device.pulled_to).startswith(str(Path(self.state.name).resolve())))
         self.assertIn("emulator_5554", device.pulled_to.name)
         self.assertFalse(device.pulled_to.exists())
 

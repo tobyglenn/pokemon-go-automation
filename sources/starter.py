@@ -73,6 +73,7 @@ TRAINER_AVATAR = [(0.11, 0.925), (0.11, 0.91), (0.11, 0.94)]
 # Play screen: the berry button bottom-left, the camera bottom-centre and the
 # exit door top-left.  Searched for in these bands rather than tapped blind.
 BERRY_BUTTON_BAND = ((0.02, 0.28), (0.82, 0.99))
+BERRY_FALLBACK = (0.135, 0.898)   # the greyed button's centre (SE, 750x1334: 101, 1198)
 CAMERA_BAND = ((0.38, 0.62), (0.82, 0.99))
 THUMBNAIL_BAND = ((0.74, 0.99), (0.82, 0.99))
 DOOR_BAND = ((0.02, 0.22), (0.02, 0.13))
@@ -606,7 +607,7 @@ async def open_storage(phone: Phone) -> tuple[Image.Image, list[OCRBox]]:
     await phone.tap_box(label, image, gbl_vision.MENU_ICON_DROP)
     ok, image, boxes = await phone.settle(lambda _i, b: storage_open(b))
     if not ok:
-        raise StepFailed("Pokemon storage did not open")
+        raise StepFailed(f"Pokemon storage did not open (screen saved: {phone.save(image, 'no-storage')})")
     return image, boxes
 
 
@@ -899,10 +900,17 @@ def berry_picker(_image: Image.Image, boxes: list[OCRBox]) -> bool:
 async def play_screen(phone: Phone, timeout: float = 15) -> Image.Image | None:
     """Wait for the play screen's berry and camera buttons to be drawn."""
     deadline = time.monotonic() + timeout
+    camera_only = None
     while time.monotonic() < deadline:
         image = await phone.look()
         if berry_button(image) is not None and camera_button(image) is not None:
             return image
+        if camera_button(image) is not None and exit_door(image) is not None:
+            camera_only = camera_only or time.monotonic()
+            # The berry button can draw greyed out (SE, 4 Nov, with 161 Golden
+            # Razz in the bag): the play screen is up all the same.
+            if time.monotonic() - camera_only >= 4:
+                return image
         await asyncio.sleep(POLL_GAP)
     return None
 
@@ -913,7 +921,8 @@ async def feed(phone: Phone, berry: str) -> str | None:
     if where is None:
         return "the play screen's buttons are not up"
     if where == "play":
-        await phone.tap(berry_button(image), image)
+        await phone.tap(berry_button(image) or [int(image.width * BERRY_FALLBACK[0]),
+                                                int(image.height * BERRY_FALLBACK[1])], image)
     # The picker slides up: its header can read before the berry labels are
     # drawn ("ERRIE" and nothing else, oneplus), so wait for the label itself.
     wanted = gbl_vision.normalize(berry)
@@ -1044,15 +1053,17 @@ async def buddy_step(phone: Phone, berries: int, berry: str) -> Report:
             f"buddy {buddy_body(image)}; nothing pressed (dry run)")
     else:
         fed = 0
+        # A greyed berry button (SE, 4 Nov) still opened the picker on a
+        # later try, so it is pressed anyway; feed() says if nothing opens.
         for _ in range(berries):
             problem = await feed(phone, berry)
             if problem:
                 report.lines.append(f"berries: stopped after {fed}: {problem}")
                 break
             fed += 1
-            phone.say(f"buddy: fed {berry} {fed}/{berries}")
+            phone.say(f"buddy: fed {fed}/{berries}")
         else:
-            report.lines.append(f"berries: fed {fed} {berry}")
+            report.lines.append(f"berries: fed {fed}")
 
         await close_picker(phone)
         image = await play_screen(phone) or await phone.look()
