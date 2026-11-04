@@ -287,15 +287,17 @@ def plate_point(boxes: list[Any], scale: float) -> tuple[int, int] | None:
     )
     if cp_box is None:
         return None
+    cp_center_y = getattr(cp_box, "center_y", getattr(cp_box, "cy", 0))
+    cp_height = getattr(cp_box, "height", 1)
     line = [
         box
         for box in boxes
         if box.confidence >= OCR_CONFIDENCE
-        and abs(box.center_y - cp_box.center_y) <= max(cp_box.height, 1)
+        and abs(getattr(box, "center_y", getattr(box, "cy", 0)) - cp_center_y) <= max(cp_height, 1)
     ]
-    left = min(box.x for box in line)
-    right = max(box.x + box.width for box in line)
-    return round((left + right) / 2 * scale), round(cp_box.center_y * scale)
+    left = min((getattr(box, "x", 0) for box in line), default=0)
+    right = max((getattr(box, "x", 0) + getattr(box, "width", 0) for box in line), default=0)
+    return round((left + right) / 2 * scale), round(cp_center_y * scale)
 
 
 async def read_plate(

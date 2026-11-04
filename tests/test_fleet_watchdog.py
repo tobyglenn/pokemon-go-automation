@@ -215,7 +215,11 @@ class ProbeHonestyTests(unittest.TestCase):
         self.assertEqual(stopped, [])
 
     def test_adb_fallback_uses_path_without_a_bundled_binary(self) -> None:
-        with unittest.mock.patch.object(pokemon_fleet.Path, "exists", return_value=False):
+        with unittest.mock.patch.object(
+            pokemon_fleet.Path, "exists", return_value=False
+        ), unittest.mock.patch.object(
+            pokemon_fleet.shutil, "which", return_value="adb"
+        ):
             self.assertEqual(pokemon_fleet.default_adb_binary(), "adb")
 
     def test_the_lenient_probe_still_shrugs_for_read_only_callers(self) -> None:
