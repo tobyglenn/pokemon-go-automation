@@ -45,7 +45,14 @@ def _count_terms(spec: pokemon_fleet.DeviceSpec, terms: Sequence[str]) -> dict[s
         scanner.ensure_grid()
         for number, term in enumerate(terms, 1):
             count = scanner.search(term)[0]
-            out[term] = int(count or 0)
+            if count is None:
+                # The filter could not be confirmed: "unknown" is not "none".
+                # One more try, then the whole count is refused rather than
+                # planned on a zero (ios-one read every species as 0, 4 Nov).
+                count = scanner.search(term)[0]
+            if count is None:
+                raise StepFailed(f"{spec.name}: the search {term!r} could not be read")
+            out[term] = int(count)
             if number % 10 == 0 or number == len(terms):
                 print(f"[{spec.name}] counted {number}/{len(terms)} searches", flush=True)
     finally:
