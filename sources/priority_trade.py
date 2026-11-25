@@ -42,6 +42,9 @@ EXACT_DEX = re.compile(r"[1-9]\d*")
 # A pair that fails for a passing reason (a friend row not drawn yet, a
 # picker that opened late) rests this long, then is tried again.
 COOLDOWN = 600.0
+# A device lock held by another fleet command is brief; check back soon.
+BUSY_SIGN = "already controlled by"
+BUSY_RETRY = 120.0
 # Messages meaning one phone's search text never arrived intact.
 TYPING_FAILURES = ("did not show the requested query ending", "did not retain full")
 
@@ -355,6 +358,12 @@ async def run(args: argparse.Namespace) -> int:
     def cooling_pending():
         now = time.monotonic()
         return any(until > now for until in cooling.values())
+
+    def next_wake():
+        """Seconds until the next resting pair returns (at most 30), or None."""
+        now = time.monotonic()
+        waits = [until - now for until in cooling.values() if until > now]
+        return min(30.0, max(0.01, min(waits))) if waits else None
     offline = set(roster) - owners.keys()
     unavailable = set(offline)
     for n in roster:
@@ -638,7 +647,7 @@ async def run(args: argparse.Namespace) -> int:
                             return
                         # A resting pair comes back on a timer, not an event.
                         with contextlib.suppress(asyncio.TimeoutError):
-                            await asyncio.wait_for(event.wait(), 30 if cooling_pending() else None)
+                            await asyncio.wait_for(event.wait(), next_wake())
                         continue
 
                     # No await between scheduling, reserving both accounts and
@@ -662,6 +671,14 @@ async def run(args: argparse.Namespace) -> int:
                                     ))
                                 except (collect.gbl_ios.IOSGBLError, collect.home.HomeRecoveryError,
                                         pokemon_fleet.FleetError, RuntimeError) as exc:
+                                    if BUSY_SIGN in str(exc):
+                                        # Another fleet command (an hourly Go Plus
+                                        # reconnect) holds this phone for a minute or
+                                        # two. Retry the pair later; never drop it.
+                                        cooling[scoped] = time.monotonic() + BUSY_RETRY
+                                        _log(f"{n}: busy with another fleet command; retrying in "
+                                             f"{int(BUSY_RETRY)} s ({exc})")
+                                        break
                                     _log(f"{n}: unavailable ({exc})")
                                     offline.add(n)
                                     unavailable.add(n)

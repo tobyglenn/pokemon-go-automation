@@ -137,7 +137,7 @@ class FakeFleet:
 
 class PriorityRunTests(unittest.TestCase):
     def exercise(self, *, plan_only=False, hundo=True, rendezvous=False, swap=False, peer_failure=None,
-                 second_peer_failure=None):
+                 second_peer_failure=None, busy=None):
         for name, stub in (("_value_targets", mock.Mock(return_value=[])),
                            ("_open_named", mock.AsyncMock(return_value=False))):
             patcher = mock.patch.object(priority, name, new=stub)
@@ -177,8 +177,14 @@ class PriorityRunTests(unittest.TestCase):
         # Create the events inside the test loop below.
         together = receiver_released = None
 
+        busy_left = {busy} if busy else set()
+
         @contextlib.asynccontextmanager
         async def opened(name, _shots, *, machine, machines, fleet, dry_run):
+            if name in busy_left:
+                busy_left.discard(name)
+                raise priority.pokemon_fleet.FleetError(
+                    f"{name} is already controlled by pid 1 (python -m starter --only goplus)")
             handset = fleet.transports.get(name, name)
             self.assertEqual(machine, owners[handset])
             self.assertNotIn(name, held, f"{name} opened by both lanes")
@@ -323,6 +329,13 @@ class PriorityRunTests(unittest.TestCase):
             if "receiver" not in selection:
                 self.assertTrue(set(selection.values()) <= set(priority.PEER_TIERS))
         self.assertGreaterEqual(sum(count == 5 for count in history.values()), 3)
+
+    def test_a_phone_briefly_held_by_another_command_rejoins_the_run(self):
+        with mock.patch.object(priority, "BUSY_RETRY", 0.01):
+            _, records, _, history, log, _ = self.exercise(busy="donor-b")
+        self.assertIn("donor-b: busy with another fleet command", log)
+        self.assertNotIn("donor-b: unavailable", log)
+        self.assertTrue(any("donor-b" in pair for pair, _ in records))
 
     def test_exhausted_priority_stock_frees_all_donors_before_receiver_cap(self):
         code, records, attempts, history, log, _ = self.exercise(hundo=False)
