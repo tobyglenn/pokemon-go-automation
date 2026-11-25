@@ -72,7 +72,13 @@ async def worker(name, payload, plan):
     return int(not complete)
 
 
-async def finish(owners, machines, roster, clear_path, cfg, receiver, *, plan=False, transports=None, devices=None, prepared_only=False):
+async def finish(owners, machines, roster, clear_path, cfg, receiver, *, plan=False, transports=None, devices=None,
+                 prepared_only=False, pinned=False):
+    """Open each account's strict review list, then sleep its display.
+
+    `pinned` opens the handset's saved favorite for the live policy term instead
+    of typing it; the favorite must still match that term.
+    """
     from . import storage_review, trade_history, trading_accounts
 
     if cfg.get("receiver") != receiver:
@@ -109,6 +115,7 @@ async def finish(owners, machines, roster, clear_path, cfg, receiver, *, plan=Fa
                 payload["term"] = ender_inventory.account_favorites(snapshot, name, physical)[storage_review.STRICT]["term"]
             else:
                 payload["term"] = policy.favorites(name)[storage_review.STRICT]
+                payload["favorite_only"] = pinned
         except trade_history.ConfirmationStateError as exc:
             payload["pending"] = True
             payload["error"] = str(exc)

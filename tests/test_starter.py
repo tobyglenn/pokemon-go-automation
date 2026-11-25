@@ -220,6 +220,7 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(starter.parse_args([]).steps,
                          ["buddy", "battle", "special", "mega", "bag", "gifts", "gbl", "buddy-again"])
         self.assertIn("trade", starter.parse_args(["--trade"]).steps)
+        self.assertEqual(starter.parse_args(["--only", "goplus"]).steps, ["goplus"])
         self.assertEqual(starter.parse_args(["--skip", "gbl", "special"]).steps,
                          ["buddy", "battle", "mega", "bag", "gifts", "buddy-again"])
 

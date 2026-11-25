@@ -168,11 +168,9 @@ python daily_trade.py --reuse-counts
 
 Run `python ender.py` on the fleet coordinator. Both hosts do buddy and gift work, then one coordinator pairs the connected trainers. Each two-sided completion in the daily journals consumes one of each account’s 100 trades. The receiver and its alternate handset share a counter. An in-game daily-limit notice also closes the affected pair for that date.
 
-Prepare the trade inventory in advance with `python storage_favorites.py --prepare-trades`. This records native favorite names, full expressions and candidate pages by handset. Preparation checks the native Pokédex number and CP of the proposed spares. Ender opens the existing favorite in each trade picker and verifies its full expression. It uses the prepared page, rechecks the visible copies of that species against the reserve, and checks the selected CP and label. An absent favorite, changed expression or missing prepared spare stops that selection. Run preparation again when the collection or saved searches need refreshing.
+Trading uses the same engine as [`priority_trade.py`](#receiver-first-daily-trades--priority_tradepy): the receiver takes donors' XXL/XXS, ReceiverLucky and ReceiverPerfect stock first, then the donors trade their valuable spares and Far/Local lists with each other until as many accounts as possible reach 100. Every pick opens the handset's current pinned favorite, so the evening never depends on an inventory snapshot from an earlier day. Guaranteed Lucky trades are skipped, never spent; request one with `collect_trades.py --propose-guaranteed`.
 
-Ender gives configured priority species first access to the receiver, then uses audited Lucky and perfect-IV gaps and eligible ordinary spares. After a reroll with unknown IVs, Ender holds that species until the next Perfect Dex audit. A changed Pokédex manifest retires the saved gap targets and strict review until setup republishes them. A guaranteed exchange requires prepared eligible individuals on both phones, both Lucky Friends badges, Special Trade allowances and approval for the live quote. Explicit preparation ranks reciprocal raid offers only when both favorite layouts can present them and both trainers qualify. Ender can reuse a published choice on a later evening. It checks the dated exchange journals and current picker evidence before quoting it. A changed or unknown outgoing species can invalidate the choice. The standalone collector has separate inventory-discovery commands.
-
-After trading, Ender opens the saved `SafeTrash` favorite for manual review, records its result grid and switches the display off. You decide which Pokémon to transfer. `python ender.py --plan` describes this routine offline.
+After trading, Ender opens the pinned `SafeTrash` favorite (checked against the live storage policy) for manual review, records its result grid and switches the display off. You decide which Pokémon to transfer. `python ender.py --plan` describes this routine offline.
 
 ### Saved storage searches
 
@@ -361,6 +359,19 @@ Two parser details worth recording, both measured rather than assumed. A Mega-ca
 - `recover_home.py`: recovery utility where provided; review `--help` before allowing screen changes.
 
 A workflow plan uses configured devices and does not probe attached phones. At execution time, `--devices all` can additionally discover unregistered Android phones. Run live fleet status to inspect attached hardware, or name devices explicitly when the run should be limited to a particular set.
+
+## Pokémon GO Plus reconnect — `starter.py --only goplus`
+
+`starter.py --only goplus` checks the attached Android phones and iPhones on every configured computer. It leaves live connections alone. On a disconnected phone it returns Pokémon GO to the map, taps the Go Plus icon, confirms the accessory pairing prompt if it appears, and verifies the reconnect. Android requires a live Bluetooth connection in the game's client table and an accessory bond. iPhone verification uses the green Go Plus indicator on the game map. The step never runs as part of a normal start of day; schedule it on its own.
+
+`ender.py --goplus-only` runs the same reconnect, for an hourly scheduler such as a LaunchAgent. It uses the fleet's device locks and leaves the game on the map. The accessory must be in range and available to connect. If the game asks for the accessory's own button, press it on the accessory.
+
+```sh
+python ender.py --goplus-only --plan
+python starter.py --only goplus --plan
+python starter.py --only goplus --devices sample-android-a sample-android-b --goplus-timeout 90
+python goplus.py --plan
+```
 
 ## Stop and verify
 

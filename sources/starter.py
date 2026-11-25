@@ -55,7 +55,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # The buddy is fed before anything else; the battle right after it earns the
 # buddy's "Battle together" heart (user's order, 5 Nov).
 # The special trade comes after the buddy steps, before mega (user, 7 Nov).
-STEPS = ("buddy", "battle", "special", "mega", "bag", "gifts", "trade", "gbl", "buddy-again")
+STEPS = ("buddy", "battle", "special", "mega", "bag", "gifts", "trade", "gbl", "buddy-again", "goplus")
 # Steps two phones on one computer take together; every phone there waits
 # for the others to reach them.
 PAIR_STEPS = ("special", "trade")
@@ -3272,6 +3272,21 @@ async def run_phone(spec: pokemon_fleet.DeviceSpec, args: argparse.Namespace,
     # play, snapshot (user, 5 Nov).
     if "buddy-again" in wanted:
         await step("buddy-again", lambda phone: buddy_step(phone, args.berries))
+    if "goplus" in wanted and not args.dry_run:
+        from . import goplus_android, goplus_ios
+
+        async def connect_plus(phone: Phone) -> Report:
+            if spec.platform == "ios":
+                detail = await goplus_ios.reconnect(phone, timeout=args.goplus_timeout)
+            else:
+                devices = await screen_router.attached_androids([spec])
+                device = devices.get(spec.identifier)
+                if device is None:
+                    raise StepFailed("Android phone disconnected")
+                detail = await goplus_android.reconnect(phone, device, timeout=args.goplus_timeout)
+            return Report("goplus", True, detail)
+
+        await step("goplus", connect_plus)
     return reports
 
 
@@ -3446,7 +3461,8 @@ async def last_steps(spec, args, steps, sleep_after):
 
 async def run(args: argparse.Namespace, *, sleep_after: bool = True, local_only: bool = False) -> int:
     args.local_only = local_only
-    effective_sleep = sleep_after and not getattr(args, "no_sleep", False)
+    goplus_only = args.steps == ["goplus"]
+    effective_sleep = sleep_after and not getattr(args, "no_sleep", False) and not goplus_only
     fleet = pokemon_fleet.load_fleet(config_paths.default_config("pokemon-fleet.yaml"))
     wanted = set(args.devices or [])
     specs = [spec for spec in fleet.devices.values() if spec.enabled and (not wanted or spec.name in wanted)]
@@ -3474,7 +3490,7 @@ async def run(args: argparse.Namespace, *, sleep_after: bool = True, local_only:
                 else:
                     print(f"[{spec.name}]   then " + " ".join(gbl_command(spec.name)))
         return 0
-    if not args.dry_run:
+    if not args.dry_run and not goplus_only:
         # Once at the start of the day: sample-receiver's low-memory killer took the game
         # mid-catch on 16 Nov 2026.  See android_memory.
         from . import android_memory
@@ -3568,6 +3584,10 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true",
                         help="walk the mega and buddy screens and report, but evolve, feed, "
                              "photograph and pet nothing; gifts and GBL are skipped")
+    from .goplus_android import DEFAULT_TIMEOUT
+
+    parser.add_argument("--goplus-timeout", type=float, default=DEFAULT_TIMEOUT,
+                        help="seconds to verify a Go Plus connection")
     args = parser.parse_args(arguments)
     if args.devices and "all" in args.devices:
         if args.devices != ["all"]:
@@ -3575,8 +3595,10 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         args.devices = None
     if not 0 <= args.berries <= MAX_BERRIES:
         parser.error(f"--berries must be 0 to {MAX_BERRIES}")
-    # Trading stays opt-in until a whole trade has been seen through live.
-    chosen = args.only or [step for step in STEPS if step != "trade" or args.trade]
+    if not args.goplus_timeout >= 1:
+        parser.error("--goplus-timeout must be at least one second")
+    # Go Plus runs on its own hourly schedule. Trading remains opt-in.
+    chosen = args.only or [step for step in STEPS if step != "goplus" and (step != "trade" or args.trade)]
     args.steps = [step for step in STEPS if step in chosen and step not in args.skip]
     if not args.steps:
         parser.error("no steps left to run")

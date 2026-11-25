@@ -9,6 +9,7 @@ Start with the public command for the action you want. Follow it into fleet disp
 | [`special_trade.py`](../special_trade.py) | The receiver's daily special trade: a spare legendary for a shiny it is missing, with a partner on the same computer. Start with `--plan`. |
 | [`starter.py`](../starter.py) | Public start-of-day command: buddy play, a Blanche training battle with the buddy, free Mega Evolutions, gifts, GBL, then a second buddy round on each phone. Start with `--plan`. |
 | [`play.py`](../play.py) | Public screen-driven command: reads every phone and starts GBL, berries, gifts or catching. Start with `--plan`. |
+| [`goplus.py`](../goplus.py) | Public Pokémon GO Plus reconnect command for Android phones. Start with `--plan`. |
 | [`gift.py`](../gift.py) | Public gifts command; a phone parked on a gym's feeding screen feeds berries instead. Start with `--count 1 --plan`; `--gifts-only` skips the screen read. |
 | [`catch.py`](../catch.py) | Public catching command for the award queue, research CLAIM buttons and hand-opened encounters (`--mode encounter`), Android and iPhone. Start with `--dry-run`. |
 | [`add_friends.py`](../add_friends.py) | Public friend-request command for Android/iOS request controllers. Supply private trainer-code inputs. |
@@ -91,6 +92,8 @@ Run from the checkout root, e.g. `python scripts/fleet.py status`; on another co
 | [`sources/starter_trade.py`](../sources/starter_trade.py) | Parallel pair storage counter, daily trade history tracker, and trade loop shared by `starter.py` and `daily_trade.py`. |
 | [`sources/daily_trade.py`](../sources/daily_trade.py) | Daily 100-trade coordinator for attached pairs; reached through `daily_trade.py`. |
 | [`sources/priority_trade.py`](../sources/priority_trade.py) | Budget planner and trade loop for `priority_trade.py`: the receiver priority tiers, then donor-to-donor trades. |
+| [`sources/goplus_android.py`](../sources/goplus_android.py) | Reconnect the Pokémon GO Plus on Android: the phone's Bluetooth bond and connection state, the map's accessory disc, the game's pairing prompt and the Android pairing dialog; reached through `goplus.py` and `starter.py --only goplus`. |
+| [`sources/goplus_ios.py`](../sources/goplus_ios.py) | Reconnect the Pokémon GO Plus on iPhone, verified by the map's connected indicator; reached through `starter.py --only goplus`. |
 | [`sources/collect_trades.py`](../sources/collect_trades.py) | Trade picker and configured-target collector. The daily Lucky Dex and fleet pairing workflow lives in [collector_day.py](../sources/collector_day.py). [collector_proposals.py](../sources/collector_proposals.py) quotes and reselects a single approved guaranteed Lucky exchange. |
 | [`sources/remote_target.py`](../sources/remote_target.py) | SSH JSON-RPC `Target` bridge allowing one coordinator to control Android and iOS devices connected to peer computers. |
 | [`sources/clear_pokemon.py`](../sources/clear_pokemon.py) | Safe single-query clearing auditor and Vision-OCR transfer loop; reached through `clear_pokemon.py`. |

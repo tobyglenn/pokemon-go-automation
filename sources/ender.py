@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from . import clear_pokemon, starter
 
@@ -122,3 +123,47 @@ async def prepare_local(selected=None):
     today = date.today()
     results = await asyncio.gather(*(prepare_phone(spec, args, today) for spec in here))
     return int(not all(results))
+
+
+def _review_roster(local):
+    """The attached accounts, their hosts and the policy files for the closing review."""
+    from . import config_paths, fleet_entrypoint, pokemon_fleet, remote_target, trading_accounts, collect_trades
+    cfg = collect_trades.load_config()
+    fleet = pokemon_fleet.load_fleet(config_paths.default_config("pokemon-fleet.yaml"))
+    machines = fleet_entrypoint.machine_configs()
+    survey = machines
+    if local:
+        here = fleet_entrypoint.local_machine(machines)
+        survey = {here: machines[here]}
+    owners, _ = remote_target.discover_attached_devices(fleet, survey)
+    fleet, owners = trading_accounts.route_fleet(fleet, owners, trading_accounts.aliases())
+    clear_name = str(cfg.get("clear_config") or clear_pokemon.CONFIG_NAME)
+    clear_path = (Path(config_paths.expand_user_path(clear_name))
+                  if "/" in clear_name or clear_name.startswith("~")
+                  else config_paths.default_config(clear_name))
+    return cfg, fleet, machines, owners, clear_path
+
+
+async def trade_and_review(local=False):
+    """Fill the daily trade budgets from the live favorites, then open each SafeTrash for review.
+
+    Trading reads the handsets' current pinned favorites (priority_trade), so
+    the evening never depends on an inventory snapshot taken on an earlier day.
+    """
+    from . import collector_night, priority_trade
+    args = priority_trade.parse_args(["--local"] if local else [])
+    try:
+        trade = await priority_trade.run(args)
+    except Exception as exc:  # The review and display sleep still run.
+        print(f"[ender] trading incomplete: {type(exc).__name__}: {exc}", flush=True)
+        trade = 1
+    try:
+        cfg, fleet, machines, owners, clear_path = await asyncio.to_thread(_review_roster, local)
+        receiver = cfg.get("receiver")
+        review = await collector_night.finish(
+            owners, machines, list(owners), clear_path, cfg, receiver,
+            transports=getattr(fleet, "transports", {}), devices=fleet.devices, pinned=True)
+    except Exception as exc:
+        print(f"[ender] storage review incomplete: {type(exc).__name__}: {exc}", flush=True)
+        review = 1
+    return trade or review

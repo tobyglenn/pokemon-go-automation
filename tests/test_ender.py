@@ -17,23 +17,67 @@ class EveningTests(unittest.TestCase):
                 patch.object(collect, "run", side_effect=AssertionError), redirect_stdout(StringIO()):
             self.assertEqual(ender.main(["--plan"]), 0)
 
+    def test_goplus_only_delegates_without_running_evening_preparation(self):
+        with patch("starter.main", return_value=1) as reconnect, \
+             patch.object(evening, "prepare_handsets", side_effect=AssertionError), \
+             patch.object(evening, "trade_and_review", side_effect=AssertionError):
+            self.assertEqual(ender.main(["--goplus-only", "--local", "--plan"]), 1)
+        reconnect.assert_called_once_with(["--local", "--plan", "--only", "goplus"])
+
     def test_one_trade_coordinator_after_both_hosts_prepare(self):
         events = []
         def prepare(script, flags):
             events.append((script, flags))
             return 0
-        async def trade(args, *, evening_date):
-            self.assertTrue(args.finish_night)
-            self.assertEqual(evening_date, date.today())
+        async def trade(local):
+            self.assertFalse(local)
             events.append("trade then manual review")
             return 0
         with patch.object(ender.fleet_entrypoint, "local_requested", return_value=False), \
                 patch.object(evening, "prepare_handsets", return_value=["primary", "donor"]), \
                 patch.object(ender.fleet_entrypoint, "run_all_machines", prepare), \
-                patch.object(ender.fleet_entrypoint, "apply_local_environment"), patch.object(collect, "run", trade):
+                patch.object(collect, "run", side_effect=AssertionError), \
+                patch.object(ender.fleet_entrypoint, "apply_local_environment"), \
+                patch.object(evening, "trade_and_review", trade):
             self.assertEqual(ender.main([]), 0)
         self.assertEqual(events, [("ender.py", ["--prepare-worker", "--prepare-handsets", "primary", "donor"]),
                                   "trade then manual review"])
+
+    def test_trading_uses_live_favorites_then_opens_pinned_review(self):
+        from sources import priority_trade
+        events = []
+
+        async def trade(args):
+            self.assertTrue(args.local)
+            self.assertFalse(args.plan)
+            events.append("priority trades")
+            return 0
+
+        async def review(owners, machines, roster, clear_path, cfg, receiver, **kwargs):
+            self.assertTrue(kwargs["pinned"])
+            self.assertFalse(kwargs.get("prepared_only", False))
+            self.assertEqual(roster, ["receiver", "donor"])
+            events.append("pinned review")
+            return 0
+
+        roster = (({"receiver": "receiver"}, SimpleNamespace(devices={}, transports={}), {},
+                   {"receiver": "local", "donor": "local"}, Path("clear")))
+        with patch.object(priority_trade, "run", trade), patch.object(evening, "_review_roster", return_value=roster), \
+                patch.object(night, "finish", review):
+            self.assertEqual(asyncio.run(evening.trade_and_review(True)), 0)
+        self.assertEqual(events, ["priority trades", "pinned review"])
+
+    def test_a_failed_trading_run_still_reviews_and_sleeps_displays(self):
+        from sources import priority_trade
+        roster = (({"receiver": "receiver"}, SimpleNamespace(devices={}, transports={}), {},
+                   {"receiver": "local"}, Path("clear")))
+        review = AsyncMock(return_value=0)
+        with patch.object(priority_trade, "run", AsyncMock(side_effect=RuntimeError("lost phone"))), \
+                patch.object(evening, "_review_roster", return_value=roster), patch.object(night, "finish", review), \
+                redirect_stdout(StringIO()) as out:
+            self.assertEqual(asyncio.run(evening.trade_and_review()), 1)
+        review.assert_awaited_once()
+        self.assertIn("trading incomplete", out.getvalue())
 
     def test_only_missing_battle_hearts_are_earned(self):
         with patch.object(evening, "heart_counts", AsyncMock(side_effect=[(3,1),(3,2),(3,3)])), \
@@ -137,6 +181,16 @@ class EveningTests(unittest.TestCase):
         for device in roster:
             self.assertEqual(sent[device]["device"], device)
             self.assertEqual(sent[device]["label"], storage_review.STRICT)
+            self.assertEqual(sent[device]["term"], terms[device])
+            self.assertFalse(sent[device]["favorite_only"])
+
+        with patch.object(storage_review, "load_policy", return_value=policy), \
+             patch.object(night.fleet_entrypoint, "local_machine", return_value="local"), \
+             patch.object(night.asyncio, "create_subprocess_exec", spawn):
+            asyncio.run(night.finish(dict.fromkeys(roster, "local"), {}, roster,
+                                     Path("clear"), {"receiver": "receiver"}, "receiver", pinned=True))
+        for device in roster:
+            self.assertTrue(sent[device]["favorite_only"])
             self.assertEqual(sent[device]["term"], terms[device])
 
     def test_review_query_requires_open_mode_before_connecting_to_a_phone(self):
