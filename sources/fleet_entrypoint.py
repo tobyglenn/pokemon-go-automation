@@ -274,6 +274,11 @@ def remote_shell_command(name: str, config: dict, worker: Sequence[str]) -> list
     python = config.get("python", ".venv/bin/python")
     config_dir = config.get("config_dir", "~/.config/pokemon-go-automation")
     env = ["env", f"POGO_CONFIG_DIR={config_dir}", f"POGO_MACHINE={name}"]
+    if "state_dir" in config:
+        state_dir = config["state_dir"]
+        if not isinstance(state_dir, str) or not state_dir.strip():
+            raise pokemon_fleet.FleetError(f"Machine {name} state_dir must be a nonempty path")
+        env.append(f"POGO_STATE_DIR={state_dir}")
     # A leading ~/ is intentionally expanded by the remote shell; all other text is quoted.
     remote_dir = ('"$HOME"/' + shlex.quote(project_dir[2:])) if project_dir.startswith("~/") else shlex.quote(project_dir)
     remote = shlex.join([*env, str(python), *worker])
@@ -292,6 +297,11 @@ def _commands_for_machines(script_name: str, arguments: Sequence[str]) -> dict[s
     arguments = apply_registry_override(arguments)
     machines = machine_configs()
     local = _local_machine(machines)
+    # These routines already select all attached registered phones by default.
+    # Use that spelling so older workers do not receive the internal --allow-empty flag.
+    if script_name in {"starter.py", "buddy.py"} and _multi_option_values(arguments, "--devices") == ["all"]:
+        arguments = _replace_multi_option(arguments, "--devices", [])
+        arguments.remove("--devices")
     routed = route_machine_arguments(arguments)
     commands: dict[str, list[str]] = {}
     for name, forwarded in routed.items():

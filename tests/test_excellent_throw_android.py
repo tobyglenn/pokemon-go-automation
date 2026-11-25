@@ -830,6 +830,24 @@ class CatchScreenTests(unittest.IsolatedAsyncioTestCase):
         # the compact phone's 1421 of 1600.
         self.assertEqual(taps[1], [612, 2830])
 
+    async def test_a_dynamax_caught_page_is_dismissed_by_weight_line(self) -> None:
+        device = self.device()
+        screens = [
+            self.boxes("Magikarp", "10.5 kg", "DYNAMAX"),
+            self.boxes("GO PASS DELUXE: DYNAMAX"),
+        ]
+        with (
+            patch.object(throw, "MENU_SETTLE", 0.0),
+            patch.object(
+                throw, "handset_close_button", new=AsyncMock(return_value=[612, 2830])
+            ),
+            patch("sources.gbl_vision.recognize", side_effect=screens),
+        ):
+            with TemporaryDirectory() as tmp:
+                await throw.clear_catch_screens(device, Path(tmp))
+        taps = [call.args[0] for call in device.tap.await_args_list]
+        self.assertEqual(taps, [[612, 2830]])
+
     async def test_a_phone_already_on_the_map_is_left_alone(self) -> None:
         device = self.device()
         with (
@@ -982,14 +1000,14 @@ class EmptyNanabPocketTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AimedThrowTests(unittest.TestCase):
-    """ph-1 threw twelve balls straight up at a Tympole standing at the left
+    """An Android device threw twelve balls straight up at a Tympole standing at the left
     edge on 3 Nov 2026.  The flick now leans toward the name plate."""
 
     def ball(self, center_x, center_y, radius=180):
         return excellent_throw_ios.BallDetection(0.9, center_x, center_y, radius)
 
     def test_a_pokemon_off_to_the_left_is_thrown_at(self) -> None:
-        # Measured from ph-1's frame: plate at (324, 869), body near x=280.
+        # Measured from an Android device's frame: plate at (324, 869), body near x=280.
         start, end = throw.proven_throw_points(
             self.ball(658, 2281), (1316, 2560), (324, 869)
         )
@@ -1018,7 +1036,7 @@ class AimedThrowTests(unittest.TestCase):
 
 
 class ThrowResultButtonsTests(unittest.IsolatedAsyncioTestCase):
-    """ph-1's Kyogre, 3 Nov 2026: no ball in the window, but the encounter's
+    """An Android device's Kyogre, 3 Nov 2026: no ball in the window, but the encounter's
     berry and ball buttons were up, so the encounter was still open."""
 
     async def result(self, buttons):
@@ -1046,7 +1064,7 @@ class ThrowResultButtonsTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SizeRecordCardTests(unittest.TestCase):
-    """ph-1, 3 Nov 2026: a New Height Record card hid the caught page."""
+    """An Android device, 3 Nov 2026: a New Height Record card hid the caught page."""
 
     def test_the_headlines_are_recognised(self) -> None:
         from sources import gbl_vision

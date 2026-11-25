@@ -108,9 +108,9 @@ def plate(*texts: str) -> list:
 class AwardCatchLegendaryTests(unittest.IsolatedAsyncioTestCase):
     """catch.py feeds a legendary a Silver Pinap and throws Ultra Balls at it."""
 
-    async def catch(self, boxes: list, results: list) -> AsyncMock:
+    async def catch(self, boxes: list, results: list, nanab: bool = True) -> AsyncMock:
         device = SimpleNamespace(label="fake-g", viewport=(720, 1600))
-        args = SimpleNamespace(nanab=True, throws=4, wait=1.0, ring_hold=False)
+        args = SimpleNamespace(nanab=nanab, throws=4, wait=1.0, ring_hold=False)
         thrown = AsyncMock(side_effect=results)
         with patch.object(
             awarded, "capture_frame",
@@ -126,6 +126,19 @@ class AwardCatchLegendaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(c.kwargs["berry"], c.kwargs["use_nanab"]) for c in thrown.await_args_list],
             [("silver", True)] * 3,
+        )
+
+    async def test_a_mystery_box_meltan_gets_no_silver(self) -> None:
+        thrown = await self.catch(plate("Meltan", "CP 405"), [False, True])
+        self.assertEqual(
+            [(c.kwargs["berry"], c.kwargs["use_nanab"]) for c in thrown.await_args_list],
+            [("nanab", True), ("nanab", False)],
+        )
+
+    async def test_no_nanab_means_no_silver_either(self) -> None:
+        thrown = await self.catch(plate("Regidrago", "CP 2056"), [False, True], nanab=False)
+        self.assertEqual(
+            [c.kwargs["use_nanab"] for c in thrown.await_args_list], [False, False]
         )
 
     async def test_an_ordinary_award_keeps_one_nanab(self) -> None:

@@ -28,6 +28,8 @@ see "Friends list guard" below.
 from . import config_paths
 from . import android_common
 from .android_common import find_display_id  # noqa: F401  re-exported for callers and tests
+from .gift_sort import sort_arrow
+from .gift_profile import find_send_gift
 import argparse
 import os
 import asyncio
@@ -189,7 +191,7 @@ SEND_POLL_GAP = 0.8
 EMPTY_BAG_CYCLES = 3
 # Cycles in a row that pressed OPEN and sent nothing.  The game's daily open
 # cap is invisible: past it OPEN is refused silently, so "opened" stops meaning
-# anything.  ph-1, 3 Nov: ~50 such cycles with a full Item Bag, then 15 idle
+# anything.  sample-receiver, 3 Nov: ~50 such cycles with a full Item Bag, then 15 idle
 # ones, before the run ended.  No day allows more opens than this.
 OPEN_ONLY_LIMIT = 20
 UNLIT_ARTIFACT_DIR = config_paths.state_dir() / 'gifts'
@@ -210,10 +212,6 @@ BAG_FULL_MIN_CARD_BAND = 0.65
 BAG_FULL_MAX_CARD_EDGES = 0.40
 BAG_FULL_PHRASE = 'item bag is full'
 BAG_FULL_DELAY = 6
-SEND_GIFT_SAMPLE_KEYS = (
-    'SEND_GIFT_2_BUTTON_SAMPLE',
-    'SEND_GIFT_3_BUTTON_SAMPLE',
-)
 
 # --- Choosing the row ---
 # NEXT_FRIEND_BTN is the top row of the freshly re-sorted list, and the cycle
@@ -249,6 +247,7 @@ ROW_MIN_HEIGHT      = 0.08           # of the picture; real rows are 0.14-0.16
 # whose panel is drawn differently. The whole read is dropped rather than
 # trusted, and the configured point is tapped exactly as before.
 ROW_MATCH_TOLERANCE = 0.5            # of a row height
+ROW_BANNER_SHIFT    = 1.0            # of a row height; banner pushdown measured 0.67
 
 # The halo. Sampled in the two strips either side of the avatar, and both must
 # glow: an avatar photo with a blue background can fill one of them on its own.
@@ -311,6 +310,7 @@ FRIENDS_LIST  = 'the friends list'
 FRIENDS_PANEL = 'the friends panel, on another tab'
 FRIEND_SCREEN = "a friend's screen"
 SORT_MENU     = 'the sort menu'
+INFO_MODAL    = 'an info modal'
 MAIN_MENU     = 'the main menu'
 MAP           = 'the map'
 
@@ -343,6 +343,13 @@ STEP_HOME: dict[str, tuple[tuple[tuple[str, ...], ...], ...]] = {
     FRIEND_SCREEN: (
         (('CLOSE_BTN',),),
     ) * 3,
+    # Tutorial/info cards (e.g. "What is a stamp rally?") float over a dark
+    # teal backdrop that passes sort_control_showing(), ignore BACK, and close
+    # via the pale ringed X at CLOSE_BTN. Separate from FRIEND_SCREEN so closing
+    # stacked modals leaves FRIEND_SCREEN's 3-tap budget intact.
+    INFO_MODAL: (
+        (('CLOSE_BTN',),),
+    ) * 3,
     # The row tap goes first because it is the useful one: it closes the menu by
     # choosing a sort, and "can receive a gift" is the sort the cycle wants
     # anyway. It does not always land — a android-three leg spent that one step, found
@@ -354,6 +361,7 @@ STEP_HOME: dict[str, tuple[tuple[tuple[str, ...], ...], ...]] = {
     SORT_MENU: (
         (('CAN_RECEIVE_GIFT_BTN',),),  # any sort row closes the menu
         ((BACK_KEY,),),
+        (('CLOSE_BTN',),),
     ),
     MAIN_MENU: (
         (('GBL_MENU_BTN', 'CLOSE_BTN'),),
@@ -364,9 +372,12 @@ STEP_HOME: dict[str, tuple[tuple[tuple[str, ...], ...], ...]] = {
     # the map, and comes round again. Verified on the android-three: the walk rode that
     # loop until it ran out of steps. Asking for the FRIENDS tab straight after
     # opening the panel ends it, and costs nothing when the tab is already up.
+    # Twice: a panel read mid-slide names itself a friend's screen and its X
+    # drops back to the map, which then had no step left (sample-android-b, 21 Nov 2026,
+    # after 48 gifts).
     MAP: (
         (('AVATAR_BTN',), ('FRIENDS_TAB_BTN',)),
-    ),
+    ) * 2,
 }
 # Long enough for the worst walk that has been measured — a battle screen, which
 # spends two steps finding out that nothing on it responds, then the exit, the
@@ -626,20 +637,21 @@ async def send_button_available(
 
 
 async def send_gift_action_available(device: DeviceAsyncWrapper) -> bool | None:
-    """Check the movable gift icon separately from the shared tap point."""
-    points = [
-        device.config[key]
-        for key in SEND_GIFT_SAMPLE_KEYS
-        if key in device.config
-    ] or [device.config['SEND_GIFT_BTN']]
-    unreadable = False
-    for point in points:
-        available = await colored_action_available(device, point)
-        if available:
-            return True
-        if available is None:
-            unreadable = True
-    return None if unreadable else False
+    """Whether this friend can receive a gift; None if no screen was read.
+
+    The lit gift icon is found on the screenshot rather than read at a fixed
+    point, because the profile's action row moves (gift_profile, 6 Nov). Where
+    it was found is kept on the device for the SEND_GIFT_BTN tap.
+    """
+    device.send_gift_point = None
+    frame = await screencap_raw(device)
+    if frame is None:
+        return None
+    point = find_send_gift(frame)
+    if point is None:
+        return False
+    device.send_gift_point = list(point)
+    return True
 
 
 def picture_rows(width: int, height: int, offset: int, data: bytes) -> tuple[int, int]:
@@ -685,6 +697,34 @@ def is_friends_panel(width: int, height: int, offset: int, data: bytes) -> bool:
             saturation += max(r, g, b) - min(r, g, b)
     n = GUARD_SAMPLE_STEPS ** 2
     return brightness / n >= GUARD_MIN_BRIGHTNESS and saturation / n <= GUARD_MAX_SATURATION
+
+
+INFO_MODAL_X = (0.15, 0.85)
+INFO_MODAL_Y = (0.15, 0.80)
+INFO_MODAL_STEPS = 16
+INFO_MODAL_MIN_WHITE = 0.45
+
+
+def is_info_modal(width: int, height: int, offset: int, data: bytes) -> bool:
+    """True when a bright white info/tutorial card fills the screen centre."""
+    top, bottom = picture_rows(width, height, offset, data)
+    span = bottom - top
+    if span <= 0:
+        return False
+    x0, x1 = INFO_MODAL_X
+    y0, y1 = INFO_MODAL_Y
+    last = INFO_MODAL_STEPS - 1
+    white = total = 0
+    for yi in range(INFO_MODAL_STEPS):
+        y = top + int(span * (y0 + (y1 - y0) * yi / last))
+        for xi in range(INFO_MODAL_STEPS):
+            x = int(width * (x0 + (x1 - x0) * xi / last))
+            i = offset + (y * width + x) * 4
+            r, g, b = data[i], data[i + 1], data[i + 2]
+            total += 1
+            if min(r, g, b) >= 230 and max(r, g, b) - min(r, g, b) <= 25:
+                white += 1
+    return bool(total) and white / total >= INFO_MODAL_MIN_WHITE
 
 
 def _sort_control_teal(pixel: tuple[int, int, int]) -> bool:
@@ -736,6 +776,8 @@ def name_screen(frame: tuple[int, int, int, bytes], config: CONFIG) -> str:
         # have no sort at all, which is what SOCIAL was passing this test on.
         return FRIENDS_LIST if sort_control else FRIENDS_PANEL
     if sort_control:
+        if is_info_modal(*frame):
+            return INFO_MODAL
         # The menu's field covers the header as well as the button under it.
         return SORT_MENU
     image = frame_image(frame)
@@ -858,7 +900,13 @@ def choose_friend_row(frame, config: CONFIG) -> FriendRowChoice:
     if not rows:
         return FriendRowChoice(point, True)
     top, bottom = rows[0]
-    if abs((top + bottom) / 2 - point[1]) > (bottom - top) * ROW_MATCH_TOLERANCE:
+    shift = (top + bottom) / 2 - point[1]
+    height = bottom - top
+    # A banner over the list ("One person sent you a Friend Request") pushes
+    # every row down by most of a row, which put the configured point on the
+    # SEARCH strip and opened the keyboard (sample-android-b, 21 Nov 2026).  A list
+    # pushed down follows its rows; one pulled up still falls back.
+    if not -height * ROW_MATCH_TOLERANCE <= shift <= height * ROW_BANNER_SHIFT:
         return FriendRowChoice(
             point, True,
             ('The list did not read as rows under NEXT_FRIEND_BTN; '
@@ -961,6 +1009,25 @@ async def step_tap(device: DeviceAsyncWrapper, point: list[int] | str):
         await tap(device, point)
 
 
+def ime_window_visible(dump: str) -> bool:
+    """True when `dumpsys window InputMethod` shows the keyboard on screen."""
+    return 'isVisible=true' in dump or 'mHasSurface=true' in dump
+
+
+async def keyboard_shown(device: DeviceAsyncWrapper) -> bool:
+    """Whether the soft keyboard is up; False when it cannot be asked.
+
+    A tap that lands on the friends list's search field opens the keyboard
+    over the list, and the screen namer then calls it a friend's screen with
+    no way off (sample-android-b, 21 Nov 2026). BACK only hides the keyboard there.
+    """
+    try:
+        dump = await device.shell('dumpsys window InputMethod')
+    except Exception:
+        return False
+    return ime_window_visible(str(dump or ''))
+
+
 async def escape_battle_screen(device: DeviceAsyncWrapper) -> bool:
     """Backs out of the battle screens, as far as the map.
 
@@ -1000,7 +1067,14 @@ async def walk_home(device: DeviceAsyncWrapper) -> bool:
     """
     tried_battle_exit = False
     attempts: dict[str, int] = {}
+    keyboard_backs = 0
     for _ in range(WALK_HOME_STEPS):
+        if keyboard_backs < 2 and await keyboard_shown(device):
+            keyboard_backs += 1
+            log(device, '  The keyboard is up (a tap hit a search field) — hiding it')
+            await press_back(device)
+            await asyncio.sleep(GUARD_RECOVER_DELAY)
+            continue
         # Read once and keep the picture: a walk that gives up is the one screen
         # nobody can see afterwards, and naming it wrong is how it gives up.
         frame = await screencap_raw(device)
@@ -1091,6 +1165,12 @@ async def ensure_screen(
         'come back from the map.')
 
 
+async def sort_direction(device: DeviceAsyncWrapper) -> str | None:
+    """Which way the friends list is sorted; None when unreadable."""
+    frame = await screencap_raw(device)
+    return sort_arrow(frame, device.config['SORT_BTN']) if frame is not None else None
+
+
 async def gift_sequence(
     device: DeviceAsyncWrapper,
     *,
@@ -1108,7 +1188,10 @@ async def gift_sequence(
     sent = False
     skip_send = False
     open_next = True
+    sorted_down = False
     for step in GIFT_STEPS:
+        if sorted_down and step.name in ('SORT_BTN', 'CAN_RECEIVE_GIFT_BTN'):
+            continue
         if GUARD and step.name in NEEDS_FRIENDS_LIST | NEEDS_FRIEND_SCREEN:
             reopened = await ensure_screen(device, step.name)
             if reopened is not None:
@@ -1177,18 +1260,30 @@ async def gift_sequence(
                 continue
             sent = True
 
+        if step.name == 'SEND_GIFT_BTN' and not all_mode:
+            await send_gift_action_available(device)  # only for where to tap
+        point = device.config[step.name]
+        if step.name == 'SEND_GIFT_BTN' and getattr(device, 'send_gift_point', None):
+            point = device.send_gift_point  # found on the screen, see gift_profile
         log(device, 'Sending', step.name, f'x{step.taps}' if step.taps > 1 else '')
         for n in range(step.taps):
             if n:
                 await wait(step.tap_gap, use_modifier=False)
-            await tap(device, device.config[step.name])
+            await tap(device, point)
         await wait(step.delay_after, step.use_delay_modifier)
+
+        if step.name == 'CAN_RECEIVE_GIFT_BTN' and 'SORT_BTN' in device.config:
+            direction = await sort_direction(device)
+            if direction == 'down':
+                sorted_down = True
+            elif direction is None:
+                log(device, '  Sort direction not readable; tapping the sort as configured')
 
         if all_mode and step.name == 'OPEN_BTN':
             if not await open_through_bag_full_notice(device) and await bag_full_page(device):
                 # With "open for Stardust only" turned off, OPEN on a full bag
                 # drops the phone on the Item Bag under "Your Item Bag is full.
-                # Upgrade Item Bag?" and goes no further (moto-g, 3 Nov).  The
+                # Upgrade Item Bag?" and goes no further (sample-android-a, 3 Nov).  The
                 # run stops and leaves a marker; starter.py clears the bag and
                 # comes back.  The upgrade costs coins and is never pressed.
                 mark_bag_full(device)

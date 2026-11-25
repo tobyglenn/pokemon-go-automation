@@ -362,6 +362,11 @@ async def run_device(
 
     for cycle in range(1, args.max_claims + 1):
         buttons = await read_claim_buttons(device, args.label)
+        if args.dry_run:
+            print(f"[{device.label}] Dry-run: {len(buttons)} claim button(s) in view")
+            for button in buttons:
+                print(f"[{device.label}]   {button.label!r} at {button.point}")
+            return 0
         if not buttons:
             # A payout that turned into an encounter can arrive after its claim
             # gave up waiting, and an encounter must be thrown at before
@@ -429,12 +434,6 @@ async def run_device(
         # A screenful with buttons on it earns the scroll budget back, so a long
         # list is worked all the way down.
         scrolls = 0
-
-        if args.dry_run:
-            print(f"[{device.label}] Dry-run: {len(buttons)} claim button(s) in view")
-            for button in buttons:
-                print(f"[{device.label}]   {button.label!r} at {button.point}")
-            return 0
 
         button = buttons[0]
         print(

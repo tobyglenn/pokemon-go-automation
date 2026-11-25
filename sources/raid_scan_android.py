@@ -217,19 +217,30 @@ class AndroidPhone:
     # --- screen -------------------------------------------------------------
 
     def screenshot(self) -> Image.Image:
-        result = self._run(
-            "exec-out", "screencap",
-            *(("-d", self.display_id) if self.display_id else ()),
-            "-p", binary=True, timeout=40,
-        )
         import io
 
-        if not result.stdout:
-            raise RaidScanError(f"{self.label}: empty screencap")
-        try:
-            return Image.open(io.BytesIO(result.stdout)).convert("RGB")
-        except OSError as exc:
-            raise RaidScanError(f"{self.label}: unreadable screencap") from exc
+        # An adb server restarted under us (Unity's adb on the M3) returns
+        # nothing for a second or two; both phones' counts died on it at
+        # once (7 Nov).  Ride through it as adb_resilience does for ppadb.
+        deadline = time.monotonic() + 20
+        while True:
+            result = self._run(
+                "exec-out", "screencap",
+                *(("-d", self.display_id) if self.display_id else ()),
+                "-p", binary=True, timeout=40,
+            )
+            problem: Exception | None = None
+            if result.stdout:
+                try:
+                    return Image.open(io.BytesIO(result.stdout)).convert("RGB")
+                except OSError as exc:   # cut short by the same restart
+                    problem = exc
+            if time.monotonic() > deadline:
+                break
+            time.sleep(1.0)
+        if problem is not None:
+            raise RaidScanError(f"{self.label}: unreadable screencap") from problem
+        raise RaidScanError(f"{self.label}: empty screencap")
 
     def read(self) -> tuple[Image.Image, list[vision_ocr.TextBox]]:
         image = self.screenshot()
@@ -606,10 +617,10 @@ def search_bar_fraction(
     return (0.5, min(max(y, floor), ceiling) / image.height)
 
 
-def _shows_term(image: Image.Image, boxes: Sequence[vision_ocr.TextBox], term: str) -> bool:
+def _shows_term(image: Image.Image, boxes: Sequence[vision_ocr.TextBox], term: str, *, exact: bool = False) -> bool:
     from .raid_inventory import field_shows
 
-    return field_shows(image, boxes, term)
+    return field_shows(image, boxes, term, exact=exact)
 
 
 class StorageScanner:
@@ -720,7 +731,7 @@ class StorageScanner:
             )
         raise RaidScanError(f"{self.phone.label}: could not reach the Pokémon storage grid")
 
-    def search(self, term: str):
+    def search(self, term: str, *, exact: bool = False):
         """Filter storage to `term` and read the filtered grid.
 
         The field is cleared with MOVE_END plus a run of DELs rather than by
@@ -750,7 +761,7 @@ class StorageScanner:
             image, boxes = self.phone.read()
             entries = parse_grid_entries(boxes)
             count = parse_result_count(boxes, image.height)
-            if count is not None and _shows_term(image, boxes, term):
+            if count is not None and _shows_term(image, boxes, term, exact=exact):
                 return count, entries, image, boxes
             self.log(f"filter '{term}' did not take on the focused field; "
                      "re-acquiring it")
@@ -785,7 +796,7 @@ class StorageScanner:
             # the reason a species went missing from the plan for no reason.
             # The counter alone is not proof: a search that did not take
             # leaves the previous species' filter, counter and all, on screen.
-            if count is not None and _shows_term(image, boxes, term):
+            if count is not None and _shows_term(image, boxes, term, exact=exact):
                 self._field_focused = True
                 return count, entries, image, boxes
             if attempt < 3:

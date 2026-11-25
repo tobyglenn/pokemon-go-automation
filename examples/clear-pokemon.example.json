@@ -1,0 +1,10 @@
+{
+  "raw_query": "",
+  "safe_dex_ranges": "",
+  "safety_filters": [],
+  "extra_exclude_dex": [],
+  "protected_tags": ["KeepOne", "98Plus", "dontrade", "mega", "ToTrade"],
+  "lucky_report": "~/.local/state/pokemon-go-automation/lucky-audit/report.json",
+  "lucky_votes": "~/.local/state/pokemon-go-automation/lucky-audit/votes.json",
+  "species_csv": "~/.local/state/pokemon-go-automation/data/species.csv"
+}

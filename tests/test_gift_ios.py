@@ -2,12 +2,56 @@ from __future__ import annotations
 
 from tests import support as _test_support
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from PIL import Image, ImageDraw
 
 from sources import gift_ios
+
+
+# These tests script SEND GIFT as colour at its configured point. The runner
+# now finds the lit icon on the screenshot instead (gift_profile); here that
+# search answers from the same scripted colour, at the configured point.
+_config: dict = {}
+_friend_close_scroll = gift_ios.friend_close_scroll
+
+
+def _remember_config(config):
+    _config["config"] = config
+    return _friend_close_scroll(config)
+
+
+def _scripted_send_gift(driver):
+    # Whatever coordinates() the test has patched in, at the moment of asking.
+    point = gift_ios.coordinates(_config.get("config", {})).get("SEND_GIFT_BTN")
+    if point is None or not gift_ios.colored_action_available(driver, point):
+        return None
+    return list(point)
+
+
+_patches = [
+    mock.patch.object(gift_ios, "friend_close_scroll", side_effect=_remember_config),
+    mock.patch.object(gift_ios, "send_gift_point", side_effect=_scripted_send_gift),
+    # Screens here are scripted by colour; the FRIENDSHIP LEVEL read behind
+    # the colour test has nothing to read.
+    mock.patch.object(gift_ios, "friendship_heading_visible", return_value=False),
+    # Likewise the OPEN label read: a coloured gift card here is a gift card.
+    mock.patch.object(gift_ios, "open_button_visible", return_value=True),
+    mock.patch.object(gift_ios, "bag_full_visible", return_value=False),
+]
+
+
+def setUpModule():
+    for patcher in _patches:
+        patcher.start()
+
+
+def tearDownModule():
+    for patcher in reversed(_patches):
+        patcher.stop()
 
 
 class FakeDriver:
@@ -156,13 +200,7 @@ class UntilIdleTests(unittest.TestCase):
 
 
 class LatePaintingGiftTests(unittest.TestCase):
-    """A friend's gift card can still be painting when OPEN_BTN is sampled.
-
-    Measured on the SE: the recovery tap returns while the friends list is only
-    starting to fade, so the first look at OPEN_BTN reads a half-drawn button as
-    grey. The settled look that follows sees the colored one, which used to read
-    as "not on the friend profile" and stopped the run.
-    """
+    """Wait for a gift card to finish painting before sampling OPEN."""
 
     @staticmethod
     def _points() -> dict[str, list[int]]:
@@ -245,12 +283,7 @@ class LatePaintingGiftTests(unittest.TestCase):
 
 
 class NothingLeftTests(unittest.TestCase):
-    """A day's gifts all sent and nothing waiting: the run must end.
-
-    The SE, 3 Nov: every cycle reopened the same top friend ("No incoming gift
-    to open; Friend cannot receive a gift; advancing") until it was stopped by
-    hand at Gift 23 of a 100-cycle cap.
-    """
+    """End the run when there are no outgoing or incoming gifts."""
 
     def test_idle_friends_end_the_run(self) -> None:
         points = LatePaintingGiftTests._points()
@@ -288,9 +321,7 @@ class NothingLeftTests(unittest.TestCase):
 
 
 class RefusedOpenLoopTests(unittest.TestCase):
-    """The SE, 3 Nov, past the daily open cap: OPEN drops straight back to the
-    same friend's profile, the friend can be sent nothing, and the next cycle
-    reopens that friend.  58 cycles before it was stopped by hand."""
+    """Refused opens stop the loop if the same friend cannot receive a gift."""
 
     def test_refused_opens_end_the_run(self) -> None:
         points = LatePaintingGiftTests._points()
@@ -333,12 +364,7 @@ class RefusedOpenLoopTests(unittest.TestCase):
 
 
 class TransientScreenTests(unittest.TestCase):
-    """Screens that read wrong for a moment and right once they settle.
-
-    Measured on the SE, 2026-10-03: a capped OPEN lands on the profile under the
-    "Daily limit reached" banner, and the gift picker can still be sliding in
-    when FIRST_GIFT_BTN is tapped. A single look at either cost the run.
-    """
+    """Wait for transient overlays and the incoming and outgoing gift controls."""
 
     _points = staticmethod(LatePaintingGiftTests._points)
 
@@ -656,12 +682,7 @@ class SelectiveOpeningTests(unittest.TestCase):
 
 
 class CycleFailureRecoveryTests(unittest.TestCase):
-    """One friend the cycle cannot finish must not end the run.
-
-    Measured on the SE: friend 1 of 399 stranded every run on "OPEN did not
-    reach the friend profile", so the phone sent nothing at all and the 398
-    friends behind it were never tried.
-    """
+    """Skip an isolated failed cycle and continue to the next friend."""
 
     @staticmethod
     def _points() -> dict[str, list[int]]:
@@ -772,17 +793,11 @@ class CycleFailureRecoveryTests(unittest.TestCase):
 
 
 class RefusedOpenTests(unittest.TestCase):
-    """An OPEN the game refuses must not cost the friends their sends.
-
-    Measured on the SE, 2026-10-06: after three opens the OPEN tap left a
-    screen that did not change for nine seconds, and CLOSE went back to the
-    same unopened gift. Three friends in a row did that, the cycle-failure cap
-    fired, and the SE's run ended while android-three carried on.
-    """
+    """Continue sending after a refused open unless the Item Bag is confirmed full."""
 
     _points = staticmethod(CycleFailureRecoveryTests._points)
 
-    def _run(self, count: int, opens_before_refusal: int):
+    def _run(self, count: int, opens_before_refusal: int, *, full_bag=False, config=None):
         points = self._points()
         names = {tuple(point): name for name, point in points.items()}
         state = {"screen": "card", "opens": 0}
@@ -851,10 +866,14 @@ class RefusedOpenTests(unittest.TestCase):
             mock.patch.object(gift_ios, "tap", side_effect=fake_tap),
             mock.patch.object(gift_ios, "ensure_screen"),
             mock.patch.object(gift_ios.time, "sleep"),
+            mock.patch.object(
+                gift_ios, "bag_full_visible",
+                side_effect=lambda _driver: full_bag and state["screen"] == "refused",
+            ),
         ):
             driver = FakeDriver(rect={"width": 375, "height": 667})
             completed = gift_ios.run_gifts_v3(
-                driver, {}, count, guard=True, dry_run=False, all_mode=True
+                driver, config or {}, count, guard=True, dry_run=False, all_mode=True
             )
         return completed, taps, save
 
@@ -883,6 +902,161 @@ class RefusedOpenTests(unittest.TestCase):
 
         save.assert_called_once_with(gift_ios.OPEN_REFUSED_SCREENSHOT)
 
+    def test_confirmed_full_bag_hands_off_to_starter_before_any_further_tap(self) -> None:
+        android = gift_ios.gift_android
+        config = {"device": {"udid": "EXAMPLE-UDID", "team_id": "EXAMPLE", "wda_bundle_id": "org.example.wda"}}
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            mock.patch.object(android, "BAG_FULL_MARKERS", new=Path(temp)),
+            mock.patch.dict(gift_ios.os.environ, {android.CLEAR_BAG_ENV: "1"}),
+        ):
+            completed, taps, _ = self._run(3, opens_before_refusal=0, full_bag=True, config=config)
+            self.assertTrue(android.bag_full_marker("EXAMPLE-UDID").is_file())
+        self.assertEqual(completed, 0)
+        self.assertEqual(taps, ["OPEN_BTN"])
+
+    def test_standalone_full_bag_also_avoids_the_upgrade_dialog(self) -> None:
+        with mock.patch.dict(gift_ios.os.environ, {gift_ios.gift_android.CLEAR_BAG_ENV: ""}):
+            completed, taps, _ = self._run(3, opens_before_refusal=0, full_bag=True)
+        self.assertEqual(completed, 0)
+        self.assertEqual(taps, ["OPEN_BTN"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FriendshipHeadingTests(unittest.TestCase):
+    """The profile check behind the colour test: TRADE can sit under OPEN_BTN."""
+
+    def read(self, texts):
+        from sources import gbl_vision
+
+        boxes = [gbl_vision.OCRBox(text, 0.9, 0, 0, 10, 10) for text in texts]
+        with (
+            mock.patch.object(gift_ios, "screenshot_image", return_value=Image.new("RGB", (750, 1334))),
+            mock.patch.object(gbl_vision, "recognize", return_value=boxes),
+        ):
+            # The module-level patch stubs it for the colour-scripted tests.
+            return _real_heading(object())
+
+    def test_profile_heading_is_the_profile(self) -> None:
+        self.assertTrue(self.read(["Level 39", "FRIENDSHIP LEVEL", "SEND GIFT"]))
+
+    def test_gift_card_is_not_the_profile(self) -> None:
+        self.assertFalse(self.read(["OPEN", "ExampleTrainer sent you a Gift!"]))
+
+
+_real_heading = gift_ios.friendship_heading_visible
+_real_open_label = gift_ios.open_button_visible
+_real_bag_full = gift_ios.bag_full_visible
+
+
+class BagFullNoticeTests(unittest.TestCase):
+    def test_only_a_positive_full_bag_notice_is_recognized(self) -> None:
+        image = Image.new("RGB", (750, 1334))
+        for wording, expected in (
+            ("Your Item Bag is full!", True),
+            ("Daily Gift limit reached", False),
+            ("Upgrade Item Bag", False),
+        ):
+            with (
+                self.subTest(wording=wording),
+                mock.patch.object(gift_ios, "screenshot_image", return_value=image),
+                mock.patch.object(gift_ios.gbl_vision, "recognize", return_value=[
+                    gift_ios.gbl_vision.OCRBox(wording, 0.95, 20, 20, 80, 20)
+                ]),
+            ):
+                self.assertEqual(_real_bag_full(object()), expected)
+
+
+class OpenLabelTests(unittest.TestCase):
+    """OPEN is tapped only when its label is read on the button."""
+
+    def read(self, boxes, rect_error=None):
+        from sources import gbl_vision
+
+        driver = mock.Mock()
+        driver.get_window_rect.return_value = {"width": 375, "height": 667}
+        if rect_error:
+            driver.get_window_rect.side_effect = rect_error
+        with (
+            mock.patch.object(gift_ios, "screenshot_image", return_value=Image.new("RGB", (750, 1334))),
+            mock.patch.object(gbl_vision, "recognize", return_value=boxes),
+        ):
+            return _real_open_label(driver, [188, 554])
+
+    @staticmethod
+    def box(text, x, y, confidence=1.0):
+        from sources import gbl_vision
+
+        return gbl_vision.OCRBox(text, confidence, x, y, 90, 26)
+
+    def test_gift_card_open_label_is_read(self) -> None:
+        # The sample gift card has OPEN at (330, 1094) pixels.
+        self.assertTrue(self.read([self.box("OPEN", 330, 1094)]))
+
+    def test_profile_has_no_open_label(self) -> None:
+        self.assertFalse(
+            self.read([self.box("SEND GIFT", 68, 1186), self.box("FRIENDSHIP LEVEL", 306, 846)])
+        )
+
+    def test_open_elsewhere_on_screen_does_not_count(self) -> None:
+        self.assertFalse(self.read([self.box("OPEN", 330, 300)]))
+
+    def test_a_failed_read_does_not_tap(self) -> None:
+        self.assertFalse(self.read([self.box("OPEN", 330, 1094)], rect_error=RuntimeError("wda")))
+
+    def test_trade_under_open_is_not_tapped_when_no_heading_is_read(self) -> None:
+        # The profile heading was unreadable and the point was colored.
+        points = SelectiveOpeningTests._points()
+        taps: list[list[int]] = []
+        with (
+            mock.patch.object(gift_ios, "coordinates", return_value=points),
+            mock.patch.object(gift_ios, "colored_action_available", return_value=True),
+            mock.patch.object(gift_ios, "friendship_heading_visible", return_value=False),
+            mock.patch.object(gift_ios, "open_button_visible", return_value=False),
+            mock.patch.object(gift_ios, "point_saturation", return_value=60.0),
+            mock.patch.object(gift_ios, "is_friends_list", return_value=False),
+            mock.patch.object(gift_ios, "tap", side_effect=lambda d, p: taps.append(list(p))),
+            mock.patch.object(gift_ios.time, "sleep"),
+        ):
+            try:
+                gift_ios.run_gifts_v3(mock.Mock(), {}, 1, False, False, all_mode=False)
+            except Exception:
+                pass
+        self.assertNotIn(points["OPEN_BTN"], taps)
+
+
+class OpenOnProfileTests(unittest.TestCase):
+    """A coloured OPEN_BTN point on the profile is TRADE, not a gift to open."""
+
+    def test_trade_under_open_is_not_tapped(self) -> None:
+        points = SelectiveOpeningTests._points()
+        taps: list[list[int]] = []
+        driver = mock.Mock()
+        with (
+            mock.patch.object(gift_ios, "coordinates", return_value=points),
+            mock.patch.object(gift_ios, "colored_action_available", return_value=True),
+            mock.patch.object(gift_ios, "friendship_heading_visible", return_value=True),
+            mock.patch.object(gift_ios, "point_saturation", return_value=60.0),
+            mock.patch.object(gift_ios, "is_friends_list", return_value=False),
+            mock.patch.object(gift_ios, "tap", side_effect=lambda d, p: taps.append(list(p))),
+            mock.patch.object(gift_ios.time, "sleep"),
+        ):
+            try:
+                gift_ios.run_gifts_v3(driver, {}, 1, False, False, all_mode=False)
+            except Exception:
+                pass  # only whether OPEN was tapped matters here
+        self.assertNotIn(points["OPEN_BTN"], taps)
+
+
+import unittest as _ut
+
+
+class CrashAndKeyboardTests(_ut.TestCase):
+    def test_game_crashed_matches_wda_crash_message(self):
+        from sources import gift_ios
+        assert gift_ios.game_crashed(Exception(
+            "Message: The application under test with bundle id 'com.nianticlabs.pokemongo' is not running, possibly crashed"))
+        assert not gift_ios.game_crashed(Exception("socket hang up"))

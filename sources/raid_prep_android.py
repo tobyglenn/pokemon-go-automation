@@ -23,6 +23,15 @@ from sources.raid_prep_common import (  # noqa: F401  re-exported
     preview_cp,
 )
 
+# High on the screen: the new Pokémon's model, never a detail-page button.
+CONTINUE_POINT = (0.5, 0.22)
+
+
+def _detail_page(boxes) -> bool:
+    """The species page: its HP line, which no evolution or Pokédex screen shows."""
+    return any(re.search(r"\d+\s*/\s*\d+\s*HP", b.text, re.I) for b in boxes)
+
+
 logger = logging.getLogger("raid_prep_android")
 
 
@@ -37,10 +46,9 @@ class AndroidRaidPrepWorker:
     def search_and_open(self, term: str, expected_cp: int | None = None) -> bool:
         """Search storage and tap the candidate Pokémon cell."""
         self.ensure_grid()
-        count, entries, img, boxes = self.scanner.search(term)
-        grid_entries = raid_scan_android.parse_grid_entries(boxes)
-        if (count is not None and count < 1) and not grid_entries:
-            logger.warning("No results for '%s'", term)
+        count, grid_entries, _img, _boxes = self.scanner.search(term, exact=True)
+        if count is None or count < 1 or not grid_entries:
+            logger.warning("No verified result for '%s'", term)
             return False
 
         w, h = self.phone.viewport
@@ -53,14 +61,11 @@ class AndroidRaidPrepWorker:
             if not target_entry:
                 logger.warning("No '%s' result at CP %s; touching nothing", term, expected_cp)
                 return False
-        elif grid_entries:
+        else:
             target_entry = grid_entries[0]
 
-        if target_entry:
-            # Tap sprite slightly below CP caption
-            self.phone.tap((target_entry.x / w, (target_entry.y + 60) / h), settle=1.5)
-        else:
-            self.phone.tap((0.25, 0.40), settle=1.5)
+        # Tap the sprite slightly below the measured CP caption.
+        self.phone.tap((target_entry.x / w, (target_entry.y + 60) / h), settle=1.5)
 
         # Verify detail page opened
         detail_img, detail_boxes = self.phone.read()
@@ -277,12 +282,14 @@ class AndroidRaidPrepWorker:
         logger.info("Waiting 28s for evolution animation...")
         time.sleep(28.0)
 
-        # Dismiss new Pokémon / Pokédex entry screens
-        for _ in range(5):
-            self.phone.tap((0.5, 0.85), settle=1.2)
-
-        # Verify new detail screen
+        # Tap through the new-Pokémon and Pokédex screens only while no detail
+        # page shows. A blind tap low on the detail page lands on POWER UP.
         detail_img, detail_boxes = self.phone.read()
+        for _ in range(8):
+            if _detail_page(detail_boxes):
+                break
+            self.phone.tap(CONTINUE_POINT, settle=1.5)
+            detail_img, detail_boxes = self.phone.read()
         new_cp = self.read_current_cp(detail_boxes)
         return EvolveResult(success=new_cp is not None, old_cp=old_cp, new_cp=new_cp,
                             note="" if new_cp is not None else "No detail page after evolving")

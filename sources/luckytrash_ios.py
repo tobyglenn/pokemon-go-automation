@@ -290,13 +290,22 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
 
 
 def check_appium_status(server_url: str) -> None:
+    """Make sure Appium answers at `server_url`, starting it if it is down.
+
+    A run should never stop just because the shared Appium server was not
+    already up -- the fleet knows how to launch it on every Mac.
+    """
+    from . import pokemon_fleet
+
+    try:
+        pokemon_fleet.ensure_appium_server(server_url)
+    except pokemon_fleet.FleetError as exc:
+        raise LuckyTrashIOSError(str(exc)) from exc
     try:
         with urlopen(f"{server_url}/status", timeout=3) as response:
             payload = json.load(response)
     except (OSError, URLError, ValueError) as exc:
-        raise LuckyTrashIOSError(
-            f"Appium is not ready at {server_url}; start the Appium launcher first"
-        ) from exc
+        raise LuckyTrashIOSError(f"Appium at {server_url} stopped answering after it started") from exc
     if not isinstance(payload, dict) or "value" not in payload:
         raise LuckyTrashIOSError(f"Unexpected Appium status response from {server_url}")
 

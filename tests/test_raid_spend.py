@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from tests import support as _test_support  # noqa: F401
 
+import json
 import unittest
+from pathlib import Path
 
 from PIL import Image
 
@@ -248,6 +250,46 @@ class SearchField(unittest.TestCase):
         self.assertFalse(raid_inventory.search_text_matches(
             [box("Q 094", 300, 380)], "194", 2560))
 
+    def test_visible_negation_is_part_of_the_filter(self):
+        wanted = "!favorite&!lucky&!shadow&!traded&tyranitar"
+        for observed in ("lucky&shadow&traded&tyranitar", "!favorite&!lucky&shadow&!traded&tyranitar"):
+            with self.subTest(observed=observed):
+                self.assertFalse(raid_inventory.search_text_matches(
+                    [box(observed, 300, 380)], wanted, 2560))
+
+    def test_exact_search_refuses_to_infer_a_missing_prefix(self):
+        wanted = "!favorite&!lucky&!shadow&!traded&tyranitar"
+        self.assertFalse(raid_inventory.search_text_matches(
+            [box("!shadow&!traded&tyranitar", 300, 380)], wanted, 2560, exact=True))
+        self.assertTrue(raid_inventory.search_text_matches(
+            [box(f"Q {wanted}", 300, 380)], wanted, 2560, exact=True))
+
+    def test_a_dropped_letter_in_the_tail(self):
+        term = "!#&!shiny&!costume&!4*&!lucky&!shadow&!traded&larvesta"
+        self.assertTrue(raid_inventory.search_text_matches(
+            [box("!lucky&!shadow&!traded&arvesta", 400, 340, 600, 40)], term, 2412))
+        # Another species' tail is still a miss.
+        self.assertFalse(raid_inventory.search_text_matches(
+            [box("!lucky&!shadow&!traded&bellsprout", 400, 340, 600, 40)], term, 2412))
+
+    def test_misread_punctuation_and_a_dropped_letter(self):
+        term = "!#&!shiny&!costume&!4*&!lucky&!shadow&!traded&larvitar"
+        self.assertTrue(raid_inventory.search_text_matches(
+            [box("&.lucky&.shadow&!traded&arvitar", 400, 340, 600, 40)], term, 2412))
+        self.assertFalse(raid_inventory.search_text_matches(
+            [box("&.lucky&.shadow&!traded&larvesta", 400, 340, 600, 40)], term, 2412))
+
+    def test_a_comma_at_the_cut_edge(self):
+        self.assertTrue(raid_inventory.search_text_matches(
+            [box(", !4*&!lucky&!shadow&!traded&ralts", 400, 336, 600, 40)],
+            "!#&!shiny&!costume&!4*&!lucky&!shadow&!traded&ralts", 2412))
+
+    def test_a_bar_read_for_an_l(self):
+        # The tail of a trade filter, as Vision read it on the ios-one (4 Nov).
+        boxes = [box("lucky&!shadow&!traded&bel|sprout", 417, 249, 450, 40)]
+        self.assertTrue(raid_inventory.search_text_matches(
+            boxes, "!#&!shiny&!costume&!4*&!lucky&!shadow&!traded&bellsprout", 1334))
+
     def test_filters_and_padding(self):
         self.assertEqual(raid_inventory.dex_term(6), "006")
         self.assertEqual(raid_inventory.filters("094", False),
@@ -435,3 +477,43 @@ class Planning(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RaidspendScanRoutingTests(unittest.TestCase):
+    def test_worker_with_local_flag_scans_instead_of_redelegating(self):
+        import raidspend
+        from unittest import mock
+        with mock.patch.object(raidspend.raid_scan, "main", return_value=0) as scan, \
+                mock.patch.object(raidspend.fleet_entrypoint, "run_all_machines") as fan_out, \
+                mock.patch.object(raidspend.fleet_entrypoint, "apply_local_environment"):
+            self.assertEqual(raidspend.main(["--local", "--scan", "--devices", "sample-receiver"]), 0)
+        fan_out.assert_not_called()
+        scan.assert_called_once()
+        self.assertNotIn("--scan", scan.call_args.args[0])
+
+    def test_coordinator_fans_out_without_scope_flags(self):
+        import raidspend
+        from unittest import mock
+        with mock.patch.object(raidspend.fleet_entrypoint, "run_all_machines", return_value=0) as fan_out, \
+                mock.patch.dict("os.environ", {"POKEMON_FLEET_CHILD": ""}):
+            raidspend.main(["--scan", "--devices", "sample-receiver"])
+        self.assertEqual(fan_out.call_args.args, ("raidspend.py", ["--scan", "--devices", "sample-receiver"]))
+
+
+class PowerTermTests(unittest.TestCase):
+    def test_power_term_finds_each_pick_or_the_tag(self):
+        from tests.test_storage_review import matches
+        picks = [raid_plan.PowerPick(894, 1580, "Regieleki", "x"),
+                 raid_plan.PowerPick(214, 1772, "Heracross", "y")]
+        term = raid_plan.power_term(picks)
+        self.assertEqual(term, "#ToPower,214,894&#ToPower,cp1580,cp1772")
+        self.assertTrue(matches(term, 894, {"cp1580"}))
+        self.assertTrue(matches(term, 214, {"cp1772"}))
+        self.assertFalse(matches(term, 214, {"cp1773"}))
+        self.assertFalse(matches(term, 1, {"cp1580"}))
+        self.assertTrue(matches(term, 1, {"#ToPower"}))
+
+    def test_no_scan_falls_back_to_the_tag(self):
+        self.assertEqual(raid_plan.power_term([]), "#ToPower")
+        self.assertEqual(raid_plan.power_term([raid_plan.PowerPick(6, 2000, "Charizard", "z")], tag=None),
+                         "6&cp2000")

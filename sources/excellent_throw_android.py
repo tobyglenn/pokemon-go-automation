@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from . import config_paths
+from . import android_common
 from .android_common import find_display_id  # noqa: F401  re-exported for callers and tests
 
 import argparse
@@ -12,7 +13,7 @@ import io
 import re
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -37,14 +38,19 @@ RING_SAMPLES = 2
 RING_BAND = (0.22, 0.70)
 RING_X_BAND = (0.15, 0.85)
 # What to throw when no ring could be read.  The one hand-verified catching
-# throw is the moto's, 360,1300 -> 360,560 at 720x1600: 0.46h of travel in
+# throw is the compact Android handset's, 360,1300 -> 360,560 at 720x1600: 0.46h of travel in
 # 260ms.  A throw's power is that length, measured from wherever this phone's
 # ball actually rests -- not a shared endpoint, which is a different throw on
-# every handset.  The android-three's ball sits at 0.913h against the moto's 0.8125h, so
+# every handset.  The android-three's ball sits at 0.913h against the compact Android handset's 0.8125h, so
 # ending both at 0.35h threw the android-three 22% harder than the swipe that worked and
 # its balls sailed over the Pokemon on 1-2 Sep 2026.
 PROVEN_THROW_RISE = 0.46
 PROVEN_THROW_CEILING = 0.12  # never flick off the top of the screen
+# A centered plate gets a straight flick. Limit lean to a share of width.
+AIM_DEADBAND = 0.06
+AIM_MAX_LEAN = 0.25
+# The body's vertical offset below the plate.
+PLATE_TO_BODY = 0.14
 RING_HOLD_MARGIN = 0.4
 RING_HOLD_CEILING = 4.0
 
@@ -55,7 +61,7 @@ RING_HOLD_CEILING = 4.0
 BERRY_PINK_FRACTION = 0.15
 # Fallbacks only.  The corner buttons are found per frame by
 # `excellent_throw_ios.locate_encounter_buttons`, because their y is not the
-# same on every phone: 0.836 on the android-one, 0.853 on the moto, 0.914 on the android-three.
+# same on every phone: 0.836 on the android-one, 0.853 on the compact Android handset, 0.914 on the android-three.
 BERRY_BUTTON_POINT = (0.123, 0.855)
 BALL_SWITCH_POINT = (0.872, 0.839)
 # The Great Ball inside the chooser sheet, second in its first row.  Measured
@@ -66,7 +72,7 @@ BALL_CHOICE_X = 0.498
 BALL_CHOICE_BELOW_SHEET = 0.167
 BALL_CHOICE_POINT = (0.498, 0.750)
 # The Ultra Ball, third in that row, for a Silver Pinap's throw.  Measured on
-# the SE's chooser (see excellent_throw_ios); not yet on an Android sheet.
+# the compact iPhone's chooser (see excellent_throw_ios); not yet on an Android sheet.
 ULTRA_CHOICE_X = excellent_throw_ios.ULTRA_CHOICE_X
 BALL_SHEET_SECONDS = 1.2
 # How long a ball detection stays worth agreeing with. Two reads of the same
@@ -111,7 +117,11 @@ ANALYSIS_WIDTH = 420
 # The berry is tapped, not thrown, so there is no flick duration here at all.
 # See feed_berry.
 NANAB_FEED_SETTLE_SECONDS = 1.6
-NANAB_FEED_TAPS = 2      # the second is for a tap that missed a moving berry
+HELD_SETTLE_SECONDS = 3.0
+HELD_SETTLE_POLL = 0.3
+BALL_RADIUS_SHARE = 0.80
+BALL_WIDTH_SHARE = 0.15
+NANAB_FEED_TAPS = 2     # the second is for a tap that missed a moving berry
 ADB_BINARY = Path(__file__).resolve().parent.parent / "adb"
 ADB_PATH = str(ADB_BINARY) if ADB_BINARY.exists() else "adb"
 SCREENCAP_TIMEOUT = 10
@@ -150,6 +160,18 @@ class AndroidThrowConfig:
     result_capture_seconds: float
 
 
+@dataclass(frozen=True)
+class ThrowAim:
+    throw_rise: float = PROVEN_THROW_RISE
+    aim_deadband: float = AIM_DEADBAND
+    aim_max_lean: float = AIM_MAX_LEAN
+    plate_to_body: float = PLATE_TO_BODY
+    reach_step: float = 0.12
+
+
+DEFAULT_THROW_AIM = ThrowAim()
+
+
 @dataclass
 class AndroidDevice:
     device: "DeviceAsync"
@@ -158,12 +180,14 @@ class AndroidDevice:
     viewport: tuple[int, int]
     config: AndroidThrowConfig
     display_id: str | None = None   # set by prepare_devices(); only foldables need it
+    throw_aim: ThrowAim = DEFAULT_THROW_AIM
+    throws_sent: int = field(init=False, default=0)
 
     async def screenshot_raw(self) -> Image.Image:
         """One screencap as the raw framebuffer, decoded here rather than on the phone.
 
         `screencap -p` makes the handset encode a PNG, and that encode is most
-        of the cost: measured on 24 Aug it is 0.98-1.73s on the moto and
+        of the cost: measured on 24 Aug it is 0.98-1.73s on the compact Android handset and
         4.04-4.28s on the android-one, against 0.52-0.60s and 1.09-1.21s for the raw
         buffer.  The ring can only be read from a frame captured while the ball
         is still held, so the capture has to be the cheap one.
@@ -181,8 +205,7 @@ class AndroidDevice:
         try:
             data, _ = await asyncio.wait_for(proc.communicate(), SCREENCAP_TIMEOUT)
         except asyncio.TimeoutError as exc:
-            proc.kill()
-            await proc.wait()
+            await android_common.kill_and_reap(proc)
             raise AndroidExcellentThrowError(f"Screen capture timeout on {self.label}") from exc
         image = decode_raw_framebuffer(data)
         if image is None:
@@ -198,7 +221,7 @@ class AndroidDevice:
         """The slow read: `screencap -p`, encoded on the handset.
 
         Only used when the raw framebuffer will not decode.  It costs about
-        1.0s on the moto and 4.1s on the android-one against 0.7s and 1.3s raw, so it
+        1.0s on the compact Android handset and 4.1s on the android-one against 0.7s and 1.3s raw, so it
         is a fallback and never the first choice.
         """
         proc = await asyncio.create_subprocess_exec(
@@ -215,8 +238,7 @@ class AndroidDevice:
         try:
             data, _ = await asyncio.wait_for(proc.communicate(), SCREENCAP_TIMEOUT)
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await android_common.kill_and_reap(proc)
             return None
         if not data:
             return None
@@ -248,6 +270,7 @@ class AndroidDevice:
             int(max(0, min(self.viewport[1] - 1, y1))),
             int(duration_ms),
         )
+        self.throws_sent += 1
 
     async def tap(self, point: tuple[int, int] | list[int]) -> None:
         x, y = point
@@ -725,8 +748,9 @@ def proven_throw_points(
     viewport: tuple[int, int],
     plate: tuple[int, int] | None = None,
     reach: float = 1.0,
+    aim: ThrowAim = DEFAULT_THROW_AIM,
 ) -> tuple[list[int], list[int]]:
-    """The moto's hand-verified flick, from wherever this ball rests.
+    """the compact Android handset's hand-verified flick, from wherever this ball rests.
 
     For when the ring could not be read.  `fallback_target` is the other
     option and it is worse than nothing here: with no circle drawn on the
@@ -737,18 +761,10 @@ def proven_throw_points(
     width, height = viewport
     end_y = max(
         round(height * PROVEN_THROW_CEILING),
-        round(ball.center_y - height * PROVEN_THROW_RISE * reach),
+        round(ball.center_y - height * aim.throw_rise * reach),
     )
-    end_x = aimed_end_x(ball, end_y, viewport, plate)
+    end_x = aimed_end_x(ball, end_y, viewport, plate, aim)
     return [ball.center_x, ball.center_y], [end_x, end_y]
-
-
-# A Pokemon whose plate is this close to the middle gets the straight flick.
-AIM_DEADBAND = 0.06
-# The flick never leans further sideways than this share of the width.
-AIM_MAX_LEAN = 0.25
-# The Pokemon's body sits this far below the middle of its name plate.
-PLATE_TO_BODY = 0.14
 
 
 def aimed_end_x(
@@ -756,6 +772,7 @@ def aimed_end_x(
     end_y: int,
     viewport: tuple[int, int],
     plate: tuple[int, int] | None,
+    aim: ThrowAim = DEFAULT_THROW_AIM,
 ) -> int:
     """Where the flick ends sideways: under the Pokemon, not straight up.
 
@@ -764,15 +781,15 @@ def aimed_end_x(
     keeps the straight flick that is already proven.
     """
     width, height = viewport
-    if plate is None or abs(plate[0] - ball.center_x) < width * AIM_DEADBAND:
+    if plate is None or abs(plate[0] - ball.center_x) < width * aim.aim_deadband:
         return ball.center_x
-    body_y = min(plate[1] + height * PLATE_TO_BODY, ball.center_y - height * 0.15)
+    body_y = min(plate[1] + height * aim.plate_to_body, ball.center_y - height * 0.15)
     # Measured on the proven length, not the swipe's: a longer reach is a
     # harder throw, not a wider one.  Scaling it sent a +48% flick at a
     # swaying Metang to the screen edge on 3 Nov 2026.
-    proven_rise = height * PROVEN_THROW_RISE
+    proven_rise = height * aim.throw_rise
     lean = (plate[0] - ball.center_x) * proven_rise / max(1.0, ball.center_y - body_y)
-    lean = max(-width * AIM_MAX_LEAN, min(width * AIM_MAX_LEAN, lean))
+    lean = max(-width * aim.aim_max_lean, min(width * aim.aim_max_lean, lean))
     return round(ball.center_x + lean)
 
 
@@ -910,6 +927,54 @@ async def locate_held_item(
     return analysis_view(device.viewport).grow_ball(detection), image
 
 
+def ball_sized(
+    held: excellent_throw_ios.BallDetection | None,
+    ball: excellent_throw_ios.BallDetection | None,
+    width: int,
+) -> bool:
+    """A held disc as big as the encounter's ball.
+
+    A berry low in the hand is found as a smaller disc: 163px against the
+    226-232px ball on the compact Android handset (10 Nov 2026), and that small disc was what read
+    as a ball.  Balls in hand measured 0.166-0.253 of the screen width on all
+    four Androids; those misreads were 0.12-0.14.  The encounter's ball is a
+    second yardstick, but it is read while the ball drops in (188-238px).
+    """
+    if held is None or held is ball:
+        return True
+    if held.radius < width * BALL_WIDTH_SHARE:
+        return False
+    return ball is None or ball.radius <= 0 or held.radius >= ball.radius * BALL_RADIUS_SHARE
+
+
+async def settle_held_item(
+    device: AndroidDevice,
+    fallback: excellent_throw_ios.BallDetection | None = None,
+    timeout: float = HELD_SETTLE_SECONDS,
+) -> tuple[excellent_throw_ios.BallDetection | None, Image.Image | None]:
+    """The held item once it has stopped dropping into the hand.
+
+    A Silver Pinap still sliding in sits low and half off the screen, and
+    `ball_in_hand` reads that as a ball.  On the compact Android handset (10 Nov 2026) feed_berry
+    then reported "Berry eaten" without a tap, throw after throw, on a
+    Thundurus.  Settled, the same berry reads as an item.
+    """
+    deadline = time.monotonic() + timeout
+    previous, image = await locate_held_item(device, fallback)
+    while time.monotonic() < deadline:
+        await asyncio.sleep(HELD_SETTLE_POLL)
+        held, image = await locate_held_item(device, fallback)
+        if (
+            held is not None
+            and previous is not None
+            and abs(held.center_y - previous.center_y) <= device.viewport[1] * 0.01
+            and abs(held.center_x - previous.center_x) <= device.viewport[0] * 0.02
+        ):
+            return held, image
+        previous = held
+    return previous, image
+
+
 async def feed_berry(
     device: AndroidDevice,
     ball: excellent_throw_ios.BallDetection | None,
@@ -922,7 +987,7 @@ async def feed_berry(
     Nanab puts it in the hand where the ball sits, so every version of this
     swiped it at the Pokemon the way the ball is swiped: from the berry, at
     the Pokemon's x, then straight up at the proven throw's own speed.  None
-    of them fed anything.  The moto's bag read x9 before and x9 after three
+    of them fed anything.  the compact Android handset's bag read x9 before and x9 after three
     of them; the foldable's read x36 either side.
 
     Tapping fed it first try, 9 -> 8, with the Nanab's swirl drawn over the
@@ -938,14 +1003,14 @@ async def feed_berry(
     ever does re-select a berry instead, every extra tap is another Nanab.
 
     No BACK key anywhere here.  It does not put the berry away, it runs from
-    the encounter: the moto ended up on the map screen and the run counted the
+    the encounter: the compact Android handset ended up on the map screen and the run counted the
     abandoned Pokemon as caught.
     """
     for attempt in range(1, NANAB_FEED_TAPS + 1):
-        held, held_image = await locate_held_item(device, ball)
+        held, held_image = await settle_held_item(device, ball)
         if held_image is not None:
             held_image.save(artifact_dir / "berry-in-hand.jpg", "JPEG", quality=72)
-            if ball_in_hand(held_image, device.viewport):
+            if ball_in_hand(held_image, device.viewport) and ball_sized(held, ball, device.viewport[0]):
                 print(f"[{device.label}] Berry eaten; ball back in hand")
                 return True
         point = (
@@ -1108,8 +1173,9 @@ async def use_nanab_berry(
         # Close the picker, make sure a ball is back in the hand, and throw it
         # unbuffed -- raising here left the sheet open over the encounter.
         names = ", ".join(kind for kind, _point in listed)
+        wanted_label = "Nanab" if berry == "nanab" else f"{berry}/nanab"
         print(
-            f"[{device.label}] No Nanab berry in the bag "
+            f"[{device.label}] No {wanted_label} berry in the bag "
             f"(picker: {names}); throwing without one, and not looking again"
         )
         await device.tap(
@@ -1219,7 +1285,7 @@ async def wait_for_throw_result(device: AndroidDevice, artifact_dir: Path) -> bo
     if last_image is not None and excellent_throw_ios.locate_encounter_buttons(last_image):
         # The berry and ball buttons only stand on an open encounter; no catch
         # summary or Pokemon page has them.  A legendary's break-out runs past
-        # this window, and on 3 Nov 2026 ph-1 called a Kyogre caught three
+        # this window, and on 3 Nov 2026 the compact Android handset called a Kyogre caught three
         # times with its Ultra Ball still rising into the hand.
         last_image.save(artifact_dir / "result-encounter-returned.jpg", "JPEG", quality=72)
         print(f"[{device.label}] Encounter buttons still up; Pokemon still in encounter")
@@ -1245,7 +1311,7 @@ async def handset_close_button(device: AndroidDevice) -> list[int] | None:
 
     It is the one button in this file that cannot be found on the frame: a bare
     glyph with nothing written on it, and its y is 0.945 of the android-three's height
-    against 0.887 of the moto's, so a fraction would miss.  Read from the same
+    against 0.887 of the compact Android handset's, so a fraction would miss.  Read from the same
     AutoTraderConfig.yaml the GBL runner reads rather than a copy in the repo,
     which is only ever a staging copy of what is actually on the phone.
     """
@@ -1257,8 +1323,7 @@ async def handset_close_button(device: AndroidDevice) -> list[int] | None:
     try:
         data, _ = await asyncio.wait_for(proc.communicate(), SCREENCAP_TIMEOUT)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await android_common.kill_and_reap(proc)
         return None
     match = re.search(rb"^CLOSE_BTN:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]", data, re.MULTILINE)
     if match is None:
@@ -1306,12 +1371,18 @@ async def clear_catch_screens(device: AndroidDevice, artifact_dir: Path) -> None
 
         # A "New Height Record" / "New Weight Record" card can slide up over
         # the caught Pokemon's page and hide it, and its X sits where the
-        # page's own X does.  ph-1 sat on one for five minutes on 3 Nov 2026.
+        # page's own X does.  the compact Android handset sat on one for five minutes on 3 Nov 2026.
         record = any(
             RECORD_CARD.search(gbl_vision.normalize(box.text)) for box in boxes
         )
         blocked = gbl_vision.blocked_label(boxes)
-        if record or (blocked is not None and gbl_vision.normalize(blocked) == "power up"):
+        # POWER UP sits below the fold on a Dynamax or Mega Pokemon's page;
+        # `pokemon_page_visible` also matches the weight line above the fold.
+        if (
+            record
+            or (blocked is not None and gbl_vision.normalize(blocked) == "power up")
+            or gbl_vision.pokemon_page_visible(boxes)
+        ):
             if close is None:
                 close = await handset_close_button(device)
             if close is None:
@@ -1355,7 +1426,7 @@ async def run_once(
 
     # What is in the hand, and where, both read now.  `image` is the frame the
     # encounter first became legible in, and on both Androids here the ball is
-    # still dropping into that frame: the moto's mid-drop disc fails the pale
+    # still dropping into that frame: the compact Android handset's mid-drop disc fails the pale
     # test and reads as an item, so a Nanab went in before every throw -- three
     # at one Meowth on 10 Sep 2026 -- and the foldable's reading sits 350px
     # above where the ball comes to rest, which is a swipe that grabs grass.
@@ -1389,13 +1460,14 @@ async def run_once(
     # hand.
     if target is None:
         # Read where the Pokemon stands now, just before the flick: a Metang
-        # on the oneplus on 3 Nov 2026 swung side to side, and a plate read
+        # on the tall Android handset on 3 Nov 2026 swung side to side, and a plate read
         # before the ball settled sent two balls to where it had been.
         if plate_reader is not None:
             fresh = await plate_reader()
             if fresh is not None:
                 plate = fresh
-        start, end = proven_throw_points(ball, device.viewport, plate, reach)
+        aim = getattr(device, "throw_aim", DEFAULT_THROW_AIM)
+        start, end = proven_throw_points(ball, device.viewport, plate, reach, aim)
     else:
         start, end = excellent_throw_ios.straight_throw_points(
             ball, target, device.viewport, runtime

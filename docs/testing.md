@@ -39,6 +39,12 @@ Before committing, run the public-tree scan documented in [Privacy](privacy.md).
 
 Transfers are destructive and trades change account inventory. Refactoring authorization is not a reason to perform either action as a casual smoke test. Their plans, dispatch, guards, and tests can be checked without removing or exchanging Pokémon.
 
+## Trade confirmations across computers
+
+Install the same version and private account-alias mapping on every configured computer. Before a confirmation input, the worker must reserve both accounts on all peers. An unreachable peer or an unresolved reservation prevents another confirmation.
+
+If a confirmation stops before its outcome is verified, stop trade workflows on all computers, review both game screens, and compare the matching transaction ID under each computer’s private `trade/pending-confirmations` directory with its trade history. Keep the markers until the exchange and its ledger entry have been reconciled. Once verified, archive the marker files for that transaction together across all hosts, including files for alternate handset aliases.
+
 ## Private validation record
 
 Keep a local record of the tested revision, date, host environment, dependency versions, selected devices, commands, outcomes, and remaining failures. Redact identifiers and account content before sharing. Public release notes should state limitations accurately—for example, an offline iPhone means iOS live behavior was not verified in that session.

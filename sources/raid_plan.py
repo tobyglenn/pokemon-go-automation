@@ -625,3 +625,70 @@ def rare_report(plan: AccountPlan, gd: GameData | None = None) -> str:
         out.append(f"  {attack_type:<9} {t.option.attacker.name} ({t.option.owned.describe()}): "
                    f"{t.rare} RC + {t.rare_xl} RC XL -> {t.pct(t.maxed):.0f}% (+{t.pts(t.maxed):.0f} pts)")
     return "\n".join(out)
+
+
+@dataclass(frozen=True)
+class PowerPick:
+    """One individual worth candy, as the ToPower saved search finds it."""
+
+    dex: int
+    cp: int
+    name: str
+    why: str
+
+
+# The saved search must stay short enough to scan by eye and to type.
+POWER_LIMIT = 20
+
+
+def power_picks(plan: AccountPlan, gd: GameData | None = None, limit: int = POWER_LIMIT) -> list[PowerPick]:
+    """The individuals this account should put candy into, best return first.
+
+    Rare Candy and Rare Candy XL targets lead, ranked as `rare_report` ranks
+    them; each type's strongest own-candy spend follows. One pick per
+    individual: a Pokémon worth both appears once, under its first reason.
+    """
+    gd = gd or raid_gamedata.load()
+    targets = [t for t in rare_targets(gd, plan) if t.attack_type not in SKIP_SUMMARY]
+    rc = sorted((t for t in targets if t.rare and t.pts(t.with_rare) >= RARE_MIN_PTS),
+                key=lambda t: t.pts(t.with_rare) / t.rare, reverse=True)
+    xl = sorted((t for t in targets if t.rare_xl and t.pts(t.maxed) >= RARE_MIN_PTS),
+                key=lambda t: t.pts(t.maxed) / t.rare_xl, reverse=True)
+    ranked: list[tuple[Option, str]] = []
+    ranked += [(t.option, f"{t.rare} Rare Candy: {t.attack_type} +{t.pts(t.with_rare):.0f} pts") for t in rc]
+    ranked += [(t.option, f"{t.rare_xl} Rare Candy XL: {t.attack_type} +{t.pts(t.maxed):.0f} pts") for t in xl]
+    spends = []
+    for attack_type, tp in plan.types.items():
+        if attack_type in SKIP_SUMMARY:
+            continue
+        for mega in (False, True):
+            for option in tp.spends(mega)[:1]:
+                spends.append((tp.candy_points(option), option,
+                               f"own candy: {attack_type} {tp.pct(option.now)} -> {tp.pct(option.reach)}"))
+    ranked += [(option, why) for _gain, option, why in sorted(spends, key=lambda s: s[0], reverse=True)]
+    picks: dict[tuple[int, int], PowerPick] = {}
+    for option, why in ranked:
+        mon = option.owned
+        key = (int(mon.form["dex"]), int(mon.individual.cp))
+        if key not in picks:
+            picks[key] = PowerPick(key[0], key[1], option.attacker.name, why)
+        if len(picks) >= limit:
+            break
+    return list(picks.values())
+
+
+def power_term(picks: Sequence[PowerPick], tag: str | None = "ToPower") -> str:
+    """A native search for exactly these individuals, plus anything tagged `tag`.
+
+    GO has no grouping, so (dex A and CP a) or (dex B and CP b) is written as
+    the two lists it implies, `A,B&cpa,cpb`. A Pokémon of one listed species
+    with another's exact CP is the only extra match, and powering one up
+    changes its CP, so it leaves the list once candy has gone in.
+    """
+    if not picks:
+        return f"#{tag}" if tag else ""
+    dex = ",".join(str(d) for d in sorted({p.dex for p in picks}))
+    cps = ",".join(f"cp{c}" for c in sorted({p.cp for p in picks}))
+    if not tag:
+        return f"{dex}&{cps}"
+    return f"#{tag},{dex}&#{tag},{cps}"

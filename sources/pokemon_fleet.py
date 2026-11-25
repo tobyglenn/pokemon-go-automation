@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field
 import fcntl
 import json
 import os
@@ -31,7 +31,7 @@ from urllib.request import urlopen
 
 import yaml
 
-from . import config_paths, ios_attached_devices
+from . import config_paths, ios_attached_devices, starter_ios_session
 
 
 SOURCE_DIR = Path(__file__).resolve().parent
@@ -100,6 +100,14 @@ class TradeStopped(FleetError):
     """
 
 
+class DailyTradeLimitReached(TradeStopped):
+    """The game's own daily cap: the end of a good run, not a failure."""
+
+
+class TradeConfirmationUnverified(TradeStopped):
+    """Both phones need inspection before another trade is attempted."""
+
+
 @dataclass(frozen=True)
 class DeviceSpec:
     name: str
@@ -137,6 +145,7 @@ class DeviceSpec:
 class FleetConfig:
     path: Path
     devices: dict[str, DeviceSpec]
+    transports: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -502,6 +511,12 @@ def ios_connected_udids_or_raise() -> set[str]:
                     udid = device.get("hardwareProperties", {}).get("udid")
                     if isinstance(udid, str):
                         found.add(udid)
+                # Apple can prefer a network tunnel even while the same device
+                # is physically on USB. usbmux distinguishes the cable owner.
+                try:
+                    found.update(ios_attached_devices.usb_udids())
+                except ios_attached_devices.AttachedDeviceError:
+                    pass
                 return found
     except (OSError, subprocess.TimeoutExpired, ValueError):
         pass
@@ -914,41 +929,53 @@ def lock_holder(path: Path) -> str:
     return f"pid {pid} ({command})"
 
 
+def _lock(handle, mode, spec):
+    try:
+        fcntl.flock(handle, mode | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        holder = lock_holder(Path(handle.name))
+        blame = f" by {holder}" if holder else ""
+        raise FleetError(
+            f"{spec.name} is already controlled{blame}; "
+            f"stop that process (kill -INT) before running this again"
+        ) from exc
+
+
 @contextmanager
 def acquire_device_locks(
-    specs: Sequence[DeviceSpec], lock_dir: Path = LOCK_DIR
+    specs: Sequence[DeviceSpec], lock_dir: Path = LOCK_DIR, *, reserve_for: Path | None = None
 ) -> Iterator[None]:
+    """Outside commands need the exclusive fleet lock, including between starter steps."""
     lock_dir.mkdir(parents=True, exist_ok=True)
-    handles: list[Any] = []
-    try:
+    with ExitStack() as locks:
         for spec in sorted(specs, key=lock_name):
-            path = lock_dir / f"{lock_name(spec)}.lock"
-            handle = path.open("a+")
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                handle.close()
-                holder = lock_holder(path)
-                blame = f" by {holder}" if holder else ""
-                raise FleetError(
-                    f"{spec.name} is already controlled{blame}; "
-                    f"stop that process (kill -INT) before running this again"
-                ) from exc
-            handle.seek(0)
-            handle.truncate()
-            handle.write(
-                f"pid={os.getpid()} device={spec.name} "
-                f"supervisor={os.environ.get('POKEMON_SUPERVISOR_PID', '-')}\n"
-            )
-            handle.flush()
-            handles.append(handle)
+            filename = f"{lock_name(spec)}.lock"
+            public = locks.enter_context((lock_dir / filename).open("a+"))
+            step_dir = starter_ios_session.directory(spec.identifier) if spec.platform == "ios" else None
+            _lock(public, fcntl.LOCK_SH if step_dir else fcntl.LOCK_EX, spec)
+            if step_dir is None:
+                public.seek(0)
+                public.truncate()
+                public.write(
+                    f"pid={os.getpid()} device={spec.name} "
+                    f"supervisor={os.environ.get('POKEMON_SUPERVISOR_PID', '-')}\n"
+                )
+                if reserve_for is not None:
+                    public.write(f"starter={reserve_for}\n")
+                public.flush()
+            # Each step also holds the public lock, so a child finishing after
+            # its parent exits still excludes a competing standalone command.
+            if reserve_for is not None:
+                _lock(public, fcntl.LOCK_SH, spec)
+            owner = step_dir or reserve_for
+            if owner is not None:
+                public.seek(0)
+                if f"starter={owner}" not in public.read().splitlines():
+                    raise FleetError(f"{spec.name}'s starter reservation has ended")
+            if step_dir:
+                step = locks.enter_context((step_dir / filename).open("a+"))
+                _lock(step, fcntl.LOCK_EX, spec)
         yield
-    finally:
-        for handle in reversed(handles):
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                handle.close()
 
 
 def operation_config_path(spec: DeviceSpec, operation: str) -> Path:
@@ -1485,6 +1512,55 @@ class TradeController:
 
             await android_trade.tap(self.backend, point)
 
+    def set_point(self, name: str, point: tuple[int, int] | list[int]) -> None:
+        """Move one mapped button for the rest of this run, on both layers."""
+        value = [int(point[0]), int(point[1])]
+        self.coordinates[name] = value
+        if self.spec.platform == "ios":
+            self.backend.coordinates[name] = list(value)
+
+    async def locate_local_trade(self, image: Any, metrics: dict[str, float]) -> bool:
+        """Locate the Local Trade action in the friend profile's second column."""
+        from . import gbl_vision, trade_ios_android as cross
+
+        if (
+            metrics["white_panel"] < 0.20
+            or metrics["search_pale"] >= 0.80
+            or cross.is_floating_dialog(metrics)
+        ):
+            return False
+
+        column = (
+            int(image.width * 0.25), int(image.height * 0.55),
+            int(image.width * 0.50), int(image.height * 0.95),
+        )
+        try:
+            boxes = await asyncio.to_thread(gbl_vision.recognize, image, column)
+        except (gbl_vision.VisionOCRError, OSError, subprocess.SubprocessError) as exc:
+            print(f"  {self.spec.name}: could not read the friend screen for LOCAL TRADE ({exc})")
+            return False
+        labels = [(gbl_vision.normalize(box.text), box) for box in boxes]
+        label = next(
+            (box for name, box in labels if name == "local trade"),
+            None,
+        )
+        if label is None:
+            label = next(
+                (box for name, box in labels if name == "local" and any(
+                    word == "trade"
+                    and abs(below.center_x - box.center_x) <= image.width * 0.03
+                    and 0 < below.center_y - box.center_y <= image.height * 0.04
+                    for word, below in labels
+                )),
+                None,
+            )
+        if label is None:
+            return False
+        point = self.point_from_image(image, (label.center_x, label.center_y))
+        if list(point) != self.point("TRADE_BTN"):
+            self.set_point("TRADE_BTN", point)
+        return True
+
     async def tap_point(self, point: tuple[int, int] | list[int]) -> None:
         if self.spec.platform == "ios":
             await self.backend.tap_point((point[0], point[1]))
@@ -1875,9 +1951,7 @@ async def settled_screens(
     settled = []
     for controller, _, was in before:
         image = await controller.screenshot()
-        if cross.state_matches(
-            "friend", cross.screen_metrics(image, controller.image_point(image, "TRADE_BTN"))
-        ):
+        if await matches_friend_screen(controller, image):
             # It was on its way home while the first picture was taken. Pressing
             # anything now would be pressing on the friend screen.
             continue
@@ -1888,12 +1962,23 @@ async def settled_screens(
     return settled
 
 
+async def matches_friend_screen(
+    controller: TradeController, image: Any, metrics: dict[str, float] | None = None
+) -> bool:
+    from . import trade_ios_android as cross
+
+    if metrics is None:
+        metrics = cross.screen_metrics(image, controller.image_point(image, "TRADE_BTN"))
+    # The length of a friend profile varies with the activity shown below
+    # the action row. A visible Local Trade label identifies that profile
+    # even when it fills more of the screen than the color guard expects.
+    return await controller.locate_local_trade(image, metrics) or cross.state_matches("friend", metrics)
+
+
 async def recover_to_friend(
     controllers: Sequence[TradeController], sleep: Callable[[float], Any] = asyncio.sleep
 ) -> bool:
     """Step every phone back to the friend screen. True when they all made it."""
-    from . import trade_ios_android as cross
-
     history: dict[str, set[str]] = {}
     trail: list[tuple[TradeController, Any, str]] = []
     allowance = FRIEND_RECOVERY_ROUNDS
@@ -1902,13 +1987,14 @@ async def recover_to_friend(
     while True:
         round_number += 1
         images = await asyncio.gather(*(controller.screenshot() for controller in controllers))
+        matches = await asyncio.gather(*(
+            matches_friend_screen(controller, image)
+            for controller, image in zip(controllers, images)
+        ))
         stranded = [
             (controller, image)
-            for controller, image in zip(controllers, images)
-            if not cross.state_matches(
-                "friend",
-                cross.screen_metrics(image, controller.image_point(image, "TRADE_BTN")),
-            )
+            for controller, image, matched in zip(controllers, images, matches)
+            if not matched
         ]
         if not stranded:
             return True
@@ -1987,15 +2073,25 @@ async def guard_trade_state(
         attempt += 1
         images = await asyncio.gather(*(controller.screenshot() for controller in controllers))
         last_images = images
-        matches = []
         last_metrics = {}
         action_name = cross.STATE_ACTION_COORDINATE.get(expected)
         for controller, image in zip(controllers, images):
             action_point = controller.image_point(image, action_name) if action_name else None
-            metrics = cross.screen_metrics(image, action_point)
-            last_metrics[controller.spec.name] = metrics
-            matches.append(cross.state_matches(expected, metrics))
+            last_metrics[controller.spec.name] = cross.screen_metrics(image, action_point)
+        if expected == "friend":
+            matches = await asyncio.gather(*(
+                matches_friend_screen(controller, image, last_metrics[controller.spec.name])
+                for controller, image in zip(controllers, images)
+            ))
+        else:
+            matches = [cross.state_matches(expected, metrics) for metrics in last_metrics.values()]
         if all(matches):
+            if step in {"NEXT_BTN", "CONFIRM_BTN"}:
+                from . import gbl_vision
+                reads = await asyncio.gather(*(asyncio.to_thread(gbl_vision.recognize, image) for image in images))
+                for controller, boxes in zip(controllers, reads):
+                    if any(gbl_vision.normalize(box.text).replace(" ", "") == "keepone" for box in boxes):
+                        raise TradeStopped(f"{controller.spec.name}: selected Pokémon carries the Keep One tag")
             return
 
         # A notice the game raised by itself — "New Mega Level available!" on
@@ -2141,7 +2237,7 @@ async def guard_trade_state(
                 if pixel is not None:
                     await controller.tap_point(controller.point_from_image(image, pixel))
             names = ", ".join(controller.spec.name for controller, _ in capped)
-            raise TradeStopped(
+            raise DailyTradeLimitReached(
                 f"Pokémon GO's daily trading limit is reached: {names} said so "
                 f"before {step}. Dismissed the notice. This pair can trade again "
                 f"tomorrow."
@@ -2167,8 +2263,7 @@ async def guard_trade_state(
                 for controller, image, is_waiting in zip(controllers, images, waiting):
                     if is_waiting:
                         continue
-                    point = controller.image_point(image, "TRADE_BTN")
-                    if point and cross.state_matches("friend", cross.screen_metrics(image, point)):
+                    if controller.point("TRADE_BTN") and await matches_friend_screen(controller, image):
                         await controller.tap_step("TRADE_BTN")
                         recovered = True
                 if recovered:
@@ -2189,7 +2284,7 @@ async def execute_trade_sequence(
     controllers: Sequence[TradeController], delay_modifier: float, dry_run: bool = False,
     sleep: Callable[[float], Any] = asyncio.sleep, start_step: str | None = None,
 ) -> None:
-    from . import trade_ios_android as cross
+    from . import trade_history, trade_ios_android as cross, trade_plan
 
     steps = list(cross.DEFAULT_STEPS)
     if start_step:
@@ -2200,6 +2295,9 @@ async def execute_trade_sequence(
         else:
             raise FleetError(f"Unknown trade start step: {start_step!r}")
 
+    confirmation_dispatched = False
+    reservation = None
+    pair = [controller.spec.name for controller in controllers]
     for step in steps:
         enabled = [controller for controller in controllers if controller.point(step.name) is not None]
         if not enabled:
@@ -2211,7 +2309,7 @@ async def execute_trade_sequence(
         print(f"  {step.name}: {names}; wait {delay:g}s")
         if not dry_run:
             expected = cross.STEP_EXPECTED_STATE.get(step.name)
-            if expected:
+            if expected and step.name != "CONFIRM_BTN":
                 # The step a run is told to start from is guarded like any
                 # other. Being told the phones are on the picker is not the
                 # same as their being there, and the tap that goes in blind
@@ -2220,16 +2318,91 @@ async def execute_trade_sequence(
                 # a friend screen, which is the mistake worth catching. A phone
                 # that is not where it was said to be fails this cycle, comes
                 # home, and starts the next one from TRADE_BTN.
-                await guard_trade_state(controllers, expected, step.name, sleep)
-            await asyncio.gather(*(controller.tap_step(step.name) for controller in enabled))
+                try:
+                    await guard_trade_state(controllers, expected, step.name, sleep)
+                except FleetError as exc:
+                    if confirmation_dispatched:
+                        raise TradeConfirmationUnverified(
+                            "Could not verify the trade after confirmation. Inspect both phones before trading again."
+                        ) from exc
+                    raise
+                if expected == "post_trade" and start_step != "X_BTN":
+                    # Both received-Pokémon screens are visible. Closing them may fail
+                    # or be interrupted; journal the exchange before either tap.
+                    try:
+                        if reservation is not None:
+                            await asyncio.to_thread(reservation.update, evidence="both post-trade screens")
+                            with reservation.recording():
+                                trade_history.record_fleet_trade(pair)
+                            await asyncio.to_thread(reservation.release)
+                        else:
+                            trade_history.record_fleet_trade(pair)
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        raise TradeConfirmationUnverified(
+                            "Both post-trade screens were observed. Reconcile the unresolved confirmation journal."
+                        ) from exc
+                    confirmation_dispatched = False
+            try:
+                if step.name == "CONFIRM_BTN":
+                    try:
+                        reservation = trade_history.PendingConfirmation(pair, {"pair": pair, "workflow": "trade"})
+                        await asyncio.to_thread(reservation.reserve)
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        raise TradeConfirmationUnverified(f"Could not reserve confirmation for {pair}: {exc}") from exc
+                    try:
+                        budget = await asyncio.to_thread(trade_history.has_budget, reservation.names, trade_plan.DAILY_TRADES)
+                        if not budget:
+                            raise TradeStopped("The shared trade journal has reached the daily cap for this pair.")
+                        await guard_trade_state(controllers, expected, step.name, sleep)
+                    except BaseException:
+                        try:
+                            await asyncio.to_thread(reservation.release)
+                        except Exception as exc:
+                            raise TradeConfirmationUnverified(
+                                f"Could not release the unused confirmation for {pair}: {exc}"
+                            ) from exc
+                        raise
+                    confirmation_dispatched = True
+                    outcomes = await asyncio.gather(
+                        *(controller.tap_step(step.name) for controller in enabled),
+                        return_exceptions=True,
+                    )
+                    for outcome in outcomes:
+                        if isinstance(outcome, BaseException):
+                            raise outcome
+                else:
+                    await asyncio.gather(*(controller.tap_step(step.name) for controller in enabled))
+            except FleetError as exc:
+                if expected == "post_trade":
+                    raise TradeStopped("Exchange completed, but the result screen could not be closed") from exc
+                if confirmation_dispatched:
+                    raise TradeConfirmationUnverified(
+                        "A confirmation tap failed. Inspect both phones before trading again."
+                    ) from exc
+                raise
         await sleep(delay)
         if not dry_run and step.name == "CONFIRM_BTN":
-            await asyncio.gather(*(controller.cleanup() for controller in controllers))
+            try:
+                await asyncio.gather(*(controller.cleanup() for controller in controllers))
+            except FleetError as exc:
+                raise TradeConfirmationUnverified(
+                    "Could not read both phones after confirmation. Inspect both phones before trading again."
+                ) from exc
 
 
 async def run_trade(specs: Sequence[DeviceSpec], args: argparse.Namespace) -> None:
     from . import trade_ios_android as cross
 
+    from . import trade_history, trading_accounts
+    mapping = trading_accounts.aliases()
+    if len({mapping.get(s.name, s.name) for s in specs}) != len(specs):
+        raise FleetError("Both phones are signed into the same trading account")
+    if not args.dry_run:
+        try:
+            pending = trade_history.PendingConfirmation([spec.name for spec in specs])
+            await asyncio.to_thread(pending.check)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise TradeConfirmationUnverified(f"Cannot verify prior trade confirmations: {exc}") from exc
     pids = cross.active_gift_runner_pids()
     if pids:
         raise FleetError(f"iOS gift runner active (PID {', '.join(map(str, pids))})")
@@ -2257,6 +2430,16 @@ async def run_trade(specs: Sequence[DeviceSpec], args: argparse.Namespace) -> No
                 await execute_trade_sequence(
                     controllers, args.delay_modifier, args.dry_run, start_step=cycle_start
                 )
+            except TradeConfirmationUnverified:
+                raise
+            except DailyTradeLimitReached as reached:
+                from . import trade_history
+                trade_history.record_pair_limit([spec.name for spec in specs])
+                # Finishing the day's trades is what the run is for, so it ends
+                # cleanly: exit 0, said as a result rather than an Error.
+                await recover_to_friend(controllers)
+                print(f"Done: {number - 1} trade(s) completed. {reached}")
+                return
             except TradeStopped:
                 # The run is over, but two phones left standing inside a trade
                 # are what the game cancels and then reports as "Trade
@@ -2586,6 +2769,18 @@ def main() -> int:
     # A host with no phones attached has nothing to pair; the fleet entry point
     # passes --allow-empty so that host sits the run out instead of failing it.
     if operation in {"trade", "battle"} and not specs and getattr(args, "allow_empty", False):
+        return 0
+    # The same goes for a host with a single phone: its partner is on the other
+    # computer (or unplugged), and a pair never spans two Macs.  Without an
+    # explicit --pair that host has nothing to do, so it must not fail the run
+    # the other host is busy completing.  A named --pair still errors.
+    if (
+        operation in {"trade", "battle"}
+        and len(specs) == 1
+        and getattr(args, "allow_empty", False)
+        and not getattr(args, "pair", None)
+    ):
+        print(f"{operation}: only {specs[0].name} is attached here; no pair on this host, sitting out")
         return 0
     if operation in {"trade", "battle"} and len(specs) != 2:
         names_str = ", ".join(spec.name for spec in specs)

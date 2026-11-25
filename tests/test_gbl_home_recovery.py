@@ -532,6 +532,16 @@ class MenuDiscTests(unittest.TestCase):
         self.assertTrue(gbl_home_recovery.main_menu_open(image))
         self.assertEqual(len(gbl_home_recovery.menu_discs(image)), 2)
 
+    def test_oneplus_tall_layout_battle_disc_below_060h_is_found(self) -> None:
+        """sample-android-b 1080x2412 places the BATTLE disc at ~0.62h and ITEMS at ~0.84h."""
+        image = Image.new('RGB', (1080, 2412), MENU_GREEN)
+        menu_ring(image, (839, 1496), 72)
+        menu_ring(image, (839, 2024), 72)
+        self.assertTrue(gbl_home_recovery.main_menu_open(image))
+        battle = gbl_home_recovery.find_menu_battle(image)
+        self.assertIsNotNone(battle)
+        self.assertAlmostEqual(battle[1], 1496, delta=5)
+
     def test_battle_is_the_upper_disc_of_the_column(self) -> None:
         battle = gbl_home_recovery.find_menu_battle(self.menu())
         self.assertIsNotNone(battle)
@@ -574,3 +584,38 @@ class MenuDiscTests(unittest.TestCase):
         menu_ring(image, (559, 905), 50)
         self.assertFalse(gbl_home_recovery.main_menu_open(image))
         self.assertIsNone(gbl_home_recovery.find_menu_battle(image))
+
+    def test_battle_reserve_switch_buttons_at_right_edge_are_not_a_menu(self) -> None:
+        """Reserve Pokemon switch buttons on the battlefield edge (x >= 0.88w) must not be read as a menu column."""
+        # 750x1334 iPhone SE screen with two reserve buttons aligned at x=677 (0.903w)
+        image = Image.new('RGB', (750, 1334), (90, 110, 90))
+        menu_ring(image, (677, 836), 40)
+        menu_ring(image, (677, 985), 40)
+        self.assertEqual(gbl_home_recovery.menu_column(gbl_home_recovery.menu_discs(image), image.size[0]), [])
+        self.assertFalse(gbl_home_recovery.main_menu_open(image))
+        self.assertIsNone(gbl_home_recovery.find_menu_battle(image))
+
+
+
+class PhoneNeedsWakeTests(unittest.TestCase):
+    def test_android_10_keyguard_without_is_keyguard_showing(self) -> None:
+        from sources import gbl_home_recovery as h
+        self.assertTrue(h.phone_needs_wake("mWakefulness=Awake", "KeyguardServiceDelegate\n  showingAndNotOccluded=true"))
+        self.assertFalse(h.phone_needs_wake("mWakefulness=Awake", "showingAndNotOccluded=false\nisKeyguardShowing=false"))
+        self.assertTrue(h.phone_needs_wake("mWakefulness=Asleep", ""))
+
+
+class PokeballCentreTests(unittest.TestCase):
+    def test_a_red_buddy_above_the_ball_does_not_pull_the_centre_up(self) -> None:
+        from PIL import Image, ImageDraw
+        image = Image.new("RGB", (1080, 2412), (40, 50, 120))
+        draw = ImageDraw.Draw(image)
+        # A red Shuckle shell with a white patch, standing just above the ball.
+        draw.rectangle((470, 1900, 610, 1990), fill=(220, 30, 40))
+        draw.rectangle((470, 1990, 610, 2010), fill=(250, 250, 250))
+        # The ball: red cap over a white base.
+        draw.rectangle((480, 2190, 600, 2255), fill=(230, 30, 40))
+        draw.rectangle((480, 2265, 600, 2330), fill=(250, 250, 250))
+        ball = gbl_home_recovery.find_pokeball(image)
+        self.assertIsNotNone(ball)
+        self.assertGreater(ball[1], 2200)

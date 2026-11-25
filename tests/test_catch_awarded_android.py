@@ -75,6 +75,23 @@ class ItemSheetRecoveryTests(unittest.IsolatedAsyncioTestCase):
             f"an encounter key was pressed: {device.shells}",
         )
 
+    async def test_a_go_pass_screen_is_never_mistaken_for_an_item_sheet(self) -> None:
+        """A white GO Pass page trips picker_sheet_top and must not be tapped."""
+        device = FakePhone()
+        white_page = Image.new("RGB", (720, 1600), (255, 255, 255))
+        with patch.object(
+            awarded.excellent_throw_android,
+            "capture_frame",
+            AsyncMock(return_value=(white_page, 0.0)),
+        ), patch(
+            "sources.berry_android.picker_sheet_top", lambda *_a: 900
+        ), patch(
+            "asyncio.sleep", AsyncMock()
+        ):
+            closed = await awarded.close_item_sheet(device)
+        self.assertFalse(closed)
+        self.assertEqual(device.taps, [])
+
 
 class LateAwardCardTests(unittest.IsolatedAsyncioTestCase):
     """A card that is slow to come back is not an empty queue.
@@ -90,7 +107,7 @@ class LateAwardCardTests(unittest.IsolatedAsyncioTestCase):
             clock[0] += timeout
             return reads.pop(0) if reads else None
 
-        args = SimpleNamespace(card_wait=30.0)
+        args = SimpleNamespace(card_wait=30.0, dry_run=False)
         cleared = AsyncMock()
         with patch.object(awarded, "wait_for_award_card", card_after), patch.object(
             awarded, "clear_catch_screens", cleared
@@ -123,6 +140,15 @@ class LateAwardCardTests(unittest.IsolatedAsyncioTestCase):
         card, waited, _saved = await self.wait([], 0.0)
         self.assertIsNone(card)
         self.assertEqual(waited, 30.0)
+
+    async def test_dry_run_does_not_clear_the_screen_when_there_is_no_card(self) -> None:
+        args = SimpleNamespace(card_wait=30.0, dry_run=True)
+        with patch.object(awarded, "wait_for_award_card", AsyncMock(return_value=None)), \
+                patch.object(awarded, "clear_catch_screens", AsyncMock()) as clear, \
+                tempfile.TemporaryDirectory() as directory:
+            card = await awarded.next_award_card(FakePhone(), args, Path(directory))
+        self.assertIsNone(card)
+        clear.assert_not_awaited()
 
 
 class AwardCardTests(unittest.TestCase):

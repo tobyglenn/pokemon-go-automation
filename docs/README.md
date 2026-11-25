@@ -8,17 +8,24 @@ The repository contains the automation code and example configuration. Your phon
 
 | Workflow | Public entry point | What it does |
 | --- | --- | --- |
-| Start the day | [`starter.py`](../starter.py) | On every phone: Mega Evolve the `mega` tag's free Pokémon, play with the buddy (berries, snapshot, petting), send gifts, then the day's GBL. `--dry-run` walks the screens without acting. |
+| Start the day | [`starter.py`](../starter.py) | Start with buddy care and a training battle, check for configured special trades, then handle free Mega Evolutions, item-bag cleanup, gifts, GO Battle League, and a second buddy round. Use `--plan` to review the steps and `--only` or `--skip` to change them. |
+| Buddy hearts | [`buddy.py`](../buddy.py) | On every phone: feed up to 3 berries a session (Razz, then Nanab, then Pinap; one Golden Razz only when none of those is left and more than 25 are; never Silver Pinap or Poffin), snapshot, petting, then a Blanche training battle for the Battle together heart. The buddy and battle steps of `starter.py` on their own; `--skip battle`, `--devices`, `--berries`, `--dry-run` work. |
 | Whatever is on screen | [`play.py`](../play.py) | Look at every phone and start the job its screen shows: GBL for the battle card or party picker, berries for a gym defender's feeding card, gifts for the friends list or a friend's profile, catching for an award card, research CLAIM or open encounter. Other screens are left alone. `--plan` only looks. |
 | Gifts and gym berries | [`gift.py`](../gift.py) | Each phone's screen picks the job: a phone parked on a gym's feeding screen feeds the defenders, every other phone walks the friend list and opens/sends gifts. `--gifts-only` skips the look. |
-| Catching rewards | [`catch.py`](../catch.py) | Work the award queue ("You have N Pokémon left to catch") or a research screen's CLAIM buttons, whichever each phone shows. Android and iPhone. |
+| Catching rewards | [`catch.py`](../catch.py) | Work the award queue ("You have N Pokémon left to catch"), a GO Pass / Event Pass's orange `POKÉMON APPEARS!` tiles (switching to the claimable-rewards filter automatically), or a research screen's CLAIM buttons, whichever each phone shows. Android and iPhone. |
 | Friends | [`add_friends.py`](../add_friends.py) | Add trainer codes from an explicit list or supported public source, with request history. |
 | Friend removal | [`remove_friends.py`](../remove_friends.py) | Remove friends who sent no gift, carry no halo, and sit at or under a heart count (Android). |
 | GO Battle League | [`gbl.py`](../gbl.py) | Coordinate battle entry, combat, results, and reward handling across selected phones. |
 | A day of GBL | [`gbl_day.py`](../gbl_day.py) | Play a day's whole GBL allotment on the named phones, restarting stalled legs. |
 | Trades | [`trade.py`](../trade.py) | Run the trade sequence for a supported pair of phones attached to the same computer. |
+| Daily high-value trades | [`daily_trade.py`](../daily_trade.py) | Run up to 100 daily IV/XL-reroll trades per attached pair across configured hosts using `98Plus` coverage and raid/Mega rankings. |
+| Saved storage searches | [`storage_favorites.py`](../storage_favorites.py) | Synchronize the common search favorites, account-specific trash reviews and receiver trade lists. |
+| End the day | [`ender.py`](../ender.py) | Finish available buddy hearts, exchange gifts and complete daily trades. Each phone ends on its manual storage review list with the display off. |
+| Receiver-first daily trades | [`priority_trade.py`](../priority_trade.py) | the receiver takes donors' XXL/XXS, then ReceiverLucky, then ReceiverPerfect; the donors then trade LocalTrade/LocalNot98/Far lists with each other until as many accounts as possible reach 100. |
+| Cross-host collector trades | [`collect_trades.py`](../collect_trades.py) | Collect the designated receiver’s audited Lucky Dex gaps and exchange valuable spares across connected phones. Guaranteed Lucky Friends exchanges require approval of a specific quoted pair of Pokémon. |
 | Raid candy planning | [`raidspend.py`](../raidspend.py) | Per account and attacking type: the best raid attackers, what you can field now, which individual your candy and XL candy should go into and its cost, locked Megas, and top attackers you do not own. `--scan` reads each phone's storage (read-only), on whichever computer holds it. |
 | Transfers | [`luckytrash.py`](../luckytrash.py) | Transfer Pokémon from a deliberately prepared selection; execution requires the deletion confirmation option. |
+| Safe audited clearing | [`clear_pokemon.py`](../clear_pokemon.py) | Audit a dex clearing list, enforce full safety exclusions in one verified search string, and safely transfer matches across Android and iOS. |
 
 Everything else lives in [`scripts/`](../scripts): the fleet status and dispatcher [`scripts/fleet.py`](../scripts/fleet.py), the berries-only [`scripts/berry.py`](../scripts/berry.py), the GBL team tools, the package build backend, and the older long command names (`send_gifts.py`, `battle_league.py`, `trade_pokemon.py`, `transfer_pokemon.py`, `feed_berries.py`, `pokemon_fleet.py`), kept as compatibility entry points. Run them from the checkout root, e.g. `python scripts/fleet.py status`. See the [workflow guide](workflows.md) for preparation, commands, and platform limits.
 

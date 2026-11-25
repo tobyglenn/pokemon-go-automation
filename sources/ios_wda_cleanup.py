@@ -175,7 +175,11 @@ def stale_wda_error(exc: Exception | str) -> bool:
         or "stale element reference" in message
         or (
             "previously found element" in message
-            and "not in current view" in message
+            and (
+                "not in current view" in message
+                # WDA's newer wording, met on the SE 23 Nov 2026 at session start.
+                or "not present in the current view" in message
+            )
         )
     )
 
@@ -226,6 +230,9 @@ def xcuitest_capabilities(
         "appium:updatedWDABundleId": device["wda_bundle_id"],
         "appium:allowProvisioningDeviceRegistration": True,
         "appium:useNewWDA": use_new_wda,
+        "appium:waitForIdleTimeout": 0,
+        "appium:waitForQuiescence": False,
+        "appium:animationCoolOffTimeout": 0,
     }
     if show_xcode_log is not None:
         capabilities["appium:showXcodeLog"] = show_xcode_log
@@ -446,11 +453,25 @@ def display_backlight(udid: str, timeout: float = 60) -> bool | None:
     """
     try:
         output = run_output(
-            ["xcrun", "devicectl", "device", "info", "displays", "--device", udid],
+            ["xcrun", "devicectl", "device", "info", "displays", "--device", udid,
+             "--quiet", "--json-output", "-"],
             timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    # CoreDevice's aggregate can still say activeOn after locking. The
+    # primary integrated panel reports its own backlight independently.
+    try:
+        result = json.loads(output)["result"]
+        primary = [display for display in result.get("displays", [])
+                   if display.get("primary") and "integrated" in display.get("type", {})]
+        state = primary[0].get("backlightState") if len(primary) == 1 else result.get("backlightState")
+        if state == "off":
+            return False
+        if state in {"activeOn", "on"}:
+            return True
+    except (ValueError, KeyError, TypeError, AttributeError):
+        pass
     for line in output.splitlines():
         stripped = line.strip()
         if stripped.startswith(BACKLIGHT_LINE):
@@ -529,6 +550,91 @@ def is_wda_biometric_or_unlock_error(exc: Exception) -> bool:
     return any(phrase in message for phrase in OWNER_WAIT_PHRASES)
 
 
+# A free Apple developer team's provisioning profiles last seven days.  When the
+# one WebDriverAgent was signed with runs out, a WDA that is already running
+# keeps going -- so the failure waits for the next reinstall (a restart, an iOS
+# update) and then reads as an ordinary code 65 that no prompt on the phone can
+# fix.  These are the places a Mac keeps a profile WDA can be signed with.
+WDA_PROFILE_SUFFIX = "WebDriverAgentRunner.xctrunner"
+
+
+def wda_profile_paths(home: Path | None = None) -> list[Path]:
+    home = home or Path.home()
+    found: list[Path] = []
+    for folder in (
+        home / "Library/Developer/Xcode/UserData/Provisioning Profiles",
+        home / "Library/MobileDevice/Provisioning Profiles",
+    ):
+        if folder.is_dir():
+            found.extend(sorted(folder.glob("*.mobileprovision")))
+    found.extend(sorted((home / "Library/Developer/Xcode/DerivedData").glob(
+        "WebDriverAgent*/Build/Products/Debug-iphoneos/"
+        "WebDriverAgentRunner-Runner.app/embedded.mobileprovision"
+    )))
+    return found
+
+
+def read_profile(path: Path) -> dict | None:
+    """A .mobileprovision's plist, or None when it cannot be decoded."""
+    import plistlib
+
+    try:
+        raw = subprocess.run(
+            ["security", "cms", "-D", "-i", str(path)],
+            capture_output=True, timeout=15, check=False,
+        ).stdout
+        return plistlib.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def wda_profile_valid_for(
+    udid: str,
+    profiles: "list[dict] | None" = None,
+    now: "Any" = None,
+) -> bool | None:
+    """Whether this Mac holds an unexpired WDA profile that lists `udid`.
+
+    None when no WDA profile could be read at all (nothing to judge by), so a
+    Mac set up some other way is never told its signing is broken.
+    """
+    import datetime as _dt
+
+    if profiles is None:
+        profiles = [p for p in map(read_profile, wda_profile_paths()) if p]
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    seen = False
+    for profile in profiles:
+        app_id = str((profile.get("Entitlements") or {}).get("application-identifier", ""))
+        if not (app_id.endswith(WDA_PROFILE_SUFFIX) or app_id.endswith(".*")):
+            continue
+        seen = True
+        expires = profile.get("ExpirationDate")
+        if isinstance(expires, _dt.datetime) and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=_dt.timezone.utc)
+        devices = profile.get("ProvisionedDevices")
+        if (
+            isinstance(expires, _dt.datetime) and expires > now
+            and (devices is None or udid in devices)
+        ):
+            return True
+    return False if seen else None
+
+
+def expired_profile_message(name: str) -> str:
+    return (
+        f"[{name}] WebDriverAgent cannot be installed: this Mac has no unexpired "
+        "provisioning profile for it (free-team profiles last 7 days; the phone "
+        "rejects the old one as 'This provisioning profile has expired'). No "
+        "prompt on the phone will fix this. Renew it on a Mac whose Xcode is "
+        "signed in to the team: run xcodebuild build-for-testing on "
+        "WebDriverAgent with -allowProvisioningUpdates, then copy the new "
+        "~/Library/Developer/Xcode/UserData/Provisioning Profiles/*.mobileprovision "
+        "to this Mac's same folder, and tap Trust on the phone (Settings > "
+        "General > VPN & Device Management) once WDA reinstalls."
+    )
+
+
 def _short_reason(exc: Exception) -> str:
     """The first line of an Appium error, which is the part worth printing."""
     text = str(exc).strip().splitlines()
@@ -557,6 +663,7 @@ def connect_with_retry(
     """
     deadline = time.monotonic() + wait_limit
     attempt = 0
+    restarted_stale = False
 
     def wait_or_give_up(reason: str, cause: Exception | None = None) -> None:
         if time.monotonic() + interval > deadline:
@@ -586,15 +693,32 @@ def connect_with_retry(
         try:
             return connect_fn()
         except Exception as exc:
+            if stale_wda_error(exc) and not restarted_stale:
+                # A runner that lost its XCTest link (the SE, 23 Nov 2026:
+                # "previously found element ... not present in the current
+                # view").  A fresh runner fixes it; no prompt is waiting, so
+                # restart at once instead of waiting 45s on the owner.
+                restarted_stale = True
+                stop_wda_runner(udid)
+                print(
+                    f"[{name}] WebDriverAgent had lost its link to the phone "
+                    f"({_short_reason(exc)}); restarting it",
+                    flush=True,
+                )
+                continue
             if not is_wda_biometric_or_unlock_error(exc):
                 raise
             # The half-started runner would otherwise hold the port the next
             # attempt needs.
             stop_wda_runner(udid)
+            if "code 65" in str(exc).lower() and wda_profile_valid_for(udid) is False:
+                raise RuntimeError(expired_profile_message(name)) from exc
             try:
                 wait_or_give_up(
-                    "WebDriverAgent could not start -- usually a Face ID / "
-                    f"passcode prompt on the phone ({_short_reason(exc)})",
+                    "WebDriverAgent could not start -- a Face ID / passcode "
+                    "prompt, a locked phone, or an untrusted developer app "
+                    "(Settings > General > VPN & Device Management) "
+                    f"({_short_reason(exc)})",
                     exc,
                 )
             except RuntimeError:

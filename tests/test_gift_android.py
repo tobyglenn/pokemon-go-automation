@@ -37,32 +37,39 @@ class ActionAvailabilityTests(unittest.TestCase):
 
 
 class SendGiftAvailabilityTests(unittest.IsolatedAsyncioTestCase):
-    async def test_accepts_either_profile_layout_sample(self) -> None:
-        device = SimpleNamespace(config={
-            'SEND_GIFT_BTN': [10, 10],
-            'SEND_GIFT_2_BUTTON_SAMPLE': [20, 20],
-            'SEND_GIFT_3_BUTTON_SAMPLE': [30, 30],
-        })
-        with mock.patch.object(
-            gift,
-            'colored_action_available',
-            new=mock.AsyncMock(side_effect=[False, True]),
-        ) as available:
-            self.assertTrue(await gift.send_gift_action_available(device))
-        self.assertEqual(available.await_count, 2)
+    """The lit gift icon is found on the frame; its old fixed point moved."""
 
-    async def test_rejects_grey_samples_in_both_layouts(self) -> None:
-        device = SimpleNamespace(config={
-            'SEND_GIFT_BTN': [10, 10],
-            'SEND_GIFT_2_BUTTON_SAMPLE': [20, 20],
-            'SEND_GIFT_3_BUTTON_SAMPLE': [30, 30],
-        })
-        with mock.patch.object(
-            gift,
-            'colored_action_available',
-            new=mock.AsyncMock(side_effect=[False, False]),
-        ):
-            self.assertFalse(await gift.send_gift_action_available(device))
+    async def check(self, frame, expected_point):
+        device = SimpleNamespace(config={'SEND_GIFT_BTN': [10, 10]})
+        with mock.patch.object(gift, 'screencap_raw', new=mock.AsyncMock(return_value=frame)):
+            result = await gift.send_gift_action_available(device)
+        return result, device.send_gift_point
+
+    async def test_finds_the_lit_icon_where_it_moved(self) -> None:
+        frame = icon_frame(100, 200, (225, 40, 200))
+        available, point = await self.check(frame, None)
+        self.assertTrue(available)
+        self.assertLess(abs(point[0] - 20), 4)
+        self.assertLess(abs(point[1] - 130), 4)
+
+    async def test_greyed_icon_cannot_receive(self) -> None:
+        available, point = await self.check(icon_frame(100, 200, (150, 150, 150)), None)
+        self.assertFalse(available)
+        self.assertIsNone(point)
+
+    async def test_unread_screen_is_unknown(self) -> None:
+        available, _ = await self.check(None, None)
+        self.assertIsNone(available)
+
+
+def icon_frame(width: int, height: int, colour) -> tuple[int, int, int, bytes]:
+    """White profile with a 12x12 icon centred near (20, 130)."""
+    data = bytearray(b'\xff' * (width * height * 4))
+    for y in range(124, 136):
+        for x in range(14, 26):
+            i = (y * width + x) * 4
+            data[i:i + 3] = bytes(colour)
+    return width, height, 0, bytes(data)
 
 
 class FriendsListGuardTests(unittest.TestCase):
@@ -99,6 +106,19 @@ class ScreenNamingTests(unittest.TestCase):
         frame = solid_frame((205, 240, 250))
         with mock.patch.object(gift, "sort_control_showing", return_value=False):
             self.assertEqual(gift.name_screen(frame, self.config), gift.FRIEND_SCREEN)
+
+    def test_white_card_over_teal_backdrop_is_info_modal(self) -> None:
+        width, height = 100, 200
+        data = bytearray(bytes((48, 122, 122, 255)) * (width * height))
+        for y in range(20, 170):
+            for x in range(10, 90):
+                i = (y * width + x) * 4
+                data[i:i + 4] = bytes((248, 250, 248, 255))
+        frame = (width, height, 0, bytes(data))
+        self.assertTrue(gift.is_info_modal(*frame))
+        self.assertFalse(gift.is_info_modal(*solid_frame((60, 140, 120))))
+        with mock.patch.object(gift, "sort_control_showing", return_value=True):
+            self.assertEqual(gift.name_screen(frame, self.config), gift.INFO_MODAL)
 
 
 class WalkHomeTests(unittest.IsolatedAsyncioTestCase):
@@ -230,8 +250,48 @@ class WalkHomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertEqual(taps, [])
 
+    async def test_info_modal_closes_with_close_btn_preserving_friend_budget(self) -> None:
+        device = self.device()
+        ok, taps = await self.walk(
+            device,
+            [
+                gift.INFO_MODAL,
+                gift.FRIEND_SCREEN,
+                gift.FRIEND_SCREEN,
+                gift.FRIEND_SCREEN,
+                gift.FRIENDS_LIST,
+            ],
+        )
+        self.assertTrue(ok)
+        self.assertEqual(taps, [device.config["CLOSE_BTN"]] * 4)
+
+    async def test_sort_menu_falls_back_to_close_btn(self) -> None:
+        device = self.device()
+        ok, taps = await self.walk(
+            device,
+            [gift.SORT_MENU, gift.SORT_MENU, gift.SORT_MENU, gift.FRIENDS_LIST],
+        )
+        self.assertTrue(ok)
+        self.assertEqual(
+            taps,
+            [device.config["CAN_RECEIVE_GIFT_BTN"], gift.BACK_KEY, device.config["CLOSE_BTN"]],
+        )
+
 
 class UntilIdleTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # The sort-direction read takes its own screen grab; these tests script
+        # every other grab, so it reads as unknown here (SortArrowTests covers it).
+        patcher = mock.patch.object(gift, "sort_direction", mock.AsyncMock(return_value=None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # The friend can receive; the icon search is SendGiftAvailabilityTests'.
+        sender = mock.patch.object(
+            gift, "send_gift_action_available", mock.AsyncMock(return_value=True)
+        )
+        sender.start()
+        self.addCleanup(sender.stop)
+
     def device(self):
         return SimpleNamespace(
             label="test-phone",
@@ -456,6 +516,16 @@ class FriendRowTests(unittest.TestCase):
 
 class SelectiveOpeningTests(unittest.IsolatedAsyncioTestCase):
     """Send to everyone who can receive; open only the rows without a halo."""
+
+    def setUp(self):
+        # The lit gift icon is found where SEND_GIFT_BTN is configured, so the
+        # taps still read back by step name.
+        patcher = mock.patch.object(
+            gift, 'find_send_gift',
+            side_effect=lambda _frame: tuple(self.device().config['SEND_GIFT_BTN']),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def device(self):
         # A point of its own per step, so the taps can be read back by name.
@@ -682,7 +752,7 @@ class AdbBinaryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BagFullPageTests(unittest.IsolatedAsyncioTestCase):
-    """OPEN on a full bag, with "open for Stardust only" off: the moto-g sat
+    """OPEN on a full bag, with "open for Stardust only" off: the sample-android-a sat
     on the Item Bag's upgrade banner and the run went no further (3 Nov)."""
 
     async def test_open_onto_the_full_bag_stops_and_marks_it(self) -> None:
@@ -697,3 +767,58 @@ class BagFullPageTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SortArrowTests(unittest.TestCase):
+    """Synthetic badges cover variation in screen width and button offset."""
+
+    def test_reads_direction(self):
+        from sources import gift_sort
+
+        for width, badge_offset, expected in (
+            (1316, .070, "down"),
+            (1316, .070, "up"),
+            (750, .079, "down"),
+        ):
+            with self.subTest(width=width, direction=expected):
+                image = Image.new("RGB", (width, 200))
+                draw = ImageDraw.Draw(image)
+                button = [int(width * .86), 100]
+                x = button[0] + round(width * badge_offset)
+                arm = round(width * .009)
+                top, bottom = 82, 118
+                tip = bottom if expected == "down" else top
+                shoulder = tip - arm if expected == "down" else tip + arm
+                green = (177, 255, 176)
+                draw.line([(x, top), (x, bottom)], fill=green, width=3)
+                draw.line([(x - arm, shoulder), (x, tip), (x + arm, shoulder)], fill=green, width=3)
+                draw.point((x, top - 4), fill=green)
+                self.assertEqual(gift_sort.sort_arrow_image(image, button), expected)
+
+    def test_blank_frame_is_unreadable(self):
+        from sources import gift_sort
+        frame = (100, 100, 0, bytes(100 * 100 * 4))
+        self.assertIsNone(gift_sort.sort_arrow(frame, [50, 50]))
+
+
+import unittest as _ut
+
+
+class CrashAndKeyboardTests(_ut.TestCase):
+    def test_ime_window_visible_reads_dumpsys_window(self):
+        from sources import gift_android
+        assert gift_android.ime_window_visible("    mHasSurface=true isReadyForDisplay()=true\n    isVisible=true")
+        assert not gift_android.ime_window_visible(
+            "    mViewVisibility=0x8\n    mHasSurface=false isReadyForDisplay()=false\n    isVisible=false")
+
+    def test_banner_pushed_list_follows_its_rows(self):
+        from unittest import mock
+        from sources import gift_android
+        rows = [(832, 1178), (1178, 1523)]
+        with mock.patch.object(gift_android, 'friend_rows', return_value=rows), \
+                mock.patch.object(gift_android, 'row_waits_on_a_trade', return_value=False), \
+                mock.patch.object(gift_android, 'row_is_highlighted', return_value=False):
+            choice = gift_android.choose_friend_row(object(), {'NEXT_FRIEND_BTN': [600, 772]})
+            self.assertEqual(choice.point, [600, 1005])
+            pulled_up = gift_android.choose_friend_row(object(), {'NEXT_FRIEND_BTN': [600, 1300]})
+            self.assertEqual(pulled_up.point, [600, 1300])

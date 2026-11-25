@@ -59,6 +59,8 @@ class FakeElement:
     def is_displayed(self) -> bool:
         return self.displayed
 
+    rect = {"x": 300, "y": 400, "width": 40, "height": 20}
+
     def click(self) -> None:
         self.calls.append("click")
 
@@ -350,7 +352,10 @@ class TextEntryTests(unittest.TestCase):
         driver = FakeDriver(elements={"Clear text": FakeElement("Clear text")})
         phone = raid_scan_ios.IOSPhone(driver, label="SE")
         phone.clear_field(settle=0.0)
-        self.assertEqual(driver.elements["Clear text"].calls, ["click"])
+        # Tapped at its centre, never clicked: a click waits for an idle app
+        # and the game is never idle with the keyboard up.
+        self.assertEqual(driver.elements["Clear text"].calls, [])
+        self.assertIn(("mobile: tap", {"x": 320, "y": 410}), driver.calls)
         self.assertNotIn("mobile: keys", [script for script, _ in driver.calls])
 
     def test_a_custom_drawn_field_is_cleared_with_delete_keys(self) -> None:

@@ -176,6 +176,29 @@ class ProcessSelectionTests(unittest.TestCase):
 
 
 class BiometricRetryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Real profiles on the test Mac must not decide these cases.
+        patcher = mock.patch.object(ios_wda_cleanup, "wda_profile_valid_for", return_value=None)
+        self.profile_valid = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_code_65_with_only_expired_profiles_stops_at_once(self) -> None:
+        self.profile_valid.return_value = False
+
+        def fake_connect():
+            raise RuntimeError("xcodebuild failed with code 65")
+
+        with (
+            mock.patch.object(ios_wda_cleanup, "display_backlight", return_value=True),
+            mock.patch.object(ios_wda_cleanup, "device_requires_unlock", return_value=False),
+            mock.patch.object(ios_wda_cleanup, "stop_wda_runner"),
+            mock.patch.object(ios_wda_cleanup.time, "sleep") as sleep_mock,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                ios_wda_cleanup.connect_with_retry(fake_connect, udid="PHONE-A", name="SE")
+        self.assertIn("provisioning profile", str(raised.exception))
+        sleep_mock.assert_not_called()
+
     def test_identifies_biometric_and_lock_errors(self) -> None:
         self.assertTrue(
             ios_wda_cleanup.is_wda_biometric_or_unlock_error(
@@ -261,6 +284,35 @@ class BiometricRetryTests(unittest.TestCase):
         self.assertIs(raised.exception, error)
         self.assertEqual(sleep_mock.call_count, 2)
 
+    def test_stale_runner_restarts_at_once_then_waits(self) -> None:
+        stale = RuntimeError(
+            'Message: The previously found element "Application '
+            "'com.nianticlabs.pokemongo'\" is not present in the current view "
+            "anymore. Not authorized for performing UI testing actions."
+        )
+        attempts = []
+
+        def fake_connect():
+            attempts.append(1)
+            if len(attempts) <= 2:
+                raise stale
+            return "driver"
+
+        with (
+            mock.patch.object(ios_wda_cleanup, "display_backlight", return_value=True),
+            mock.patch.object(ios_wda_cleanup, "device_requires_unlock", return_value=False),
+            mock.patch.object(ios_wda_cleanup, "stop_wda_runner") as stop_mock,
+            mock.patch.object(ios_wda_cleanup.time, "sleep") as sleep_mock,
+        ):
+            res = ios_wda_cleanup.connect_with_retry(
+                fake_connect, udid="PHONE-A", name="SE", interval=45.0
+            )
+        self.assertEqual(res, "driver")
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(stop_mock.call_count, 2)
+        # Only the second stale failure waits on the owner.
+        sleep_mock.assert_called_once_with(45.0)
+
     def test_unrelated_error_is_raised_immediately(self) -> None:
         def fake_connect():
             raise ValueError("totally unrelated error")
@@ -278,3 +330,28 @@ class BiometricRetryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProfileValidityTests(unittest.TestCase):
+    import datetime as _dt
+    NOW = _dt.datetime(2026, 11, 12, 13, 0, tzinfo=_dt.timezone.utc)
+
+    def profile(self, days: int, devices=("PHONE-A",), app="TEAM.com.example.WebDriverAgentRunner.xctrunner"):
+        import datetime as dt
+        return {
+            "Entitlements": {"application-identifier": app},
+            "ExpirationDate": (self.NOW + dt.timedelta(days=days)).replace(tzinfo=None),
+            "ProvisionedDevices": list(devices),
+        }
+
+    def test_unexpired_profile_listing_the_phone_is_valid(self) -> None:
+        self.assertTrue(ios_wda_cleanup.wda_profile_valid_for(
+            "PHONE-A", [self.profile(-1), self.profile(6)], now=self.NOW))
+
+    def test_expired_or_other_phone_only_is_invalid(self) -> None:
+        self.assertFalse(ios_wda_cleanup.wda_profile_valid_for(
+            "PHONE-A", [self.profile(-1), self.profile(6, devices=("PHONE-B",))], now=self.NOW))
+
+    def test_no_wda_profile_at_all_is_unknown(self) -> None:
+        self.assertIsNone(ios_wda_cleanup.wda_profile_valid_for(
+            "PHONE-A", [self.profile(6, app="TEAM.com.example.game")], now=self.NOW))

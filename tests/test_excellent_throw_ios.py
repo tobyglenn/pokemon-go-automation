@@ -613,7 +613,7 @@ if __name__ == "__main__":
 
 
 class AutumnLeavesBallTests(unittest.TestCase):
-    """The oneplus on 3 Nov 2026: orange leaves above and below the ball read
+    """An encounter with orange leaves above and below the ball read
     as red paint, the merged band was too tall, and a Dedenne still on screen
     was called a finished catch."""
 
@@ -637,6 +637,6 @@ class AutumnLeavesBallTests(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertLess(abs(found.center_y - 752), 12)
         # Without the encounter's corner buttons the loose read does not count:
-        # a pop-up's OK button passed it on the oneplus.
+        # a pop-up's OK button passed the guard.
         with patch.object(thrower, "locate_encounter_buttons", return_value=None):
             self.assertIsNone(thrower.locate_throw_ball(frame, (420, 938)))

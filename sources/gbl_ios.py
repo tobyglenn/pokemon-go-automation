@@ -40,7 +40,7 @@ from typing import Any, ContextManager, Sequence
 import yaml
 from PIL import Image
 
-from . import config_paths, excellent_throw_ios, ios_wda_cleanup
+from . import config_paths, excellent_throw_ios, ios_wda_cleanup, starter_ios_session
 from . import gbl_android as android_gbl
 from . import gbl_home_recovery, gbl_meta, gbl_strategy, gbl_vision
 from . import legendary_pokemon
@@ -74,10 +74,10 @@ OPTIONAL_COORDINATES = {
     gbl_home_recovery.BATTLE_KEY,
 }
 
-# Fast attack batching: send 8 rapid taps in one WDA action to maintain
+# Fast attack batching: send 6 rapid taps in one WDA action to maintain
 # consistent move queuing across 0.5s turn boundaries without artificial pauses,
 # matching the SE and Android cadences.
-MOVE_TAPS_PER_BATCH = 8
+MOVE_TAPS_PER_BATCH = 6
 PROBE_EVERY_READS = 3
 
 # How long to keep swiping the charged-move bubble field.  gbl_android sizes
@@ -134,6 +134,7 @@ RUN_AWAY_CANCEL_Y = 0.80
 # where 12 of 12 stepped drags scrolled and the one-shot drag opened a lobby.
 SCROLL_HOLD = 0.25
 SCROLL_STEPS = 8
+STROKE_STEP_SECONDS = 0.05
 
 # Hunting a named league card: up to the top of the list first, then down to
 # the bottom.  A fixed count each way is not enough: the list does not always
@@ -365,6 +366,16 @@ class IOSGBLDevice:
 
     @classmethod
     def connect(cls, config: RuntimeConfig) -> "IOSGBLDevice":
+        udid = config.ios_device["udid"]
+        if starter_ios_session.directory(udid) is None:
+            return cls._connect_new(config)
+        driver = starter_ios_session.connect(
+            udid, config.appium_server_url, lambda: cls._connect_new(config).driver
+        )
+        return cls(driver, config)
+
+    @classmethod
+    def _connect_new(cls, config: RuntimeConfig) -> "IOSGBLDevice":
         try:
             from appium import webdriver
             from appium.options.ios import XCUITestOptions
@@ -406,6 +417,9 @@ class IOSGBLDevice:
             "appium:useNewWDA": False,
             "appium:newCommandTimeout": 3600,
             "appium:wdaLaunchTimeout": WDA_LAUNCH_TIMEOUT_MS,
+            "appium:waitForIdleTimeout": 0,
+            "appium:waitForQuiescence": False,
+            "appium:animationCoolOffTimeout": 0,
         }
         if isinstance(device.get("platform_version"), str):
             capabilities["appium:platformVersion"] = device["platform_version"]
@@ -466,7 +480,23 @@ class IOSGBLDevice:
                         ) from fallback_exc
                 else:
                     raise
-            return cls(driver, config)
+            try:
+                driver.update_settings({
+                    "waitForIdleTimeout": 0,
+                    "waitForQuiescence": False,
+                    "animationCoolOffTimeout": 0,
+                })
+            except Exception:
+                pass
+            try:
+                return cls(driver, config)
+            except Exception:
+                # A failed viewport probe still owns the newly created session.
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                raise
 
         try:
             return ios_wda_cleanup.connect_with_retry(
@@ -579,6 +609,29 @@ class IOSGBLDevice:
     async def restore_foreground(self) -> bool:
         return await asyncio.to_thread(self._restore_foreground)
 
+    def _relaunch_if_dead(self, load_seconds: float) -> bool:
+        """Cold-starts a game that is not running; True when it did.
+
+        For callers that walk from the map (the starter), unlike the GBL
+        restore above.  The SE's game crashed mid-gifting on 21 Nov 2026 and
+        every later starter step failed on "is not running, possibly crashed".
+        """
+        bundle = self.config.ios_device.get("bundle_id", "com.nianticlabs.pokemongo")
+        try:
+            state = self.driver.execute_script("mobile: queryAppState", {"bundleId": bundle})
+        except Exception as exc:
+            log(self, f"  App state check skipped ({exc})")
+            return False
+        if not isinstance(state, int) or state > IOS_APP_STATE_NOT_RUNNING:
+            return False
+        log(self, f"  Pokemon GO is not running (state {state}); launching it")
+        self.driver.execute_script("mobile: activateApp", {"bundleId": bundle})
+        time.sleep(load_seconds)
+        return True
+
+    async def relaunch_if_dead(self, load_seconds: float = 35.0) -> bool:
+        return await asyncio.to_thread(self._relaunch_if_dead, load_seconds)
+
     def _screenshot(self) -> Image.Image:
         return Image.open(io.BytesIO(self.driver.get_screenshot_as_png())).convert("RGB")
 
@@ -661,13 +714,17 @@ class IOSGBLDevice:
             for _ in range(taps):
                 self.driver.execute_script("mobile: tap", {"x": point[0], "y": point[1]})
             return
-        actions = ActionBuilder(self.driver, mouse=PointerInput(POINTER_TOUCH, "finger"))
+        actions = ActionBuilder(
+            self.driver, mouse=PointerInput(POINTER_TOUCH, "finger"), duration=0
+        )
         # One move for the whole batch: repositioning is the expensive event.
         # Execute rapid touches to ensure continuous fast attack move registration.
         actions.pointer_action.move_to_location(point[0], point[1])
         for _ in range(taps):
             actions.pointer_action.pointer_down()
+            actions.pointer_action.pause(0.02)
             actions.pointer_action.pointer_up()
+            actions.pointer_action.pause(0.02)
         actions.perform()
 
     async def tap_burst(self, point: list[int], taps: int) -> None:
@@ -740,6 +797,36 @@ class IOSGBLDevice:
         actions.pointer_action.pause(SCROLL_HOLD)
         actions.pointer_action.pointer_up()
         actions.perform()
+
+    def _stroke(self, start: list[int], end: list[int], duration: float) -> None:
+        """Press and move the finger across over the whole `duration`."""
+        steps = max(4, int(duration / STROKE_STEP_SECONDS))
+        actions = ActionBuilder(
+            self.driver, mouse=PointerInput(POINTER_TOUCH, "finger"), duration=0
+        )
+        actions.pointer_action.move_to_location(start[0], start[1])
+        actions.pointer_action.pointer_down()
+        actions.pointer_action.pause(0.05)
+        for step in range(1, steps + 1):
+            actions.pointer_action.move_to_location(
+                int(start[0] + (end[0] - start[0]) * step / steps),
+                int(start[1] + (end[1] - start[1]) * step / steps),
+            )
+            actions.pointer_action.pause(duration / steps)
+        actions.pointer_action.pointer_up()
+        actions.perform()
+
+    async def stroke(self, start: list[int], end: list[int], duration: float) -> None:
+        """A slow stroke, as when petting a buddy.
+
+        WDA's dragFromToForDuration spends `duration` holding still and then
+        moves in a blink, so the game sees a flick.  Petting with it never
+        earned the SE a Play together heart.
+        """
+        if ActionBuilder is None:
+            await self.drag(start, end, 0.05)
+            return
+        await self.gesture(f"Stroke {start} -> {end}", self._stroke, start, end, duration)
 
     async def scroll(self, start: list[int], end: list[int], duration: float = 0.5) -> None:
         """A scroll the game reads as a scroll rather than as a tap.
@@ -2181,6 +2268,15 @@ async def take_reward_encounter(
                 log(device, f"  Back on the GBL card after {throws} throw(s)")
                 return True
 
+            if gbl_vision.size_record_visible(boxes):
+                # Its X sits at 0.925h over the page's own X; the page's close
+                # point (0.944h) lands inside the same disc, so one tap serves.
+                close = encounter_close_point(device)
+                log(device, f"  New size record card, closing it at {close}")
+                await device.tap(close)
+                await wait(device, android_gbl.MENU_SETTLE)
+                continue
+
             plate = encounter_marker(boxes, image)
             if plate is not None:
                 if gbl_vision.ENCOUNTER_PLATE.search(gbl_vision.normalize(plate.text)):
@@ -2248,8 +2344,7 @@ async def take_reward_encounter(
                 await wait(device, android_gbl.MENU_SETTLE)
                 continue
 
-            blocked = gbl_vision.blocked_label(boxes)
-            if blocked is not None and gbl_vision.normalize(blocked) == "power up":
+            if gbl_vision.pokemon_page_visible(boxes):
                 close = encounter_close_point(device)
                 log(device, f"  Caught Pokemon page, closing it at {close}")
                 await device.tap(close)
@@ -2275,6 +2370,10 @@ async def start_on_encounter(device: IOSGBLDevice, image: Image.Image) -> bool:
         boxes = await asyncio.to_thread(gbl_vision.recognize, image)
     except gbl_vision.VisionOCRError:
         return False
+    if gbl_vision.pokemon_page_visible(boxes):
+        log(device, "  Parked on a caught Pokemon's page; closing it before starting")
+        await take_reward_encounter(device, spend_balls=False)
+        return True
     if encounter_marker(boxes, image) is None:
         return False
     log(device, "  Parked on a set's reward catch; taking it before starting")
@@ -2384,6 +2483,7 @@ async def play_device(
     pending_outcome: str | None = None
     # Set when the reward row has had its scrolls and stayed put.
     row_scroll_spent = False
+    chooser_reset_spent = False
     # The screenshot point of an end-of-set tap that has just been sent, kept
     # only until the next read says what it opened, and the points that read has
     # caught closing the card.  See `reward_refused`.
@@ -2761,7 +2861,13 @@ async def play_device(
                 league_heading_up = True
                 league_view = None
                 league_still = 0
-                if vision_label:
+                if vision_label and wanted_league is None:
+                    # Only an "easiest league" choice takes the card's own name.
+                    # A configured league keeps its name: the SE once read two
+                    # cards as one label, "Ultra League, Master League: Mega
+                    # Edition,", adopted it, and then found no card matching
+                    # that on every later list -- two empty legs and the day
+                    # called done with battles owed (24 Nov).
                     profile = gbl_strategy.adopt_league(profile, vision_label)
                     party_preparation_attempted = False
                 detail = f" ({vision_label})" if vision_label else ""
@@ -2827,7 +2933,32 @@ async def play_device(
                 saw_result = False
                 reward_scrolls += 1
                 if reward_scrolls > android_gbl.REWARD_SCROLL_LIMIT:
-                    log(device, "  Reward chooser did not reveal its action button; stopping")
+                    saved = save_reward_screen(image, None)
+                    if not chooser_reset_spent:
+                        # 23 Nov 2026: the SE's first card of the day scrolled
+                        # up and down without a BATTLE button, both legs, and
+                        # the starter switched it off with no battles played.
+                        # Closed and walked back in, the same card showed its
+                        # welcome card and played.  Reopen once before giving up.
+                        chooser_reset_spent = True
+                        reward_scrolls = 0
+                        shut = [
+                            round(device.viewport["width"] * android_gbl.RANK_MODAL_CLOSE_X),
+                            round(device.viewport["height"] * android_gbl.RANK_MODAL_CLOSE_Y),
+                        ]
+                        log(
+                            device,
+                            "  Reward chooser shows no action button; closing the "
+                            f"card at {shut} and walking back in (screen saved: {saved})",
+                        )
+                        await device.tap(shut)
+                        await wait(device, android_gbl.MENU_SETTLE)
+                        continue
+                    log(
+                        device,
+                        "  Reward chooser did not reveal its action button; stopping "
+                        f"(screen saved: {saved})",
+                    )
                     break
                 if state == "scroll_back":
                     log(device, "  Completed-set reward is above the fold; scrolling back to it")
@@ -3010,7 +3141,8 @@ async def play_device(
         # by its own name plate instead, and answered by the routine that knows
         # the three screens a catch leaves behind.
         if not armed and not attacking and menu_boxes \
-                and encounter_marker(menu_boxes, image) is not None:
+                and (encounter_marker(menu_boxes, image) is not None
+                     or gbl_vision.pokemon_page_visible(menu_boxes)):
             if await take_reward_encounter(
                 device, spend_balls=abandoned < ABANDONED_ENCOUNTER_LIMIT
             ):
@@ -3601,9 +3733,9 @@ async def async_main(args: argparse.Namespace, config: RuntimeConfig) -> int:
     finally:
         try:
             await device.quit()
-            print("iPhone automation session closed", flush=True)
+            print("iPhone battle worker disconnected", flush=True)
         finally:
-            if normal_exit:
+            if normal_exit or starter_ios_session.directory(config.ios_device["udid"]):
                 print("iPhone WebDriverAgent kept ready for the next run", flush=True)
             else:
                 await asyncio.to_thread(

@@ -58,6 +58,7 @@ _ADB = REPO_ROOT / 'adb'
 ADB_BINARY = str(_ADB) if _ADB.exists() else 'adb'
 
 SCREENCAP_TIMEOUT = 20  # adb exec-out screencap wedges outright now and then
+SCREENCAP_RECOVERY_SECONDS = 45  # keep reading through an adb server restart (Unity, M3)
 
 GAME_PACKAGE = 'com.nianticlabs.pokemongo'
 # The launcher intent is what a tap on the icon sends: it brings a backgrounded
@@ -85,6 +86,7 @@ BATTLE_KEY = 'GBL_MENU_BATTLE_BTN'
 BALL_BAND_X = (0.35, 0.65)
 BALL_BAND_Y = (0.78, 1.00)
 BALL_MIN_RED = 10       # px of red in a column before it counts as the ball
+BALL_RED_GAP = 12       # px of non-red that ends one red run in a column
 BALL_MIN_COLUMNS = 20   # px across, so a red map pin cannot pass for the ball
 
 # --- The main menu's action discs ---
@@ -92,6 +94,8 @@ BALL_MIN_COLUMNS = 20   # px across, so a red map pin cannot pass for the ball
 # the ring is the only strongly teal thing anywhere near it.
 MENU_BAND_X = (0.55, 1.00)   # the right-hand column, where BATTLE and ITEMS live
 MENU_BAND_Y = (0.25, 0.92)
+MENU_COLUMN_X = (0.65, 0.86) # horizontal band for the main menu's right column
+MENU_BATTLE_MAX_Y = 0.68    # BATTLE sits above ITEMS (~0.80h-0.84h), up to ~0.62h on sample-android-b (1080x2412)
 MENU_DISC_MIN = 0.045   # of screen width; the labels above the discs are thinner
 # A GBL battlefield is the other screen this test gets pointed at, and a teal
 # Pokemon standing on one passes every shape test above: on the android-one an opponent
@@ -147,7 +151,12 @@ def find_pokeball(image: Image.Image) -> list[int] | None:
         for y in range(y_from, y_to):
             pixel = pixels[x, y]
             if _ball_red(pixel):
-                red_top = y if red_top is None else red_top
+                # Red resuming after a clear gap starts a new run: the ball is
+                # the lowest red over white, and a red buddy standing above it
+                # (sample-android-b's Shuckle, 23 Nov 2026) must not pull the centre up.
+                if red_top is None or y - red_bottom > BALL_RED_GAP:
+                    red_top = y
+                    white_bottom = None
                 red_bottom = y
             elif _near_white(pixel) and red_bottom is not None:
                 white_bottom = y
@@ -236,7 +245,10 @@ def menu_column(discs: Sequence[Sequence[int]], width: int) -> list[list[int]]:
     """
     tolerance = width * MENU_COLUMN_TOLERANCE
     best: list[list[int]] = []
+    min_x, max_x = width * MENU_COLUMN_X[0], width * MENU_COLUMN_X[1]
     for anchor in discs:
+        if not (min_x <= anchor[0] <= max_x):
+            continue
         aligned = [list(disc) for disc in discs if abs(disc[0] - anchor[0]) <= tolerance]
         if len(aligned) > len(best):
             best = aligned
@@ -254,12 +266,19 @@ def find_menu_battle(image: Image.Image) -> list[int] | None:
     column = menu_column(menu_discs(image), image.size[0])
     if len(column) < 2:
         return None
+    if column[0][1] > image.size[1] * MENU_BATTLE_MAX_Y:
+        return None
     return column[0]
 
 
 def main_menu_open(image: Image.Image) -> bool:
     """Whether the main menu is up, by its own discs rather than by OCR."""
-    return len(menu_column(menu_discs(image), image.size[0])) >= 2
+    column = menu_column(menu_discs(image), image.size[0])
+    if len(column) < 2:
+        return False
+    if column[0][1] > image.size[1] * MENU_BATTLE_MAX_Y:
+        return False
+    return True
 
 
 def on_map(image: Image.Image) -> bool:
@@ -362,6 +381,20 @@ class Target:
         return None
 
 
+def phone_needs_wake(power: str, window: str) -> bool:
+    """Whether the screen is dark or a lock screen is up over the game.
+
+    Newer Android prints isKeyguardShowing=true; sample-receiver's Android 10 prints no
+    such line (23 Nov 2026), only `showingAndNotOccluded=true` in the window
+    policy dump and the status bar holding focus.
+    """
+    return (
+        'mWakefulness=Asleep' in power
+        or 'isKeyguardShowing=true' in window
+        or 'showingAndNotOccluded=true' in window
+    )
+
+
 class AndroidTarget(Target):
     def __init__(self, label: str, serial: str) -> None:
         self.label = label
@@ -383,7 +416,31 @@ class AndroidTarget(Target):
         ids = [line.split()[1] for line in listed.splitlines() if line.startswith('Display ')]
         if len(ids) >= 2:
             self.display_id = ids[0]
+        await asyncio.to_thread(self._wake)
         self.config = await asyncio.to_thread(self._read_handset_config)
+
+    def _wake(self) -> None:
+        """Wakes a phone a previous run switched off, and lifts a swipe lock.
+
+        The starter ends by switching each display off; a rerun on the sample-android-b
+        (21 Nov 2026) then read the keyguard as "Pokemon GO is not in front"
+        forever.  A phone with a PIN stays locked: nothing here types one.
+        """
+        try:
+            power = self._adb('shell', 'dumpsys', 'power', timeout=10).stdout or ''
+            window = self._adb('shell', 'dumpsys', 'window', timeout=10).stdout or ''
+            window += self._adb('shell', 'dumpsys', 'window', 'policy', timeout=10).stdout or ''
+        except Exception:
+            return
+        if not phone_needs_wake(power, window):
+            return
+        try:
+            self._adb('shell', 'input', 'keyevent', '224', timeout=10)   # WAKEUP
+            time.sleep(1.0)
+            self._adb('shell', 'wm', 'dismiss-keyguard', timeout=10)
+            time.sleep(2.0)
+        except Exception:
+            pass
 
     def _read_handset_config(self) -> dict[str, Any]:
         """The handset's own AutoTraderConfig.yaml, which is where GBL reads."""
@@ -398,14 +455,29 @@ class AndroidTarget(Target):
         arguments = ['exec-out', 'screencap', '-p']
         if self.display_id:
             arguments += ['-d', self.display_id]
-        for attempt in range(2):
+        # Unity's adb restarts the M3's adb server every few minutes; a read
+        # in that gap comes back empty or cut short, and three quick tries
+        # all landed in it (sample-receiver and sample-android-a, 7 Nov).  Wait for the phone to
+        # reattach and keep trying for a while, as adb_resilience does.
+        from . import adb_resilience
+        deadline = time.monotonic() + SCREENCAP_RECOVERY_SECONDS
+        while True:
             try:
                 result = await asyncio.to_thread(
                     self._adb, *arguments, binary=True, timeout=SCREENCAP_TIMEOUT)
             except subprocess.TimeoutExpired:
-                continue
-            if result.stdout[:8] == b'\x89PNG\r\n\x1a\n':
-                return Image.open(io.BytesIO(result.stdout)).convert('RGB')
+                result = None
+            if result is not None and result.stdout[:8] == b'\x89PNG\r\n\x1a\n':
+                # A PNG cut off mid-transfer starts right but fails to decode
+                # ("image file is truncated", sample-receiver, 7 Nov): read again.
+                try:
+                    return Image.open(io.BytesIO(result.stdout)).convert('RGB')
+                except OSError:
+                    pass
+            if time.monotonic() >= deadline:
+                break
+            await adb_resilience.wait_for_phone(self.serial, min(deadline, time.monotonic() + 10))
+            await asyncio.sleep(1.0)
         raise HomeRecoveryError(f'{self.label}: could not read the screen')
 
     async def tap(self, point: list[int]) -> None:
@@ -554,7 +626,7 @@ def _save(image: Image.Image, shots: Path, name: str) -> Path:
 
 
 async def _press(target: Target, point: list[int], image: Image.Image) -> None:
-    if isinstance(target, IOSTarget):
+    if hasattr(target, "tap_pixel"):
         await target.tap_pixel(point, image)
     else:
         await target.tap(point)

@@ -31,6 +31,7 @@ from . import (
     berry_ios,
     catch_awarded_android,
     catch_ios,
+    claim_gopass,
     claim_research_android,
     config_paths,
     gbl_home_recovery,
@@ -84,6 +85,13 @@ def classify(image: Image.Image, feeding: Callable[[Frame], bool]) -> str | None
     picker names no job.
     """
     if catch_awarded_android.card_from_frame(image) is not None:
+        return CATCH
+    pass_screen = claim_gopass.read_pass_screen(image)
+    if pass_screen is not None and (
+        pass_screen.all_tiles_count > 0
+        or pass_screen.unclaimed_non_pokemon
+        or pass_screen.claim_all_point is not None
+    ):
         return CATCH
     claims = claim_research_android.claim_buttons(image, CLAIM_LABEL)
     if any(RANK_WORD not in claim.label.lower() for claim in claims):

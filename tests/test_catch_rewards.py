@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from tests import support as _test_support
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from PIL import Image
 
@@ -219,14 +220,17 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         args = catch_rewards.parse_args(["--artifacts", tempfile.mkdtemp(), *(extra or [])])
         award = AsyncMock(return_value=0)
         research = AsyncMock(return_value=0)
+        gopass = AsyncMock(return_value=0)
         catch_one = AsyncMock(return_value=True)
         with patch.object(catch_rewards, "detect_mode", AsyncMock(side_effect=modes)), \
                 patch.object(catch_rewards.catch_awarded_android, "run_device", award), \
                 patch.object(catch_rewards.claim_research_android, "run_device", research), \
+                patch.object(catch_rewards.claim_gopass, "run_device", gopass), \
                 patch.object(catch_rewards.catch_awarded_android, "catch_one", catch_one), \
                 patch.object(catch_rewards.catch_awarded_android, "clear_catch_screens", AsyncMock()), \
                 patch.object(catch_rewards.catch_awarded_android, "close_item_sheet", AsyncMock()):
             status = await catch_rewards.run_phone(device, args)
+        self.gopass = gopass
         return status, award, research, catch_one
 
     async def test_an_award_card_works_the_queue(self) -> None:
@@ -254,7 +258,7 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         award.assert_awaited_once()
 
     async def test_a_leftover_xp_card_is_cleared_to_reach_the_queue(self) -> None:
-        """ph-1 on 3 Nov 2026: the XP card hid the award card behind it."""
+        """An Android device on 3 Nov 2026: the XP card hid the award card behind it."""
         _status, award, _research, _catch = await self.run_phone([None, "award"])
         award.assert_awaited_once()
 
@@ -281,6 +285,72 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_forced_mode_skips_the_read(self) -> None:
         _status, _award, research, _catch = await self.run_phone([], extra=["--mode", "research"])
         research.assert_awaited_once()
+
+    async def test_a_go_pass_screen_works_the_pass_loop(self) -> None:
+        _status, award, research, _catch = await self.run_phone(["pass"])
+        self.gopass.assert_awaited_once()
+        award.assert_not_awaited()
+        research.assert_not_awaited()
+
+    async def test_forced_pass_mode_skips_the_read(self) -> None:
+        _status, award, research, _catch = await self.run_phone([], extra=["--mode", "pass"])
+        self.gopass.assert_awaited_once()
+        award.assert_not_awaited()
+        research.assert_not_awaited()
+
+    async def test_forced_encounter_dry_run_never_opens_a_map_spawn_or_throws(self) -> None:
+        device = Mock(spec=excellent_throw_android.AndroidDevice, label="fake-g")
+        args = catch_rewards.parse_args(["--mode", "encounter", "--open-map", "--dry-run", "--count", "1"])
+        with patch.object(catch_rewards.catch_awarded_android, "encounter_open", AsyncMock(return_value=True)), \
+                patch.object(catch_rewards, "open_map_spawn", AsyncMock(return_value=True)) as open_spawn, \
+                patch.object(catch_rewards.catch_awarded_android, "catch_one", AsyncMock(return_value=True)) as catch, \
+                patch.object(catch_rewards.catch_awarded_android, "clear_catch_screens", AsyncMock()) as clear, \
+                tempfile.TemporaryDirectory() as directory:
+            args.artifacts = Path(directory)
+            self.assertEqual(await catch_rewards.run_phone(device, args), 0)
+        open_spawn.assert_not_awaited()
+        catch.assert_not_awaited()
+        clear.assert_not_awaited()
+
+
+class AndroidCatchLockTests(unittest.IsolatedAsyncioTestCase):
+    async def test_aliases_share_a_serial_lock_and_other_phones_can_still_catch(self):
+        named = Mock(spec=excellent_throw_android.AndroidDevice, label="android-one", serial="test-serial-one")
+        same_phone = Mock(spec=excellent_throw_android.AndroidDevice, label="raw-serial", serial=named.serial)
+        other = Mock(spec=excellent_throw_android.AndroidDevice, label="android-two", serial="test-serial-two")
+        args = catch_rewards.parse_args([])
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        visits = []
+        fleet = catch_rewards.pokemon_fleet
+        acquire = fleet.acquire_device_locks
+
+        async def catch(phone, _args):
+            visits.append(phone.label)
+            if phone is named:
+                entered.set()
+                await release.wait()
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(fleet, "acquire_device_locks", side_effect=lambda specs: acquire(specs, Path(directory))), \
+                patch.object(catch_rewards, "run_phone", side_effect=catch), \
+                patch.object(catch_rewards.android_memory, "free_memory_async", AsyncMock()) as free_memory:
+            owner = asyncio.create_task(catch_rewards.run_android(named, args))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                with self.assertRaises(fleet.FleetError):
+                    await catch_rewards.run_android(same_phone, args)
+                self.assertEqual(await catch_rewards.run_android(other, args), 0)
+                self.assertEqual(visits, [named.label, other.label])
+                self.assertEqual(free_memory.await_count, 2)
+            finally:
+                release.set()
+                await owner
+            args.dry_run = True
+            self.assertEqual(await catch_rewards.run_android(same_phone, args), 0)
+            self.assertEqual(visits[-1], same_phone.label)
+            self.assertEqual(free_memory.await_count, 2)
 
 
 if __name__ == "__main__":

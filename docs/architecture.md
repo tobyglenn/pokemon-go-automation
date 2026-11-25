@@ -22,7 +22,7 @@ The readable entry files delegate to the existing fleet interface; compatibility
 
 ## Coordination
 
-`sources/fleet_entrypoint.py` handles public invocation and configured computer delegation. `sources/pokemon_fleet.py` loads fleet profiles, resolves devices, validates capability and readiness, and launches the appropriate worker. Worker invocations must not fan out again.
+`sources/fleet_entrypoint.py` handles public invocation and configured computer delegation. `sources/pokemon_fleet.py` loads fleet profiles, resolves devices, validates capability and readiness, and launches the appropriate worker. `sources/remote_target.py` exposes an SSH JSON-RPC `Target` proxy so cross-host workflows (such as `collect_trades.py`) can pair a local receiver with remote donor phones on a peer computer without changing local UI/OCR logic. Worker invocations must not fan out again.
 
 The same alias and configuration must mean the same intended device throughout planning and execution. Explicitly requested unavailable devices should produce useful errors. When selecting all devices, read the reported skips; “all” cannot connect a physically absent phone.
 

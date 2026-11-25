@@ -26,7 +26,7 @@ LATER_LABEL = "later"
 REMAINING = re.compile(r"\byou have (\d+) pokemon left to catch\b")
 
 # Text on this card is large -- the headline is 5% of the height -- so the read
-# is made on a downscaled copy.  Vision scored every line on the moto's card
+# is made on a downscaled copy.  Vision scored every line on the compact Android handset's card
 # 1.00 at 315px wide, and a foldable's full 1224x2992 frame is fifteen times
 # the pixels for the same five words.
 OCR_WIDTH = 480
@@ -175,7 +175,7 @@ async def next_award_card(
     `clear_catch_screens` presses the XP card and then the caught Pokemon's
     page, and it stops at the first frame that is neither -- which is right
     when the map is back, and wrong while the page is still sliding in.  The
-    moto took a Meowth on 10 Sep 2026, dismissed the XP card into that gap and
+    the compact Android handset took a Meowth on 10 Sep 2026, dismissed the XP card into that gap and
     was left standing on the Pokemon's page: no card ever came, and the phone
     sat there with twelve awards still queued.  So a card that does not arrive
     is treated as a screen still standing in front of it, once, before the
@@ -189,7 +189,7 @@ async def next_award_card(
     """
     started = time.monotonic()
     card = await wait_for_award_card(device, min(args.card_wait, CARD_FIRST_WAIT))
-    if card is not None:
+    if card is not None or args.dry_run:
         return card
     print(f"[{device.label}] No card yet; clearing anything left over from the catch")
     await clear_catch_screens(device, artifact_dir)
@@ -216,12 +216,32 @@ async def next_award_card(
             return None
 
 
+def _bright_upper_page(
+    width: int, height: int, data: bytes, light_floor: int, row_hits: int
+) -> bool:
+    """Whether the upper 40% of the frame is bright white (a menu page, not an encounter)."""
+    step_y = max(1, height // 100)
+    light_rows = 0
+    for y in range(height * 5 // 100, height * 40 // 100, step_y):
+        hits = 0
+        for step in range(20):
+            x = width * (10 + step * 4) // 100
+            idx = (y * width + x) * 4
+            if data[idx] > light_floor and data[idx + 1] > light_floor and data[idx + 2] > light_floor:
+                hits += 1
+        if hits >= row_hits:
+            light_rows += 1
+            if light_rows >= 4:
+                return True
+    return False
+
+
 async def close_item_sheet(device: excellent_throw_android.AndroidDevice) -> bool:
     """Put away a berry or ball chooser standing over an encounter.
 
     A sheet hides the ball, so `encounter_open` reads the phone as having
     nothing to throw at and the run calls the queue finished with the Pokemon
-    still on screen behind it -- the moto did exactly that on 10 Sep 2026 with
+    still on screen behind it -- the compact Android handset did exactly that on 10 Sep 2026 with
     nine awards left.  Tapped away above the sheet, never with BACK, which
     leaves the encounter rather than the sheet.
     """
@@ -237,6 +257,16 @@ async def close_item_sheet(device: excellent_throw_android.AndroidDevice) -> boo
     # The size record card's bright panel reads as a sheet too, and the tap
     # that puts a sheet away would land on the caught Pokemon's name.
     if trade_android.has_record_card(rgba.width, rgba.height, 0, data):
+        return False
+    # A full-page white menu (such as the GO Pass or research list) is bright
+    # across the upper half too; a real berry/ball sheet sits over an encounter.
+    if _bright_upper_page(
+        rgba.width,
+        rgba.height,
+        data,
+        berry_android.PICKER_SHEET_LIGHT,
+        berry_android.PICKER_SHEET_HITS,
+    ):
         return False
     print(f"[{device.label}] An item sheet is up; putting it away")
     await device.tap(
@@ -331,14 +361,13 @@ async def read_plate(
 
 # Each miss at the same Pokemon lengthens the flick by this much, up to
 # REACH_STEPS steps, then starts again from the proven length.  The user saw
-# every ball fall short of a Metang on the oneplus on 3 Nov 2026: the proven
+# every ball fall short of a Metang on the tall Android handset on 3 Nov 2026: the proven
 # length is right for most Pokemon but not for one standing further back.
-REACH_STEP = 0.12
 REACH_STEPS = 5
 
 
-def throw_reach(misses: int) -> float:
-    return 1.0 + REACH_STEP * (misses % REACH_STEPS)
+def throw_reach(misses: int, reach_step: float = excellent_throw_android.DEFAULT_THROW_AIM.reach_step) -> float:
+    return 1.0 + reach_step * (misses % REACH_STEPS)
 
 
 async def catch_one(
@@ -346,33 +375,42 @@ async def catch_one(
     args: argparse.Namespace,
     artifact_dir: Path,
     lone_ball_reading: bool = False,
+    default_berry: str = "nanab",
 ) -> bool:
     """Throw until this encounter is over.  True when it ended.
 
     One award encounter is not one ball.  `run_once` reports whether the ball
     stayed gone, and a Pokemon that broke out has to be thrown at again from
-    the same encounter -- with no second berry, which is still in effect.
+    the same encounter -- with no second Nanab, while Pinap and Silver Pinap
+    are re-fed after a break-out so the catch keeps its candy bonus.
 
     `lone_ball_reading` is passed straight through to the throw: it says the
     caller has already established that a Pokemon is on the screen, so one
     clean sight of the ball is enough to throw at.
     """
     fresh_encounter = args.nanab
-    berry = "nanab"
+    berry = getattr(args, "berry", None) or default_berry
+    throw_aim = getattr(device, "throw_aim", excellent_throw_android.DEFAULT_THROW_AIM)
     named = False
     misses = 0
     for attempt in range(1, args.throws + 1):
         throw_dir = artifact_dir / f"throw-{attempt:02d}"
         throw_dir.mkdir(parents=True, exist_ok=True)
         # The plate is read before every throw, not just the first: it says
-        # where the Pokemon is standing now.  ph-1 threw twelve balls straight
+        # where the Pokemon is standing now.  the compact Android handset threw twelve balls straight
         # up the middle on 3 Nov 2026 at a Tympole standing at the left edge.
         plate_named, legendary, plate = await read_plate(
             device, PLATE_READS if attempt == 1 else 1
         )
         if not named:
             named = plate_named
-            if legendary is not None:
+            if legendary is not None and not legendary_pokemon.premium_berry_worthy(legendary):
+                print(f"[{device.label}] {legendary} is a Mystery Box spawn; no premium berry")
+            elif legendary is not None and not args.nanab:
+                # --no-nanab means no berry at all, so the picker never opens
+                # over an encounter the player may be working by hand.
+                print(f"[{device.label}] {legendary} is legendary; no berry (--no-nanab)")
+            elif legendary is not None:
                 print(
                     f"[{device.label}] {legendary} is legendary; "
                     "Silver Pinap and an Ultra Ball for every throw"
@@ -386,7 +424,7 @@ async def catch_one(
         aim = {
             "plate": plate,
             "plate_reader": fresh_plate,
-            "reach": throw_reach(misses),
+            "reach": throw_reach(misses, throw_aim.reach_step),
         }
         try:
             ended = await throw_once(
@@ -395,9 +433,9 @@ async def catch_one(
                 wait_seconds=args.wait,
                 artifact_dir=throw_dir,
                 dry_run=False,
-                # A Silver Pinap is spent by the throw it rode on, so a
-                # legendary that breaks out is fed another before the next.
-                use_nanab=fresh_encounter or berry == "silver",
+                # Pinap and Silver Pinap are spent by the throw they rode on,
+                # so a Pokemon that breaks out is fed another before the next.
+                use_nanab=args.nanab and (fresh_encounter or berry in {"silver", "pinap"}),
                 ring_hold=args.ring_hold,
                 lone_ball_reading=lone_ball_reading,
                 berry=berry,
@@ -444,13 +482,15 @@ async def run_device(
         patience = args.queue_wait if cycle > 1 else 0.0
         card = await next_award_card(device, args, cycle_dir, patience)
         if card is None:
+            if args.dry_run:
+                print(f"[{device.label}] Dry-run: no award card in view")
+                return 0
             # An encounter already open is the queue's own: this workflow is
             # run against a phone parked on the award card, and one left
             # standing over a Pokemon is one a previous attempt opened and
             # could not finish.  Throwing at it is how the run picks itself up.
-            if not args.dry_run:
-                await close_item_sheet(device)
-            if not args.dry_run and await encounter_open(device):
+            await close_item_sheet(device)
+            if await encounter_open(device):
                 print(f"[{device.label}] No card, but an encounter is open; throwing at it")
                 if await catch_one(device, args, cycle_dir):
                     caught += 1

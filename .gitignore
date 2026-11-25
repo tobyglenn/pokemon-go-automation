@@ -21,6 +21,7 @@ cache/
 *.jpeg
 *.mp4
 *.json
+!examples/*.example.json
 *.jsonl
 *.csv
 *.db

@@ -1242,8 +1242,7 @@ async def screencap_band(device: DeviceAsyncWrapper, frame, y0: int, y1: int):
     try:
         data, _ = await asyncio.wait_for(proc.communicate(), SCREENCAP_TIMEOUT)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await android_common.kill_and_reap(proc)
         return None
     except OSError:
         return None
@@ -3276,10 +3275,11 @@ async def take_reward_encounter(
             await wait(MENU_SETTLE)
             continue
 
-        blocked = gbl_vision.blocked_label(boxes)
-        if blocked is not None and gbl_vision.normalize(blocked) == 'power up':
+        if gbl_vision.pokemon_page_visible(boxes):
             close = device.config['CLOSE_BTN']
-            log(device, f'  Caught Pokemon page, closing it at {close}')
+            what = ('New size record card' if gbl_vision.size_record_visible(boxes)
+                    else 'Caught Pokemon page')
+            log(device, f'  {what}, closing it at {close}')
             await tap(device, close)
             await wait(MENU_SETTLE)
             continue
@@ -3938,18 +3938,41 @@ async def prepare_best_party(
             # after the tap is silently dropped on the tall-layout device.
             await wait(1.2, use_modifier=False)
             encoded = member.name.replace(" ", "%s")
-            await send_input(device, f"input text {shlex.quote(encoded)}")
-            await wait(1.0, use_modifier=False)
-            typed_frame = await read_screen(device)
-            if typed_frame is None:
-                raise AutoGBLError("Could not verify picker search text")
-            typed_boxes = await asyncio.to_thread(
-                gbl_vision.recognize, frame_image(typed_frame)
-            )
-            typed_text = gbl_strategy.canonical_name(
-                " ".join(gbl_vision.lines(typed_boxes))
-            )
-            if gbl_strategy.canonical_name(member.name) not in typed_text:
+            wanted_name = gbl_strategy.canonical_name(member.name)
+            typed_text = ""
+            for search_attempt in range(2):
+                await send_input(device, f"input text {shlex.quote(encoded)}")
+                for _poll in range(3):
+                    await wait(1.0, use_modifier=False)
+                    typed_frame = await read_screen(device)
+                    if typed_frame is None:
+                        raise AutoGBLError("Could not verify picker search text")
+                    typed_boxes = await asyncio.to_thread(
+                        gbl_vision.recognize, frame_image(typed_frame)
+                    )
+                    typed_text = gbl_strategy.canonical_name(
+                        " ".join(gbl_vision.lines(typed_boxes))
+                    )
+                    if wanted_name in typed_text:
+                        break
+                if wanted_name in typed_text:
+                    break
+                if search_attempt == 0:
+                    await send_input(
+                        device,
+                        "input tap "
+                        f"{int(frame[0] * PICKER_CLEAR_POINT[0])} "
+                        f"{int(frame[1] * PICKER_CLEAR_POINT[1])}",
+                    )
+                    await wait(0.6, use_modifier=False)
+                    await send_input(
+                        device,
+                        "input tap "
+                        f"{int(frame[0] * PICKER_SEARCH_POINT[0])} "
+                        f"{int(frame[1] * PICKER_SEARCH_POINT[1])}",
+                    )
+                    await wait(1.2, use_modifier=False)
+            if wanted_name not in typed_text:
                 raise AutoGBLError(
                     f"Search text for {member.name} did not enter the focused field"
                 )
@@ -4207,24 +4230,34 @@ async def play_device(
                     )
                 except gbl_vision.VisionOCRError:
                     result_boxes = []
-            outcome = battle_outcome(result_boxes) or pending_outcome
-            pending_outcome = None
-            if outcome is not None:
-                log(device, f'Battle {played + 1}/{count} over ({outcome})')
-            else:
-                # Same rule as the other write-off sites: a battle whose result
-                # was never read is not evidence the game counted one.
-                interrupted += 1
-                log(device, f'Battle {played + 1}/{count} over (result OCR unavailable)')
-            await tap(device, result_tap_point(frame, low_disc=True))
-            played += 1
-            if played >= count:
-                break
-            attacking = False
-            unknown = 0
-            stray = 0
-            await wait(POLL_GAP, use_modifier=False)
-            continue
+        else:
+            result_boxes = None
+        # Both players' CP plates still up means the fight is on: a lit
+        # charged-move disc passes the teal test (sample-android-b vs Mega Gengar,
+        # 5 Nov, just after a shield).  `gbl.py --count 1` quit there and left
+        # the battle running.  Same guard as gbl_ios.
+        if result_boxes is not None and gbl_vision.battle_header_visible(
+                result_boxes, frame[0], frame[1]):
+            result_boxes = None
+        if result_boxes is not None:
+                outcome = battle_outcome(result_boxes) or pending_outcome
+                pending_outcome = None
+                if outcome is not None:
+                    log(device, f'Battle {played + 1}/{count} over ({outcome})')
+                else:
+                    # Same rule as the other write-off sites: a battle whose result
+                    # was never read is not evidence the game counted one.
+                    interrupted += 1
+                    log(device, f'Battle {played + 1}/{count} over (result OCR unavailable)')
+                await tap(device, result_tap_point(frame, low_disc=True))
+                played += 1
+                if played >= count:
+                    break
+                attacking = False
+                unknown = 0
+                stray = 0
+                await wait(POLL_GAP, use_modifier=False)
+                continue
 
         if point is not None:
             here = (state, point[0], point[1])
@@ -4625,7 +4658,17 @@ async def play_device(
             # the next read.
             if gbl_vision.gbl_card_visible(result_boxes):
                 card_disc_reads += 1
+                # A card is never a battlefield. Left armed, the loop skips OCR
+                # on frames the colour test calls 'battle' and turns a card
+                # scrolled past its reward into 'battle' as well, so every read
+                # came back here: on 14 Nov the sample-android-b sat seventeen minutes on
+                # a finished set's CLAIM RANK REWARDS! without pressing it.
+                armed = False
+                attacking = False
                 escape = gbl_vision.action_point(result_boxes, frame[0], frame[1])
+                reward = gbl_vision.reward_point(result_boxes, frame[0], frame[1])
+                if reward is not None:
+                    escape = (reward, 'the set reward')
                 if card_disc_reads >= CARD_DISC_LIMIT and escape is not None:
                     escape_point, escape_label = escape
                     log(device, f'  GBL card kept its close disc up for '
@@ -4665,7 +4708,8 @@ async def play_device(
         # armed, and a test phone then "started" a battle on a reward Rufflet and
         # fast-attacked its Ultra Ball.  No battlefield carries the plate.
         if not attacking and menu_boxes \
-                and gbl_vision.encounter_plate(menu_boxes, frame[1]) is not None:
+                and (gbl_vision.encounter_plate(menu_boxes, frame[1]) is not None
+                     or gbl_vision.pokemon_page_visible(menu_boxes)):
             armed = False
             if await take_reward_encounter(
                     device, spend_balls=abandoned < ABANDONED_ENCOUNTER_LIMIT):
@@ -5214,6 +5258,10 @@ async def setup() -> list[DeviceAsyncWrapper]:
         ready.append(device)
     if not ready:
         raise AutoGBLError('No device has GBL_MOVE_BTN in its config')
+    # Once per run: sample-receiver's low-memory killer took the game mid-catch on
+    # 16 Nov 2026.  See android_memory.
+    from . import android_memory
+    await android_memory.free_memory_async(ready)
     return ready
 
 

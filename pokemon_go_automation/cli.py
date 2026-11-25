@@ -7,7 +7,8 @@ from pathlib import Path
 import sys
 
 COMMANDS = {"gifts": "gift", "friends": "add_friends", "gbl": "gbl",
-            "trades": "trade", "transfers": "luckytrash", "berries": "scripts.berry",
+            "trades": "trade", "daily-trade": "daily_trade", "collect-trades": "collect_trades", "priority-trade": "priority_trade",
+            "transfers": "luckytrash", "clear": "clear_pokemon", "berries": "scripts.berry",
             "gbl-day": "gbl_day", "catch": "catch", "play": "play", "status": "scripts.fleet", "owners": "scripts.fleet"}
 
 def init_config(directory: Path | None = None) -> int:

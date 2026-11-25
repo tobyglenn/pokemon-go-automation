@@ -411,6 +411,11 @@ class RunDeviceTests(unittest.IsolatedAsyncioTestCase):
         await self.run_device([[], [self.button(339)]], extra=["--scrolls", "2"])
         self.assertEqual(self.events[:2], ["scroll", "claim 339"])
 
+    async def test_a_dry_run_does_not_scroll_when_no_claim_is_visible(self) -> None:
+        await self.run_device([[]], extra=["--mode", "research", "--dry-run"])
+        self.assertEqual(self.status, 0)
+        self.assertEqual(self.events, [])
+
     async def test_a_screenful_wins_the_scroll_budget_back(self) -> None:
         """Otherwise a long list stops three screens in, however much is left."""
         screens = [[], [self.button(339)], [], [self.button(454)]]

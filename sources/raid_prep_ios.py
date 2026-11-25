@@ -41,7 +41,7 @@ class IOSRaidPrepWorker:
     def search_and_open(self, term: str, expected_cp: int | None = None) -> bool:
         """Search storage and tap the candidate Pokémon cell."""
         self.ensure_grid()
-        count, entries, img, boxes = self.scanner.search(term)
+        count, entries, img, boxes = self.scanner.search(term, exact=True)
         if not count or count < 1:
             logger.warning("No results for '%s'", term)
             return False
@@ -256,13 +256,14 @@ class IOSRaidPrepWorker:
         logger.info("Waiting 28s for evolution animation...")
         time.sleep(28.0)
 
-        # Dismiss new Pokémon / Pokédex entry screen by tapping center / bottom
-        for _ in range(3):
-            post_img = self.phone.screenshot()
-            self.phone.tap((0.5, 0.85), post_img, settle=1.8)
-
-        # Verify new detail screen
+        # Tap through the new-Pokémon and Pokédex screens only while no detail
+        # page shows. A blind tap low on the detail page lands on POWER UP.
         detail_img, detail_boxes = self.phone.read()
+        for _ in range(8):
+            if any(re.search(r"\d+\s*/\s*\d+\s*HP", b.text, re.I) for b in detail_boxes):
+                break
+            self.phone.tap((0.5, 0.22), detail_img, settle=1.8)
+            detail_img, detail_boxes = self.phone.read()
         new_cp = self.read_current_cp(detail_boxes)
         return EvolveResult(success=new_cp is not None, old_cp=old_cp, new_cp=new_cp,
                             note="" if new_cp is not None else "No detail page after evolving")

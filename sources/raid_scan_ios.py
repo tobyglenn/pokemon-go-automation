@@ -34,7 +34,7 @@ from typing import Any, Sequence
 
 from PIL import Image
 
-from . import config_paths, ios_wda_cleanup, pokemon_fleet, vision_ocr
+from . import config_paths, ios_wda_cleanup, pokemon_fleet, starter_ios_session, vision_ocr
 
 # Imported, not reimplemented: the two halves measure Pokémon GO the same way.
 from . import raid_inventory
@@ -421,8 +421,9 @@ class IOSPhone:
 
         options = XCUITestOptions().load_capabilities(build_capabilities(device))
         try:
-            driver = webdriver.Remote(
-                command_executor=profile["server_url"], options=options
+            driver = starter_ios_session.connect(
+                device["udid"], profile["server_url"],
+                lambda: webdriver.Remote(command_executor=profile["server_url"], options=options),
             )
         except Exception as exc:
             raise RaidScanIOSError(
@@ -430,12 +431,19 @@ class IOSPhone:
                 f"{device.get('name', 'the iPhone')} ({exc})"
             ) from exc
 
-        phone = cls(
-            driver,
-            label=name,
-            bundle_id=device.get("bundle_id", "com.nianticlabs.pokemongo"),
-        )
-        phone.ensure_foreground()
+        try:
+            phone = cls(
+                driver,
+                label=name,
+                bundle_id=device.get("bundle_id", "com.nianticlabs.pokemongo"),
+            )
+            phone.ensure_foreground()
+        except BaseException:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            raise
         return phone
 
     # --- screen -------------------------------------------------------------
@@ -512,9 +520,17 @@ class IOSPhone:
         return None
 
     def tap_control(self, control: Any, settle: float = 1.2) -> None:
-        """Click a control that was found on the screen, rather than a point."""
+        """Tap a control that was found on the screen, at its own frame.
+
+        An element click waits for the app to go idle, and the game never
+        does with the keyboard up: the SE hung on the search box's Clear text
+        button for good (23 Nov 2026). A coordinate tap at the element's
+        measured centre is the same tap without that wait.
+        """
         try:
-            control.click()
+            rect = control.rect
+            self.driver.execute_script("mobile: tap", {
+                "x": int(rect["x"] + rect["width"] / 2), "y": int(rect["y"] + rect["height"] / 2)})
         except Exception as exc:
             raise RaidScanIOSError(
                 f"{self.label}: could not use the control this screen shows"
@@ -547,6 +563,11 @@ class IOSPhone:
         if clear is not None:
             self.tap_control(clear, settle=settle)
             return
+        if self._native_text_box_up():
+            # That box shows "Clear text" whenever it holds text, so without
+            # the button it is already empty. Delete keys sent at an empty
+            # box hung WebDriverAgent outright (the SE, 23 Nov 2026).
+            return
         try:
             self.driver.execute_script(
                 "mobile: keys", {"keys": [DELETE_KEY] * CLEAR_KEYS}
@@ -556,6 +577,13 @@ class IOSPhone:
                 f"{self.label}: could not clear the search field"
             ) from exc
         time.sleep(settle)
+
+    def _native_text_box_up(self) -> bool:
+        """True when iOS's own keyboard is showing, so the native box is up."""
+        try:
+            return bool(self.driver.find_elements("class name", "XCUIElementTypeKeyboard"))
+        except Exception:  # noqa: BLE001 - unknown means fall back to the keys
+            return False
 
     def type_text(self, text: str, field: Any | None = None, settle: float = 1.4) -> None:
         """Type a search term into the focused field."""
@@ -777,6 +805,18 @@ class IOSStorageScanner:
         """
         control = self.phone.find_control(MENU_CONTROL_LABELS)
         if control is None:
+            # The game draws its map ball itself, so XCUITest often sees no
+            # control. The ball's red-over-white disc is measured on this frame,
+            # the same detector the GBL and starter workflows use: located, not
+            # guessed.
+            from .gbl_home_recovery import find_pokeball
+
+            image, _boxes = self.phone.read()
+            ball = find_pokeball(image)
+            if ball is not None:
+                self.log("opening the map menu from the Poke Ball on screen")
+                self.phone.tap((ball[0] / image.width, ball[1] / image.height), image, settle=2.2)
+                return
             raise RaidScanIOSError(
                 f"{self.phone.label}: on the map, with no storage screen and no "
                 "menu control XCUITest can see. Open the Pokémon storage screen "
@@ -786,7 +826,7 @@ class IOSStorageScanner:
         self.log("opening the map menu to reach storage")
         self.phone.tap_control(control, settle=2.2)
 
-    def search(self, term: str):
+    def search(self, term: str, *, exact: bool = False):
         """Filter storage to `term`, and prove the filter took.
 
         The keyboard is left up: the parenthesised result counter is the only
@@ -818,7 +858,7 @@ class IOSStorageScanner:
             self.phone.type_text(term, field)
             image, boxes = self.phone.read()
             count = parse_result_count(boxes, image.height)
-            if count is not None and raid_inventory.field_shows(image, boxes, term):
+            if count is not None and raid_inventory.field_shows(image, boxes, term, exact=exact):
                 return count, parse_grid_entries(boxes), image, boxes
             self.log(f"filter '{term}' did not take; retrying")
             if not storage_grid_visible(boxes, image):

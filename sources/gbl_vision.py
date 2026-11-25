@@ -36,25 +36,71 @@ import Vision
 // terminator. Starting the process and warming Vision costs 0.40 s and the
 // recognition itself only 0.05-0.15 s, so a battle that OCRs three times a
 // read spent more than a second a cycle re-paying the start-up.
-func recognize(_ path: String) {
-    guard let image = NSImage(contentsOfFile: path),
-          let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-    else {
-        FileHandle.standardError.write(Data("unreadable image\n".utf8))
-        return
-    }
+//
+// Accurate recognition is always tried first. A slow one (over 4 s) gets this
+// frame a fast read so a battle does not stall, but only this frame: fast mode
+// runs "CP 5613" "CP 4955" "CP 5083" into one box and reads FRIENDS as
+// "FRIEN", which cost starter its Blanche battle and its special trade on
+// 14 Nov when an earlier version switched to fast for good. While the slow
+// accurate call is still running no second one is queued behind it; once it
+// finishes, accurate answers again.
+let accurateLock = NSLock()
+var accurateBusy = false
+
+final class ResultBox: @unchecked Sendable {
+    var results: [VNRecognizedTextObservation]?
+}
+
+func performOCR(_ cgImage: CGImage, _ level: VNRequestTextRecognitionLevel) -> [VNRecognizedTextObservation]? {
     let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate
+    request.recognitionLevel = level
     request.usesLanguageCorrection = true
     request.recognitionLanguages = ["en-US"]
     let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
     do {
         try handler.perform([request])
+        return request.results ?? []
     } catch {
-        FileHandle.standardError.write(Data("recognition failed\n".utf8))
+        return nil
+    }
+}
+
+func recognizeWithFallback(_ cgImage: CGImage) -> [VNRecognizedTextObservation]? {
+    accurateLock.lock()
+    let busy = accurateBusy
+    if !busy { accurateBusy = true }
+    accurateLock.unlock()
+    if !busy {
+        let box = ResultBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.results = performOCR(cgImage, .accurate)
+            accurateLock.lock()
+            accurateBusy = false
+            accurateLock.unlock()
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + 4.0) == .success, let results = box.results {
+            return results
+        }
+    }
+    return performOCR(cgImage, .fast)
+}
+
+func recognize(_ path: String) {
+    guard let image = NSImage(contentsOfFile: path),
+          let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    else {
+        FileHandle.standardError.write(Data("unreadable image\n".utf8))
+        print("{\"error\":\"unreadable image\"}")
         return
     }
-    for observation in request.results ?? [] {
+    guard let observations = recognizeWithFallback(cgImage) else {
+        FileHandle.standardError.write(Data("recognition failed\n".utf8))
+        print("{\"error\":\"recognition failed\"}")
+        return
+    }
+    for observation in observations {
         guard let candidate = observation.topCandidates(1).first else { continue }
         let box = observation.boundingBox
         let payload: [String: Any] = [
@@ -79,7 +125,9 @@ if CommandLine.arguments.count == 2 {
 
 while let line = readLine(strippingNewline: true) {
     if line.isEmpty { continue }
-    recognize(line)
+    autoreleasepool {
+        recognize(line)
+    }
     print(SERVER_TERMINATOR)
 }
 '''
@@ -89,7 +137,7 @@ OCR_TERMINATOR = "<<<gbl-ocr-end>>>"
 SWIFT_SOURCE = SWIFT_SOURCE.replace("SERVER_TERMINATOR", f'"{OCR_TERMINATOR}"')
 # A hung Vision call has never been seen; this only stops one taking a leg
 # down with it. It is the same bound the one-shot call has always used.
-OCR_FIRST_LINE_TIMEOUT = 12.0
+OCR_FIRST_LINE_TIMEOUT = 30.0
 # The first recognition any given helper binary runs also pays for Vision's
 # text model being compiled for the Neural Engine, and that compiled model is
 # cached per binary. A macOS upgrade throws the cache away, so on an upgraded
@@ -220,6 +268,12 @@ def _server_read(process: subprocess.Popen, timeout: float) -> str:
             raise VisionOCRError("Vision OCR server exited")
         if line.strip() == OCR_TERMINATOR:
             return "".join(lines)
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and "error" in payload and "text" not in payload:
+            raise VisionOCRError(str(payload["error"]))
         lines.append(line)
 
 
@@ -798,6 +852,32 @@ def battle_header_visible(
     return left and right
 
 
+# The caught Pokemon's own page. Its "CP 767" header is centred at 0.09h, which
+# is inside ENCOUNTER_PLATE_HIGH_BAND, so the page read as a tall flyer's
+# encounter. On 14 Nov the SE caught a Honedge, met the New Size Record card on
+# its page, and spent twelve minutes tapping flee at a Pokemon it already owned.
+# A wild encounter is captioned with nothing but its name and CP; the page alone
+# prints a weight, the record card's headline, or POWER UP.
+SIZE_RECORD_CARD = re.compile(r"\bnew (?:\w+ )?record\b")
+POKEMON_PAGE_WEIGHT = re.compile(r"\d(?:[.,]\d+)? ?kg\b")
+
+
+def size_record_visible(boxes: Iterable[OCRBox]) -> bool:
+    """Whether the New Size Record card is standing over a caught Pokemon's page."""
+    return any(SIZE_RECORD_CARD.search(normalize(box.text)) for box in boxes)
+
+
+def pokemon_page_visible(boxes: Iterable[OCRBox]) -> bool:
+    """Whether this is a Pokemon's own page (caught, or the record card over it)."""
+    for box in boxes:
+        text = normalize(box.text)
+        if text == "power up" or SIZE_RECORD_CARD.search(text):
+            return True
+        if POKEMON_PAGE_WEIGHT.search(box.text.casefold()):
+            return True
+    return False
+
+
 def encounter_plate(
     boxes: Iterable[OCRBox], image_height: int, image_width: int | None = None
 ) -> OCRBox | None:
@@ -809,7 +889,11 @@ def encounter_plate(
     and pressing exit doors while the next set sat unreachable behind it.
 
     With `image_width`, a centred plate above the band counts as well.
+    A Pokemon's own page is never an encounter, whatever its header reads.
     """
+    boxes = list(boxes)
+    if pokemon_page_visible(boxes):
+        return None
     for box in boxes:
         y = box.center_y / image_height
         in_band = ENCOUNTER_PLATE_BAND[0] <= y <= ENCOUNTER_PLATE_BAND[1]
@@ -829,6 +913,9 @@ def encounter_ball_count(
     boxes: Iterable[OCRBox], image_width: int, image_height: int
 ) -> OCRBox | None:
     """The ball count under an encounter's held ball, if one was read."""
+    boxes = list(boxes)
+    if pokemon_page_visible(boxes):
+        return None
     for box in boxes:
         if box.center_y / image_height < ENCOUNTER_BALL_COUNT_TOP:
             continue
@@ -874,12 +961,21 @@ def dismiss_point(
 # card, a yellow hazard triangle, and one OK.  Two markers are wanted rather
 # than one because a single word is a thin reason to press a dialog.
 SAFETY_NOTICE_MARKERS = ("stay aware", "surroundings", "dangerous areas")
+WEATHER_WARNING_MARKERS = (
+    "weather warning",
+    "potentially dangerous",
+    "weather service",
+    "be aware of your surroundings",
+)
 
 
 def safety_notice_visible(boxes: Iterable[OCRBox]) -> bool:
-    """Whether the start-up safety warning is covering the game."""
+    """Whether the start-up safety warning or mid-session Weather warning is covering the game."""
     seen = " | ".join(labels(boxes))
-    return sum(marker in seen for marker in SAFETY_NOTICE_MARKERS) >= 2
+    return (
+        sum(marker in seen for marker in SAFETY_NOTICE_MARKERS) >= 2
+        or sum(marker in seen for marker in WEATHER_WARNING_MARKERS) >= 2
+    )
 
 
 def _notice_button(pixel) -> bool:
@@ -889,25 +985,13 @@ def _notice_button(pixel) -> bool:
 
 
 def safety_notice_point(boxes: Iterable[OCRBox], image=None) -> list[int] | None:
-    """The OK on the start-up safety warning, or None when it is not up.
-
-    Pressed by name rather than through `dismiss_point`, which finds any OK at
-    all: this one is only safe to press because the words behind it say what
-    the dialog is.  Nothing gets past it on its own, so a relaunched game waits
-    here indefinitely -- a test phone spent a whole leg's reads tapping map
-    coordinates through this card on 22 Sep 2026.
-
-    Vision often cannot read the button: its letters are spaced so widely that
-    the device's OCR returned the title and the body and nothing else.  So the
-    text is tried first, and then the pill is found by its own colour, below
-    the writing, in the middle of the card where it is always drawn.
-    """
+    """The OK / I AM SAFE pill on the safety or Weather warning, or None when absent."""
     boxes = list(boxes)
     if not safety_notice_visible(boxes):
         return None
     for box in boxes:
-        # "O K" as often as "OK", for the same letter spacing.
-        if normalize(box.text).replace(" ", "") == "ok":
+        # "O K" as often as "OK", or "I AM SAFE" on Weather warning cards.
+        if normalize(box.text).replace(" ", "") in {"ok", "iamsafe"}:
             return [box.center_x, box.center_y]
     if image is None:
         return None

@@ -31,6 +31,7 @@ class ClassifyTests(unittest.TestCase):
         words: tuple[str, ...] = (),
         *,
         card: bool = False,
+        gopass: object | None = None,
         claims: tuple[str, ...] = (),
         ball: bool = False,
         plate: bool = False,
@@ -43,6 +44,7 @@ class ClassifyTests(unittest.TestCase):
         with ExitStack() as stack:
             for target, name, value in (
                 (screen_router.catch_awarded_android, "card_from_frame", object() if card else None),
+                (screen_router.claim_gopass, "read_pass_screen", gopass),
                 (screen_router.claim_research_android, "claim_buttons", claim_boxes),
                 (screen_router.claim_research_android, "plate_visible", plate),
                 (screen_router.berry_android, "encounter_showing", ball),
@@ -56,6 +58,18 @@ class ClassifyTests(unittest.TestCase):
 
     def test_an_award_card_is_a_catch(self) -> None:
         self.assertEqual(self.read(card=True), screen_router.CATCH)
+
+    def test_a_go_pass_with_claimable_tiles_is_a_catch(self) -> None:
+        from sources import claim_gopass
+
+        active = claim_gopass.PassScreen([], 2, [50, 800], "all", [400, 200], False)
+        self.assertEqual(self.read(gopass=active), screen_router.CATCH)
+
+    def test_an_empty_go_pass_is_left_alone(self) -> None:
+        from sources import claim_gopass
+
+        empty = claim_gopass.PassScreen([], 0, None, "claimable", [400, 200], False)
+        self.assertIsNone(self.read(gopass=empty))
 
     def test_a_research_claim_is_a_catch(self) -> None:
         self.assertEqual(self.read(claims=("CLAIM REWARD",)), screen_router.CATCH)

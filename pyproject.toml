@@ -21,7 +21,27 @@ dev = ["build>=1.2,<2"]
 pogo = "pokemon_go_automation.cli:main"
 
 [tool.setuptools]
-py-modules = ["add_friends", "catch", "gbl", "gbl_day", "gift", "luckytrash", "play", "raidspend", "remove_friends", "trade"]
+py-modules = [
+    "add_friends",
+    "buddy",
+    "catch",
+    "clear_pokemon",
+    "collect_trades",
+    "daily_trade",
+    "ender",
+    "gbl",
+    "gbl_day",
+    "gift",
+    "luckytrash",
+    "play",
+    "priority_trade",
+    "raidspend",
+    "remove_friends",
+    "special_trade",
+    "starter",
+    "storage_favorites",
+    "trade",
+]
 
 [tool.setuptools.packages.find]
 include = ["sources*", "scripts*", "pokemon_go_automation*"]

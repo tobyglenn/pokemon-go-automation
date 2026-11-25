@@ -9,6 +9,7 @@ tests that patch `gift_android.find_display_id` and the like keep working.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import struct
 from pathlib import Path
@@ -61,6 +62,29 @@ async def find_display_id(device: Any) -> str | None:
 Frame = tuple[int, int, int, bytes]
 
 
+# How long a killed adb client gets to be reaped.  When adb has to restart its
+# server (Unity kills it), the forked server inherits the client's stdout
+# pipe and keeps it open, and asyncio's Process.wait() waits for every pipe
+# to close as well as for the exit: sample-receiver's gift leg hung there for good after
+# "Screen read timed out" (24 Nov, server restarted 08:36:25).
+REAP_TIMEOUT = 3.0
+
+
+async def kill_and_reap(proc: Any, timeout: float = REAP_TIMEOUT) -> None:
+    """Kill an adb client and wait for it, never longer than `timeout`."""
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout)
+    except asyncio.TimeoutError:
+        # The child is gone; only a pipe held by the adb server keeps the
+        # transport open.  Close it so no fd or waiter is left behind.
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+
+
 async def capture_screen(
     device: Any,
     adb_binary: str,
@@ -91,8 +115,7 @@ async def capture_screen(
     except asyncio.TimeoutError:
         if on_timeout is not None:
             on_timeout()
-        proc.kill()
-        await proc.wait()
+        await kill_and_reap(proc)
         return None
     except OSError:
         return None

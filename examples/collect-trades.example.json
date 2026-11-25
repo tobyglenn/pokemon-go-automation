@@ -1,0 +1,10 @@
+{
+  "receiver": "example-receiver",
+  "targets": [],
+  "guaranteed_proposal_pairs": [],
+  "collect_all_dex": [],
+  "perfect_trade_dex": [],
+  "clear_config": "clear-pokemon.json",
+  "exclude_return_dex": [],
+  "custom_return_query": null
+}

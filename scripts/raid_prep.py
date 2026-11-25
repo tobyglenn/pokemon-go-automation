@@ -8,8 +8,8 @@ Supports attached Android and iOS fleet devices, with safety boundaries:
 
 Usage:
     python scripts/raid_prep.py --devices all --plan
-    python scripts/raid_prep.py --devices oneplus --phase power_up --term "98Plus&Tyranitar" --target-cp 3830
-    python scripts/raid_prep.py --devices motog --phase tag --term "98Plus&Lucario" --tag mega
+    python scripts/raid_prep.py --devices sample-android-b --phase power_up --term "98Plus&Tyranitar" --target-cp 3830
+    python scripts/raid_prep.py --devices android-one --phase tag --term "98Plus&Lucario" --tag mega
     python scripts/raid_prep.py --tasks-file prep_tasks.json
 """
 
@@ -208,11 +208,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     for spec in specs:
         logger.info("Connecting to fleet device: %s (%s)", spec.name, spec.platform)
         if spec.platform == "ios":
-            phone = raid_scan_ios.IOSPhone(spec.identifier)
-            worker = raid_prep_ios.IOSRaidPrepWorker(phone)
-            for t in tasks:
-                res = run_task(worker, t, args.phase)
-                logger.info("Result for %s: %s", t.name, res)
+            # IOSPhone wraps a live Appium session; connect() opens one.
+            phone = raid_scan_ios.IOSPhone.connect(spec, label=spec.name)
+            try:
+                worker = raid_prep_ios.IOSRaidPrepWorker(phone)
+                for t in tasks:
+                    res = run_task(worker, t, args.phase)
+                    logger.info("Result for %s: %s", t.name, res)
+            finally:
+                phone.close()
         elif spec.platform == "android":
             phone = raid_scan_android.AndroidPhone(spec.identifier)
             worker = raid_prep_android.AndroidRaidPrepWorker(phone)

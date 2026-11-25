@@ -245,11 +245,12 @@ class IOSConnectionDetectionTests(unittest.TestCase):
                 "run",
                 return_value=mock.Mock(returncode=0),
             ),
+            mock.patch.object(pokemon_fleet.ios_attached_devices, "usb_udids", return_value={"usb-with-network-tunnel"}),
             mock.patch.object(Path, "exists", return_value=True),
             mock.patch.object(Path, "read_text", return_value=json.dumps(payload)),
         ):
             self.assertEqual(
-                pokemon_fleet.ios_connected_udids(), {"wired-iphone"}
+                pokemon_fleet.ios_connected_udids(), {"wired-iphone", "usb-with-network-tunnel"}
             )
 
 

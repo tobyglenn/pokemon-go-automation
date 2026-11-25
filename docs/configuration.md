@@ -35,13 +35,15 @@ The optional `machines` map records each computer's local hostnames or SSH desti
 
 `examples/machines.example.yaml` is a fragment to merge into each private fleet file; `pogo init-config` does not install it automatically. A remote machine entry needs `ssh_host` and `project_dir`; `python` defaults to `.venv/bin/python`, and `config_dir` defaults to `~/.config/pokemon-go-automation`. Set private SSH aliases and locations there.
 
+If a peer stores runtime state outside the default directory, set its `state_dir` in the machine entry and use the same path in that machine’s local `POGO_STATE_DIR`. Journal readers and confirmation workers then address the same private state directory regardless of the coordinator.
+
 A machine may also set `path_prefix`, a list of directories to prepend to its inherited `PATH`. For example, `path_prefix: ["~/Library/Android/sdk/platform-tools"]` makes an Android SDK installation available without editing shell startup files. Home-directory references expand on the computer running that worker.
 
 For `add_friends.py`, relative `--codes-file` paths resolve under each computer's `POGO_CONFIG_DIR`; relative `--history` paths resolve under its `POGO_STATE_DIR`. Absolute code-list paths inside the coordinator's configuration directory are rebased to the worker's configuration directory, and history paths inside the coordinator's state directory are rebased to the worker's state directory. Place the required private files on each computer yourself: the launcher does not synchronize files. Absolute paths outside those private roots, and options such as `--trace` and `--output`, are forwarded unchanged. They must be accessible on each selected computer, or use `--local` for a file that exists only on the current computer.
 
 Install the same code and dependencies on each computer. Place each computer's private files on that computer. A code deployment must not overwrite private configuration or copy it into Git. Review the plan before starting a distributed run.
 
-Trade pairs must be attached to the same computer. A network connection between computers does not make two phones a valid physical trade pair for this implementation.
+The standard `trade.py` pairs require both phones on the same computer. Collector and special-trade commands can control eligible partner phones on configured peers over SSH. Every participating computer needs the same version and the same private account-alias mapping.
 
 ## Calibration
 

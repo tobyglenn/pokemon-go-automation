@@ -3,6 +3,8 @@ from __future__ import annotations
 from tests import support as _test_support
 
 import argparse
+import contextlib
+import io
 import asyncio
 from contextlib import ExitStack
 from pathlib import Path
@@ -101,6 +103,9 @@ class FakeController:
     def image_point(self, image: object, name: str) -> tuple[int, int]:
         return (1, 2)
 
+    async def locate_local_trade(self, image: object, metrics: dict[str, float]) -> bool:
+        return False
+
     def point_from_image(
         self, image: object, pixel: tuple[int, int]
     ) -> tuple[int, int]:
@@ -133,6 +138,7 @@ async def no_sleep(_: float) -> None:
 def fake_vision() -> ExitStack:
     """Read the fake phones' scripted screens wherever the real vision runs."""
     stack = ExitStack()
+    stack.enter_context(patch("sources.gbl_vision.recognize", return_value=[]))
     stack.enter_context(
         patch(
             "sources.trade_ios_android.screen_metrics",
@@ -597,6 +603,30 @@ class RecoveryDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GuardRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tall_friend_profile_uses_local_trade_label(self) -> None:
+        from PIL import Image
+        from sources import gbl_vision, trade_ios_android as cross
+
+        image = Image.new("RGB", (1080, 2412))
+        controller = pokemon_fleet.TradeController(spec("android-one"), None, {"TRADE_BTN": [410, 1900]})
+        controller.screenshot = AsyncMock(return_value=image)
+        metrics = {
+            "action_green": 0.22, "search_pale": 0.02, "white_panel": 0.85,
+            "card_band": 0.72, "card_edges": 0.96,
+        }
+        labels = [
+            gbl_vision.OCRBox("LOCAL", 1.0, 360, 1635, 108, 34),
+            gbl_vision.OCRBox("TRADE", 1.0, 364, 1674, 108, 34),
+        ]
+        self.assertFalse(cross.state_matches("friend", metrics))
+        with (
+            patch.object(cross, "screen_metrics", return_value=metrics),
+            patch.object(gbl_vision, "recognize", return_value=labels),
+        ):
+            await pokemon_fleet.guard_trade_state([controller], "friend", "TRADE_BTN", no_sleep)
+            self.assertTrue(await pokemon_fleet.recover_to_friend([controller], no_sleep))
+        self.assertEqual(controller.point("TRADE_BTN"), [414, 1652])
+
     async def test_friend_guard_steps_back_instead_of_raising(self) -> None:
         """The live stop: both phones left on the Pokémon picker by a dead run."""
         controllers = [
@@ -681,6 +711,14 @@ class PickerReselectTests(unittest.IsolatedAsyncioTestCase):
         # The phone that did advance must not be tapped again: a second
         # FIRST_PKMN_BTN there would put the two sides out of step.
         self.assertEqual(moved_on.taps, [])
+
+    async def test_keep_one_tag_stops_before_trading_a_preselected_copy(self) -> None:
+        from types import SimpleNamespace
+        phone = FakeController("android-two", ["next"], PICKER_COORDINATES)
+        with fake_vision(), patch("sources.gbl_vision.recognize", return_value=[SimpleNamespace(text="Keep One")]):
+            with self.assertRaisesRegex(pokemon_fleet.TradeStopped, "Keep One"):
+                await pokemon_fleet.guard_trade_state([phone], "next", "NEXT_BTN", no_sleep)
+        self.assertEqual(phone.taps, [])
 
     async def test_reselecting_is_bounded_and_then_stops_the_run(self) -> None:
         """A picker that will not open anything is refusing, not lagging: the
@@ -927,6 +965,55 @@ class IncidentalNoticeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CycleRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unverified_confirmation_leaves_screens_for_review(self):
+        from types import SimpleNamespace
+        from sources import trade_ios_android as cross
+
+        controllers = [
+            FakeController(name, coordinates={"CONFIRM_BTN": [1, 2], "X_BTN": [1, 2]})
+            for name in ("one", "two")
+        ]
+        for controller in controllers:
+            controller.cleanup = AsyncMock()
+        steps = [
+            SimpleNamespace(name=name, delay_after=0, use_delay_modifier=False)
+            for name in ("CONFIRM_BTN", "X_BTN")
+        ]
+        with (
+            patch.object(cross, "DEFAULT_STEPS", steps),
+            patch.object(pokemon_fleet, "guard_trade_state", AsyncMock(side_effect=[
+                None, pokemon_fleet.FleetError("receipt unavailable"),
+            ])),
+            patch("sources.trade_history.record_fleet_trade") as record,
+        ):
+            with self.assertRaises(pokemon_fleet.TradeConfirmationUnverified):
+                await pokemon_fleet.execute_trade_sequence(controllers, 0)
+        record.assert_not_called()
+        self.assertEqual([controller.taps for controller in controllers], [["CONFIRM_BTN"], ["CONFIRM_BTN"]])
+
+    async def test_shared_journal_only_records_verified_completed_exchange(self):
+        from types import SimpleNamespace
+        from sources import trade_ios_android as cross
+        controllers = [FakeController(n, coordinates={"X_BTN": [1, 2]}) for n in ("one", "two")]
+        step = SimpleNamespace(name="X_BTN", delay_after=0, use_delay_modifier=False)
+        with patch.object(cross, "DEFAULT_STEPS", [step]), \
+             patch.object(pokemon_fleet, "guard_trade_state", new_callable=AsyncMock) as guard, \
+             patch("sources.trade_history.record_fleet_trade") as record:
+            await pokemon_fleet.execute_trade_sequence(controllers, 0, dry_run=True)
+            await pokemon_fleet.execute_trade_sequence(controllers, 0, start_step="X_BTN")
+            record.assert_not_called()
+            guard.side_effect = pokemon_fleet.FleetError("no result")
+            with self.assertRaises(pokemon_fleet.FleetError):
+                await pokemon_fleet.execute_trade_sequence(controllers, 0)
+            record.assert_not_called()
+            guard.side_effect = None
+            await pokemon_fleet.execute_trade_sequence(controllers, 0)
+            record.assert_called_once_with(["one", "two"])
+            controllers[0].tap_step = AsyncMock(side_effect=pokemon_fleet.FleetError("close failed"))
+            with self.assertRaises(pokemon_fleet.TradeStopped):
+                await pokemon_fleet.execute_trade_sequence(controllers, 0)
+            self.assertEqual(record.call_count, 2)
+
     def args(self, count: int) -> argparse.Namespace:
         return argparse.Namespace(
             count=count, delay_modifier=0, dry_run=False, start_step=None
@@ -1001,6 +1088,35 @@ class CycleRetryTests(unittest.IsolatedAsyncioTestCase):
         # Walked home all the same: two phones left standing in a trade are
         # what the game cancels, and the notice is what the next run opens on.
         recover.assert_awaited_once()
+
+    async def test_daily_limit_ends_the_run_cleanly(self) -> None:
+        """99 trades then the game's cap (14 Nov 2026) is a finished run, not an Error."""
+        calls: list[int] = []
+
+        async def trades_then_cap(*args: object, **kwargs: object) -> None:
+            calls.append(1)
+            if len(calls) == 3:
+                raise pokemon_fleet.DailyTradeLimitReached("Pokémon GO's daily trading limit is reached")
+
+        controller = FakeController("tall_device")
+        controller.pointer = AsyncMock()
+        controller.quit = AsyncMock()
+        recover = AsyncMock(return_value=True)
+        output = io.StringIO()
+
+        with (
+            patch.object(pokemon_fleet, "connect_trade_controller", AsyncMock(return_value=controller)),
+            patch.object(pokemon_fleet, "execute_trade_sequence", side_effect=trades_then_cap),
+            patch.object(pokemon_fleet, "recover_to_friend", recover),
+            patch("sources.trade_ios_android.active_gift_runner_pids", return_value=[]),
+            contextlib.redirect_stdout(output),
+        ):
+            await pokemon_fleet.run_trade([spec("tall_device")], self.args(100))
+
+        self.assertEqual(len(calls), 3)
+        self.assertIn("Done: 2 trade(s) completed", output.getvalue())
+        recover.assert_awaited_once()
+        self.assertTrue(issubclass(pokemon_fleet.DailyTradeLimitReached, pokemon_fleet.TradeStopped))
 
     async def test_a_failure_that_cannot_be_recovered_still_stops_the_run(self) -> None:
         async def always_fails(*args: object, **kwargs: object) -> None:

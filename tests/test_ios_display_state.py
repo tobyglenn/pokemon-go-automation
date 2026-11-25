@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests import support as _test_support
 
+import json
 import subprocess
 import unittest
 from unittest import mock
@@ -29,6 +30,14 @@ AWAKE = ASLEEP.replace("backlight is off", "backlight is on")
 class BacklightTests(unittest.TestCase):
     def test_a_dark_screen_is_reported(self) -> None:
         with mock.patch.object(ios_wda_cleanup, "run_output", return_value=ASLEEP):
+            self.assertIs(ios_wda_cleanup.display_backlight("udid"), False)
+
+    def test_locked_primary_panel_supersedes_active_coredevice_summary(self) -> None:
+        result = {"backlightState": "activeOn", "displays": [
+            {"primary": False, "backlightState": "activeOn", "type": {"external": {}}},
+            {"primary": True, "backlightState": "off", "type": {"integrated": {}}},
+        ]}
+        with mock.patch.object(ios_wda_cleanup, "run_output", return_value=json.dumps({"result": result})):
             self.assertIs(ios_wda_cleanup.display_backlight("udid"), False)
 
     def test_a_lit_screen_is_reported(self) -> None:

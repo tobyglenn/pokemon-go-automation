@@ -20,12 +20,24 @@ python play.py --devices android-one ios-one
 
 ## Start the day — `starter.py`
 
-Start with every phone on the map. Each phone runs four steps in order, side by side with the others:
+During a live run, each phone switches its display off as soon as its final scheduled work finishes (pass `--no-sleep` to leave displays on). The summary includes the observed display state. Plans and dry runs leave the displays alone.
 
-1. **mega** — Pokémon storage → TAGS → the `mega` tag, then every Pokémon in it: when its MEGA EVOLVE (or PRIMAL REVERSION) button shows the energy icon with no number, it is Mega Evolved. A number means it costs Mega Energy and it is skipped. Only one Pokémon can be Mega Evolved at a time, so each replaces the last; the point is the daily Mega Level progress. The Mega Level page's LEVEL UP is never pressed.
-2. **buddy** — the buddy's PLAY! screen: up to three berries (`--berries`, `--berry`, default Razz Berry), one snapshot, then petting until the mood ring at the top is all pink. Afterwards the buddy profile is read: *Give your buddy a treat*, *Play together* and *Take a snapshot* should each show a heart.
-3. **gifts** — the friends list, then `gift.py --all --gifts-only` for that phone.
-4. **gbl** — back to the map, then `gbl_day.py` for that phone.
+When multiple computers are configured and `special` is scheduled (default), `starter.py` finishes the pre-special steps (`buddy`, `battle`) across every computer first without sleeping their displays, runs `special_trade.py` once from the coordinator across all configured computers over SSH (so the receiver can trade with partner phones plugged into peer computers without device-lock conflicts), and then runs the remaining steps (`mega`, `bag`, `gifts`, `gbl`, `buddy-again`) across every computer. With `--local`, `special` stays restricted to phones attached to the current computer.
+
+On iPhone, starter keeps one authorized Appium session through buddy work, trade inventory, gifts, battle legs and display sleep. Approve iOS automation when the first session opens. If the phone disconnects or iOS revokes authorization, reconnecting can require approval again.
+
+Start with every phone on the map. The default order is:
+
+1. **buddy** gives up to three berries, takes one snapshot, and pets the buddy. The routine checks the buddy profile for the corresponding hearts.
+2. **battle** attempts a Blanche training battle for the buddy's Battle Together heart.
+3. **special** checks for trades using the private special-trade configuration. Use `--skip special` to omit this step.
+4. **mega** checks the `mega` tag and evolves Pokémon whose button shows the Mega Energy icon without a cost. Each evolution replaces the previous one.
+5. **bag** discards all held Potions, Super Potions, Hyper Potions, Revives, Razz Berries, Nanab Berries, and Pinap Berries. Use `--skip bag` to leave item counts alone.
+6. **gifts** opens the friends list and runs `gift.py --all --gifts-only` for that phone.
+7. **gbl** returns to the map and runs `gbl_day.py`. A recorded daily cap skips this step on that phone until midnight. `--replay-gbl` runs it anyway.
+8. **buddy-again** revisits berry feeding, playing, and the snapshot.
+
+Add `--trade` to schedule the ordinary trade step between gifts and GBL.
 
 Buttons are found by their words (Vision OCR) and colours, not per-phone coordinates. A step that cannot reach its screen is reported and the phone moves on to the next one. `--dry-run` walks the mega and buddy screens and reports, but evolves, feeds, photographs and pets nothing (gifts and GBL are skipped); `--plan` only lists phones and steps; `--skip`/`--only` choose steps; `--tag` names another tag.
 
@@ -33,6 +45,39 @@ Buttons are found by their words (Vision OCR) and colours, not per-phone coordin
 python starter.py --plan
 python starter.py --devices android-one --dry-run --only mega buddy
 python starter.py
+```
+
+## Daily special trade — `special_trade.py`
+
+One phone (the *receiver*) fills its shiny gaps by special trade. The private settings file `special-trade.json` names the receiver, its shiny gap report, the fleet phone that now holds each account the report names, and the spare legendaries the receiver gives:
+
+```json
+{"receiver": "android-three", "report": "~/.local/state/pokemon-go-automation/devices/gap_report.md",
+ "holders": {"PhoneA": "android-one", "PhoneB": "android-two"},
+ "give": ["zamazenta", "zacian", "necrozma", "mewtwo", "kyurem", "rayquaza"]}
+```
+
+Only base forms held by another phone are traded for; an evolved form is never a target, because its shiny comes from evolving the lower stage. By default, partner phones attached to **any** configured computer can participate over SSH via `sources/remote_target.py`; pass `--local` to restrict to devices plugged into the current computer, `--all` to run all remaining special trades allowed today (during multi-special events) across all partners until zero remain, or `--ignore-today` to check the receiver live instead of trusting `today.json`. The partner gives a shiny of the species, found by searching its Pokédex number (excluding `!dontrade`, `!shadow`, and `!traded`). The receiver gives its lowest-CP spare legendary that is not tagged, `dontrade`, favorited, costume, purified, buddy, shiny, lucky, 4★, shadow, or already traded. Only once none of those is left does it give from its `ToTrade` tag (setting `spare_tag`), lowest CP first, with the same never-give filters (`!dontrade`, `!favorite`, `!costume`, `!purified`, `!buddy1-5`, `!shiny`, `!lucky`, `!4*`, `!shadow`, `!traded`), and explicitly refuses Armored Mewtwo (even though `!costume` does not filter it) or any `dontrade`-tagged card before tapping `NEXT`. The search is narrowed by CP until the lowest one shows in the top rows. The game's "Do you want to make a Special Trade?" card is answered YES. A trade costing more than `--max-stardust` (default 40,000) is refused (skipping to the next partner/species rather than aborting other phones). Each completed trade removes its species from the report and is logged to `special-trade/traded.jsonl` in the state directory. The run stops when the receiver has no special trades left. When no attached partner has anything left to give, a macOS notification names the phone to plug in next.
+
+```sh
+python special_trade.py --list    # the report's targets; touches no phone
+python special_trade.py --plan    # count/roster on the phones, trade nothing
+python special_trade.py --all     # run all remaining special trades today across all computers
+python special_trade.py
+```
+
+`scripts/tag_spare_legendaries.py` fills those tags on the receiver. A legendary with two stats at 15 (not a hundo) gets `SilverBottlePot` (the game caps tag names at 15 letters). An untagged 3★ whose Attack is 13 or below (excluding `!dontrade`, `!favorite`, `!costume`, `!purified`, `!buddy1-5`, Armored Mewtwo, shiny, lucky, 4★, shadow, traded) gets `ToTrade`. Search cannot tell Attack 14 from 11–13, so each candidate is appraised and its Attack bar measured; borderline readings are left alone. Each decision is logged to `special-trade/iv-tags.jsonl`. `--dry-run` appraises and tags nothing.
+
+To maintain a Living Dex on a single designated phone without affecting other devices, `scripts/tag_living_dex.py --device <name>` scans Pokédex numbers `1–1025` adaptively and tags every sole-copy species (`count == 1`) with `dontrade`:
+
+```sh
+python scripts/tag_living_dex.py --device android-three --dry-run
+python scripts/tag_living_dex.py --device android-three
+```
+
+```sh
+python scripts/tag_spare_legendaries.py --dry-run --limit 5
+python scripts/tag_spare_legendaries.py --device android-three
 ```
 
 ## Gifts and gym berries — `gift.py`
@@ -103,6 +148,103 @@ python trade.py --pair android-one android-two --count 1
 
 Implementation: the paired controllers and trade loop in `sources/pokemon_fleet.py` support Android/Android, iOS/iOS, and mixed pairs when both devices are configured and calibrated. This is implementation support, not evidence that every pair type has been verified on live phones. The older `sources/trade_android.py` and `sources/trade_ios_android.py` workers remain in the codebase. Compatibility name: `trade.py`.
 
+## Daily high-value trading — `daily_trade.py`
+
+Runs up to `--trades` (default `100`) trades per day on each computer's attached pair of configured phones (`sources/daily_trade.py`, `sources/trade_plan.py`, `sources/starter_trade.py`), using the ~93 expanded raid/Mega/Shadow-line families (`--core-only` restricts to the 45 core families):
+
+1. **Tier 1 (`98Plus == 0`)**: families either phone has zero `98Plus` copies of. Few-copies species (`< 3` spares) are logged as Lucky Trade suggestions rather than auto-traded.
+2. **Tier 2 (`0 < 98Plus < --target-good`, default `6`)**: deepens `98Plus` coverage, scheduling mirror trades within the family first.
+3. **Tier 3**: fills the remaining daily budget up to 100 with high-value mirror and cross-family IV/XL rerolls.
+
+Completed trades are recorded per day under `state_dir()/trade/history-YYYY-MM-DD.jsonl` so interrupted runs resume cleanly within the daily cap.
+
+```sh
+python daily_trade.py --plan
+python daily_trade.py --dry-run
+python daily_trade.py --reuse-counts
+```
+
+## Evening routine — `ender.py`
+
+Run `python ender.py` on the fleet coordinator. Both hosts do buddy and gift work, then one coordinator pairs the connected trainers. Each two-sided completion in the daily journals consumes one of each account’s 100 trades. The receiver and its alternate handset share a counter. An in-game daily-limit notice also closes the affected pair for that date.
+
+Prepare the trade inventory in advance with `python storage_favorites.py --prepare-trades`. This records native favorite names, full expressions and candidate pages by handset. Preparation checks the native Pokédex number and CP of the proposed spares. Ender opens the existing favorite in each trade picker and verifies its full expression. It uses the prepared page, rechecks the visible copies of that species against the reserve, and checks the selected CP and label. An absent favorite, changed expression or missing prepared spare stops that selection. Run preparation again when the collection or saved searches need refreshing.
+
+Ender gives configured priority species first access to the receiver, then uses audited Lucky and perfect-IV gaps and eligible ordinary spares. After a reroll with unknown IVs, Ender holds that species until the next Perfect Dex audit. A changed Pokédex manifest retires the saved gap targets and strict review until setup republishes them. A guaranteed exchange requires prepared eligible individuals on both phones, both Lucky Friends badges, Special Trade allowances and approval for the live quote. Explicit preparation ranks reciprocal raid offers only when both favorite layouts can present them and both trainers qualify. Ender can reuse a published choice on a later evening. It checks the dated exchange journals and current picker evidence before quoting it. A changed or unknown outgoing species can invalidate the choice. The standalone collector has separate inventory-discovery commands.
+
+After trading, Ender opens the saved `SafeTrash` favorite for manual review, records its result grid and switches the display off. You decide which Pokémon to transfer. `python ender.py --plan` describes this routine offline.
+
+### Saved storage searches
+
+Run `python storage_favorites.py` on the coordinator to reconcile favorite searches. Use `--plan` to list each account's searches. The five shared searches are **98%**, **FarTrade**, **FarNot98**, **LocalTrade** and **LocalNot98**. The 98% search includes candidates with two perfect stats. Appraise the third stat before applying 98Plus. All outgoing and disposal searches use the game’s native `!4*` filter. The private `storage-favorites.json` holds the shared definitions and donor extras.
+
+The three donors use all twelve slots. The remaining seven are SafeTrash, Non-Raid, ReceiverLucky, ReceiverPerfect, XXL/XXS, LuckyOffer and ToPower. The receiver uses the five common searches, its own SafeTrash, Non-Raid and ToPower, and its TradeEvolve, NearLowIV, PlainNot98 and TradeReturns searches. A sync backs up and removes retired searches first (TradedLucky and HundoReview on donors, LocalSpare on the receiver) so the new ones fit under the cap. `trading-accounts.json` maps alternate handsets to one trainer for inventory policy, trade pairing and daily limits. To sync favorites on a specific handset, pass its physical device name to `--devices`.
+
+The configurable defaults for receiver-specific favorites are `ReceiverLucky`, `ReceiverPerfect`, and `ReceiverPriority`. To keep existing in-game labels, copy [the example](../examples/trade-favorites.example.json) to `trade-favorites.json` in your private configuration and put those exact labels under `labels`. Use `aliases` to recognize previous labels during synchronization.
+
+Every list except 98% and ToPower carries `!#ToPower`, so nothing tagged for investment can be traded or transferred from a saved search.
+
+| Favorite | Pokémon shown for manual review |
+| --- | --- |
+| SafeTrash | The transfer list: garbage only. Garbage is a species with no raid, Mega, Max Battle or notable PvP use (Nymble, Bidoof); a Scorbunny or a Magikarp never qualifies. Any IV short of 98% counts, because trading rerolls IVs; native 4★, the 98Plus tag and two-perfect-stat spreads (possible unappraised 98s) stay out, as do tagged, favorite, Lucky, shiny, Legendary, shadow, size, costume, background, buddy and vintage Pokémon. An untraded donor copy must have been caught within 100 km and have a verified registration in the receiver’s Lucky Pokédex. Priority targets stay out. On the receiver a verified retained copy is required and the return pools stay out. |
+| Non-Raid | A wider second look, not a transfer list: Pokémon up to 3★ (two-perfect-stat spreads excluded) of species with no raid or Max Battle use. Check each before transferring. On the receiver it requires a kept representative. |
+| ToPower | The Pokémon to put candy into: the account’s Rare Candy and Rare Candy XL targets and each type’s best own-candy spend from its latest `raidspend.py` scan, written as `#ToPower,<dex>&#ToPower,<cp>`, so anything you tag ToPower appears too. An individual leaves the list once a power-up changes its CP; tag it ToPower to keep it. Rerun the scan and the sync to refresh. |
+| LuckyOffer | Eligible Legendary spares for an individually approved Lucky Friends trade. Setup checks the raid shortlist against each donor’s saved search. It verifies eligible individuals by species, form and CP, then records their positions and the result count in each partner’s actual picker. Ender checks that picker receipt before selecting an offer. |
+| ReceiverLucky, ReceiverPerfect | Tradeable donor candidates whose exact species is missing from the receiver’s in-game Lucky or Perfect Pokédex. A missing evolution qualifies only that evolution. Trading rerolls the IVs. Priority species remain protected by the trash filters and routed by the trader. |
+| XXL/XXS | Untraded XXL and XXS donor Pokémon, which can still be traded to the receiver. |
+| FarTrade, FarNot98 | Untraded Pokémon caught more than 100 km away: trading one earns bonus candy. FarTrade is 0–2★; FarNot98 is any IV short of 98%. |
+| LocalTrade, LocalNot98 | Untraded Pokémon caught within 100 km. LocalTrade is the trade list: useful species only (never garbage), any IV short of 98%, two-perfect-stat spreads excluded. LocalNot98 is the wider original: every species short of 98%. On donors both also leave out every ReceiverLucky species, so those go only to the receiver. On the receiver LocalTrade also needs a verified retained copy, so it stays empty until `--keep-one` has covered useful species. |
+
+Living Dex preparation runs explicitly on the receiver. `python storage_favorites.py --keep-one all` checks the catalog and saves progress between runs. An existing `KeepOne` specimen stays protected. The native `98Plus` tag or a verified hundo can provide the retained copy for the audited form. Receiver outgoing lists require verified coverage and protect costumes, backgrounds and unresolved forms. Donor trade and review searches allow eligible costumes and last copies according to their individual purposes. The receiver’s `TradeReturns` favorite supplies its side of an ordinary trade.
+
+## Receiver-first daily trades — `priority_trade.py`
+
+```bash
+python priority_trade.py --plan
+python priority_trade.py
+```
+
+**Purpose:** bring as many accounts as possible to the 100-trade daily cap, filling the receiver's needs first.
+
+The receiver trades with the donors first. Across all donors the donor offers its **XXL/XXS** search, then **ReceiverLucky**, then **ReceiverPerfect**; a lower tier never takes a receiver slot while a higher tier still has stock on any donor. The receiver sends curated return fodder and keeps its `trade_keep_last` reserve. The receiver's lane and a donor-to-donor lane run at the same time, so all four phones trade at once; the lanes swap phones only between trades. Donors trade with each other from their **valuable spares** first (the collector's daily-value lists: pseudo-legendary families and curated valuable species, at least two copies kept, ReceiverLucky species removed), then **FarTrade**, **FarNot98**, **LocalNot98**, and **LocalTrade** last. Each pinned list is opened as its verified favorite rather than typed, so long searches are not garbled by keyboard input; an unverified favorite falls back to typing. A pair that fails for a passing reason rests 10 minutes and is retried. ReceiverLucky species never appear in a donor's LocalTrade or LocalNot98 (see storage favorites below), so they only ever go to the receiver.
+
+A budget planner chooses which donor feeds the receiver so the donors can still finish their own caps with each other. With every account at 0 trades, one donor gives the receiver its 100 and the other two trade 100 with each other, so all four can cap. Three is the success threshold; real stock decides. The plan is recomputed after every trade and whenever a search runs dry, and it stays with the open pair when that costs nothing. Today's counts come from both Macs' trade journals. Guaranteed Lucky trades are skipped, never spent. `--plan` reads counts and favorite terms only and touches no phone. Options: `--local`, `--trades N`, `--receiver`, `--exclude-devices`, `--shots`. Exit status is 0 when at least three attached accounts (fewer if phones are offline) reach the cap.
+
+## Lucky Dex and daily fleet trades — `collect_trades.py`
+
+Use `--finish-night` to leave each phone on its filtered storage list for manual review and switch its screen off. Set `"finish_night": true` in the private collector configuration for full daily runs. The collector opens the same `SafeTrash` filter as Ender. You choose any transfers yourself. Temporary trade-picker queries can reuse a matching Recent search after verifying the full text.
+
+The default command reads the designated receiver’s private Lucky Dex report (`lucky_report` in the referenced `clear-pokemon.json`). Every selected donor offers protected, tradeable matches for that report. The receiver offers pseudo-legendary families first, then other curated valuable species. During collection, free peer pairs can exchange valuable spares from outside the pending Lucky Dex list. Each such phone keeps its entire share of the receiver’s remaining daily budget available as a potential donor. When the receiver’s budget or the available Lucky Dex matches run out, eligible pairs throughout the fleet exchange valuable spares until each phone reaches its daily cap or runs out of eligible partners or offers. Phones on different computers can pair through the SSH device bridge.
+
+The coordinator checks every configured computer’s trade history and charges each verified exchange to both participants. Collector history includes the offered Pokédex number for each phone and the result screenshots and Lucky status captured for the exchange. The default cap is 100 per phone. It reports each shortfall and returns an unsuccessful exit status if a selected phone finishes below the requested daily cap. A Lucky roll is a separate outcome. A confirmed Lucky receipt paired with the donor’s exact Dex-number offer retires that species from the remaining audited targets for this receiver and report.
+
+Searches retain the collector’s donor and return exclusions. Ordinary offers on both phones require an exact Pokédex-number search with at least three eligible copies and more than the phone’s configured `trade_keep_last` reserve. Nicknames can help order the searches. Every guaranteed Lucky pair is held for specific approval, including during PH1 gap collection. When ordinary collection encounters a pair listed in `guaranteed_proposal_pairs` outside the designated receiver, it releases the pair’s locks and prepares one ranked proposal for those two phones. A terminal can accept or decline it by ID. Unattended collection parks the proposal and continues eligible ordinary trades. Ordinary donor and return searches exclude the configured vintage years. The existing configured-target workflows remain available with `--targets-only`, `--rolycoly-only`, and `--size-only`.
+
+```sh
+python collect_trades.py --plan
+python collect_trades.py --dry-run
+python collect_trades.py
+python collect_trades.py --size-only --trades 20
+```
+
+### Reviewing and accepting a guaranteed Lucky trade
+
+Before a live Legendary inventory scan, both phones must have room under the ordinary daily cap, show the Lucky Friend badge on the other trainer’s profile, enter the trade picker and show a positive Special Trade allowance. An unreadable check skips the pair. Eligible pairs reuse fresh cached recommendations. When evidence needs updating, previously discovered candidate species are checked first, with a wider search if needed. An approved exchange expires the two traded species on both accounts.
+
+A separate proposal compares live-verified legendary raid attackers in both directions. It considers what the receiving account owns, including its perfect and powered-up attackers. Configure the ordered phone pairs in `guaranteed_proposal_pairs` in the private collector JSON. Running with a named pair restricts the review to those two phones.
+
+```sh
+python collect_trades.py --propose-guaranteed --plan
+python collect_trades.py --propose-guaranteed
+python collect_trades.py --propose-guaranteed android-one android-two
+python collect_trades.py --approve-guaranteed PROPOSAL_ID
+python collect_trades.py --decline-guaranteed PROPOSAL_ID
+```
+
+The plan ranks offers from the inventory snapshot. When pairs share a phone, it chooses distinct outgoing individuals and ranks the later exchange against ownership projected after the earlier one. If verified stock cannot support both exchanges, the plan and live review label them as mutually exclusive alternatives. A single named pair gets its best independent match. Live proposal runs refresh missing or stale evidence on just the named phones. Approval and decline use the original proposal and bypass fleet inventory ranking. A live proposal verifies both Lucky Friends profiles, each eligible individual, each remaining Special Trade allowance, and the Stardust quote. It prints a one-use ID and closes the lobby. Multiple pairs can share one phone. Reviewing their quotes leaves that phone’s allowance available. Accepting one exchange can defer another to a later day.
+
+Accepting an ID reopens only that pair and checks the species, form, current CP, identity from the selection screen, signed-in trainers, guarantee and cost against the original quote. The command ends after that exchange. A changed offer needs a fresh proposal. Unused proposals expire at local midnight.
+
 ## Transfers — `luckytrash.py`
 
 Select either `--count N` or `--all` explicitly. `--all` has a default limit of 500 transfers per phone through `--max-transfers`. Execution also requires `--confirm-delete`; a plan does not authorize or perform a transfer.
@@ -118,6 +260,20 @@ python luckytrash.py --devices all --count 1 --confirm-delete
 
 Implementation: `sources/luckytrash_android.py` and `sources/luckytrash_ios.py`. Compatibility name: `luckytrash.py`. A new alias does not change the underlying selection or protection rules.
 
+## Safe audited clearing — `clear_pokemon.py`
+
+Reads `clear-pokemon.json` from the private configuration directory (see `examples/clear-pokemon.example.json`), audits the dex list against Lucky Dex gaps, evolution chains, Mega evolutions, and raid attackers, enforces all safety exclusions (`!#`, `!98Plus`, `!dontrade`, `!shiny`, `!4*`, `!favorite`, `!lucky`, `!legendary`, `!mythical`, `!ultra beasts`, `!costume`, `!shadow`, `!dynamax`, `!gigantamax`, `!background`, `!xxs`, `!xxl`), and runs the full audited filter in a single verified storage query across every connected Android and iOS device.
+
+Every transfer verifies the active search filter, the detail page's species name and lack of protected tags/Mega/Lucky/XXS/XXL state, the exact `TRANSFER` menu label, the confirmation dialog wording, absence of any second confirmation dialog, and a drop in the storage result count. `--open` leaves the verified filtered list open on screen on every device for visual review without deleting anything; `--count` and `--all` require `--confirm-delete`.
+
+```sh
+python clear_pokemon.py --review
+python clear_pokemon.py --plan
+python clear_pokemon.py --dry-run
+python clear_pokemon.py --open
+python clear_pokemon.py --count 5 --confirm-delete
+```
+
 ## Gym berries only — `scripts/berry.py`
 
 `gift.py` already feeds any phone parked on a gym. This berries-only command is for `--check` (a read-only detector check) and for a run that must not fall back to gifts. Prepare the gym/defender interface and review the berry budget. Implementations are `sources/berry_android.py` and `sources/berry_ios.py`; compatibility name `scripts/feed_berries.py`.
@@ -132,9 +288,10 @@ python scripts/berry.py --devices all --check
 Works whichever reward queue each phone is parked on, on Android and iPhone:
 
 - the award card ("A Pokémon has appeared! You have N Pokémon left to catch"): START ENCOUNTER, feed a Nanab, throw, repeat until the queue empties;
+- a GO Pass / Event Pass screen (BASIC and DELUXE columns): press CLAIM ALL once if unclaimed item tiles are showing, flip the top-right toggle to *Showing Claimable Rewards*, then tap each orange `POKÉMON APPEARS!` tile (left and right columns) and catch what appears (feeding a Pinap berry by default when in stock, falling back to Nanab, or Silver Pinap + Ultra Ball for legendaries; override with `--berry` or `--no-nanab`);
 - a research screen's orange CLAIM buttons: press each one and work what it pays out -- items are dismissed, Pokémon are thrown at.
 
-An encounter already open is caught first, then the screen is read again. A screen showing none of these is left alone. `--mode award` or `--mode research` skips the read (research looks further down a list than the read does); `--dry-run` reports what it sees without touching the phone. On an iPhone the Excellent routine throws until it first refuses to lock the circle, then a plain flick for the rest of the run; there is no BACK key, so a screen that only BACK would leave is reported and left alone. `--mode encounter` catches wild Pokémon you open by hand, one after another, with the same throws and Nanab. It runs on this computer unless `--allmachines` is given.
+An encounter already open is caught first, then the screen is read again. A screen showing none of these is left alone. `--mode award`, `--mode pass` or `--mode research` skips the read (research looks further down a list than the read does); `--dry-run` reports what it sees without touching the phone. On an iPhone the Excellent routine throws until it first refuses to lock the circle, then a plain flick for the rest of the run; there is no BACK key, so a screen that only BACK would leave is reported and left alone. `--mode encounter` catches wild Pokémon you open by hand, one after another, with the same throws and Nanab. It runs on this computer unless `--allmachines` is given.
 
 ```sh
 python catch.py --dry-run

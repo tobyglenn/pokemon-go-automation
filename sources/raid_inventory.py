@@ -426,18 +426,38 @@ _GLYPHS = set("q9aog@")
 
 
 def _compact(text: str) -> str:
-    return re.sub(r"[^0-9a-z&,*!]", "", _norm(text).lower())
+    return re.sub(r"\s+", "", _norm(text).casefold())
 
 
-def search_text_matches(boxes: Sequence[vision_ocr.TextBox], term: str, height: float) -> bool:
-    """True when the search field is showing `term`.
+def _clipped_search_matches(wanted: str, seen: str) -> bool:
+    """Recognize a clipped read without ignoring operators within visible clauses."""
+    # Vision occasionally reads a period for a visible ! and a bar for an l.
+    candidate = seen.lstrip(",").replace("&.", "&!").replace("|", "l")
+    last = wanted.rsplit("&", 1)[-1]
+    if len(candidate) < 16 or len(last) < 3 or "&" not in candidate:
+        return False
+    if len(wanted) > len(candidate) and wanted.endswith(candidate):
+        return True
+    # A missing letter in the final species name can be distinguished from
+    # an operator change because the preceding search syntax still matches.
+    visible_prefix, visible_species = candidate.rsplit("&", 1)
+    return (len(wanted) > len(candidate) + 1 and candidate.count("&") >= 2
+            and last.isascii() and last.isalpha() and len(last) >= 4
+            and any(last[:i] + last[i + 1:] == visible_species for i in range(len(last)))
+            and wanted.endswith(f"{visible_prefix}&{last}"))
 
-    The field shows a magnifier glyph that Vision reads as "Q", and the
-    asterisk and comma are small; so the comparison is on the term's
-    characters with the glyph allowed in front.
+
+def search_text_matches(
+    boxes: Sequence[vision_ocr.TextBox], term: str, height: float, *, exact: bool = False,
+) -> bool:
+    """True when the search field is showing the requested filter.
+
+    Read-only scans can recognize a clipped suffix. Raid preparation requires
+    the full query, including every filter operator.
     """
     wanted = _compact(term)
-    loose = re.sub(r"[*,&!]", "", wanted)
+    if not wanted:
+        return False
     for box in boxes:
         if box.y > height * 0.35:
             continue
@@ -446,20 +466,16 @@ def search_text_matches(boxes: Sequence[vision_ocr.TextBox], term: str, height: 
         candidates = {seen}
         if seen[:1] in _GLYPHS:
             candidates.add(seen[1:])
-        for candidate in candidates:
-            if candidate == wanted or (loose and re.sub(r"[*,&!]", "", candidate) == loose):
-                return True
-            # A long filter overflows the field, which then shows only its end.
-            # The end is accepted when it is long and carries the whole last
-            # clause -- the species, which trade searches put last.
-            last = wanted.rsplit("&", 1)[-1]
-            if (len(candidate) >= 16 and len(wanted) > len(candidate) and wanted.endswith(candidate)
-                    and len(last) >= 3 and candidate.endswith(last) and "&" in candidate):
-                return True
+        if wanted in candidates:
+            return True
+        if not exact and any(_clipped_search_matches(wanted, candidate) for candidate in candidates):
+            return True
     return False
 
 
-def field_shows(image: Image.Image, boxes: Sequence[vision_ocr.TextBox], term: str) -> bool:
+def field_shows(
+    image: Image.Image, boxes: Sequence[vision_ocr.TextBox], term: str, *, exact: bool = False,
+) -> bool:
     """`search_text_matches`, with a closer look when the full frame misses.
 
     Vision skips a lone small digit -- a search for Blastoise ("9") returns no
@@ -468,7 +484,7 @@ def field_shows(image: Image.Image, boxes: Sequence[vision_ocr.TextBox], term: s
     The left edge is tried at a few offsets because the magnifier glyph either
     side of it reads as a stray character.
     """
-    if search_text_matches(boxes, term, image.height):
+    if search_text_matches(boxes, term, image.height, exact=exact):
         return True
     counter = next(
         (b for b in sorted(boxes, key=lambda b: b.y)
@@ -488,7 +504,7 @@ def field_shows(image: Image.Image, boxes: Sequence[vision_ocr.TextBox], term: s
         strip = image.crop((int(image.width * left), int(top), int(image.width * 0.80), int(bottom)))
         strip = ImageOps.expand(strip.resize((strip.width * 3, strip.height * 3)),
                                 border=60, fill=strip.getpixel((2, 2)))
-        if search_text_matches(vision_ocr.ocr(strip), term, float("inf")):
+        if search_text_matches(vision_ocr.ocr(strip), term, float("inf"), exact=exact):
             return True
     return False
 

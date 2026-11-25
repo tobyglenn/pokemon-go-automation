@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
@@ -28,6 +29,20 @@ class TaskLoadingTests(unittest.TestCase):
         self.assertEqual(task.expected_cp, 2718)
         self.assertEqual(task.target_cp, 3830)
         self.assertEqual(task.tag_name, "mega")
+
+    def test_ios_command_closes_its_session_even_when_a_task_raises(self) -> None:
+        spec = SimpleNamespace(name="example-ios", enabled=True, platform="ios")
+        fleet = SimpleNamespace(devices={spec.name: spec})
+        with (
+            patch.object(raid_prep.pokemon_fleet, "load_fleet", return_value=fleet),
+            patch.object(raid_prep.raid_scan_ios.IOSPhone, "connect") as connect,
+            patch.object(raid_prep.raid_prep_ios, "IOSRaidPrepWorker"),
+            patch.object(raid_prep, "run_task", side_effect=RuntimeError("task failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "task failed"):
+                raid_prep.main(["--term", "tyranitar"])
+        connect.assert_called_once_with(spec, label=spec.name)
+        connect.return_value.close.assert_called_once_with()
 
 
 class AndroidRaidPrepTests(unittest.TestCase):
@@ -140,10 +155,17 @@ class AndroidFailClosedTests(unittest.TestCase):
 
     def test_search_refuses_a_cp_that_is_not_on_the_grid(self) -> None:
         self.worker.scanner = MagicMock()
-        self.worker.scanner.search.return_value = (2, [], Image.new("RGB", (720, 1600)), [])
         entry = MagicMock(cp=2700, x=100, y=400)
-        with patch.object(raid_prep_android.raid_scan_android, "parse_grid_entries", return_value=[entry]):
-            self.assertFalse(self.worker.search_and_open("tyranitar", expected_cp=2718))
+        self.worker.scanner.search.return_value = (2, [entry], Image.new("RGB", (720, 1600)), [])
+        self.assertFalse(self.worker.search_and_open("tyranitar", expected_cp=2718))
+        self.phone.tap.assert_not_called()
+
+    def test_stale_grid_never_opens_a_candidate(self) -> None:
+        self.worker.scanner = MagicMock()
+        entry = MagicMock(cp=2718, x=100, y=400)
+        self.worker.scanner.search.return_value = (None, [entry], Image.new("RGB", (720, 1600)), [])
+        self.assertFalse(self.worker.search_and_open("tyranitar", expected_cp=2718))
+        self.worker.scanner.search.assert_called_once_with("tyranitar", exact=True)
         self.phone.tap.assert_not_called()
 
     def test_power_up_without_dialog_taps_nothing_more(self) -> None:

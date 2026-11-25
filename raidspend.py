@@ -120,7 +120,9 @@ def main(argv=None) -> int:
     )
     helping = any(value in {"--help", "-h"} for value in argv)
     if "--scan" in argv and not helping:
-        return run_scan(fleet_entrypoint.clean_scope_flags(argv))
+        # run_scan needs --local to tell a worker from the coordinator; it
+        # strips the scope flags itself before delegating.
+        return run_scan(argv)
 
     parser = argparse.ArgumentParser(
         description="Plan candy and XL candy spending on raid attackers, per device. "

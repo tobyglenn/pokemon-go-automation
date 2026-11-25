@@ -449,7 +449,7 @@ def locate_throw_ball(
         if found is not None and not _gold_floor_above(frame, viewport, found):
             found = None
     if found is None:
-        # Autumn leaves pass for the ball's red paint.  On the oneplus on
+        # Autumn leaves pass for the ball's red paint.  On the sample-android-b on
         # 3 Nov 2026 they ran into the ball above and below, the merged band
         # was too tall to be a ball, and a Dedenne still on screen read as a
         # finished catch.  Leaf rows are sparse next to the ball's own, so
@@ -461,7 +461,7 @@ def locate_throw_ball(
             frame, viewport, yellow=True, dense_only=True
         ) or _locate_throw_ball(frame, viewport, yellow=False, dense_only=True)
         # This read is loose enough to take a pop-up's OK button for a ball
-        # (the oneplus's "New Mega Level" card), so it only counts on a frame
+        # (the sample-android-b's "New Mega Level" card), so it only counts on a frame
         # that also shows the encounter's berry and ball buttons.
         if found is not None and locate_encounter_buttons(image) is None:
             found = None
@@ -511,7 +511,7 @@ def _locate_throw_ball(
         row_minimum = max(row_minimum, round(peak * DENSE_ROW_SHARE))
         # The ball's rows are unbroken; leaf rows come and go.  An Ultra
         # Ball's black shell leaves its rows barely denser than the leaves
-        # (ph-1's Kyogre, 3 Nov 2026), so leaves are kept apart by their gaps.
+        # (sample-receiver's Kyogre, 3 Nov 2026), so leaves are kept apart by their gaps.
         row_gap = 2
     row_runs = _runs(
         row_counts,
@@ -597,7 +597,7 @@ def locate_encounter_buttons(
     view_height = max(1, round(view_width * height / width))
     frame = image.convert("RGB").resize((view_width, view_height))
     pixels = frame.load()
-    found: list[list[int]] = []
+    side_candidates: list[list[tuple[int, int, int]]] = []
     for x_from, x_to in ((0.01, 0.28), (0.72, 0.99)):
         left, right = int(view_width * x_from), int(view_width * x_to)
         top = int(view_height * 0.70)
@@ -605,7 +605,7 @@ def locate_encounter_buttons(
             (y, sum(_pale_button_pixel(pixels[x, y]) for x in range(left, right)))
             for y in range(top, view_height)
         ]
-        best: tuple[int, int, int] | None = None
+        candidates: list[tuple[int, int, int]] = []
         for row_run in _runs(rows, minimum=max(4, round(view_width * 0.02)), gap=2):
             y_min, y_max = row_run[0][0], row_run[-1][0]
             band_height = y_max - y_min + 1
@@ -631,21 +631,44 @@ def locate_encounter_buttons(
                 if not view_width * 0.05 <= band_width <= view_width * 0.16:
                     continue
                 area = band_width * band_height
-                if best is None or area > best[2]:
-                    best = (
+                candidates.append(
+                    (
                         round((x_min + x_max) / 2),
                         round((y_min + y_max) / 2),
                         area,
                     )
-        if best is None:
+                )
+        if not candidates:
             return None
-        found.append(
-            [
-                round(best[0] * width / view_width),
-                round(best[1] * height / view_height),
-            ]
-        )
-    return found[0], found[1]
+        side_candidates.append(candidates)
+
+    # The berry and ball buttons always sit on the same horizontal row. Pairing
+    # by matching y prevents a bright Pokemon foot (e.g. Duraludon) from
+    # outranking the real corner button on one side.
+    y_tol = max(6, round(view_height * 0.04))
+    best_pair: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
+    best_score = -1
+    for left_cand in side_candidates[0]:
+        for right_cand in side_candidates[1]:
+            if abs(left_cand[1] - right_cand[1]) > y_tol:
+                continue
+            score = left_cand[2] + right_cand[2]
+            if score > best_score:
+                best_score = score
+                best_pair = (left_cand, right_cand)
+    if best_pair is None:
+        return None
+    left_best, right_best = best_pair
+    return (
+        [
+            round(left_best[0] * width / view_width),
+            round(left_best[1] * height / view_height),
+        ],
+        [
+            round(right_best[0] * width / view_width),
+            round(right_best[1] * height / view_height),
+        ],
+    )
 
 
 BERRY_PINK_FRACTION = 0.15
@@ -2190,6 +2213,10 @@ async def use_nanab_berry(
     # A legendary gets the Ultra Ball whichever berry the bag can spare it.
     choice_x = ULTRA_CHOICE_X if berry == "silver" else BALL_CHOICE_X
     berry = berry_android.berry_to_feed(device.label, berry)
+    if berry_android.pocket_known_empty(device.label, berry):
+        if choice_x == ULTRA_CHOICE_X or not ball_in_hand(encounter_image, device.viewport):
+            await swap_to_ball(device, artifact_dir, choice_x=choice_x)
+        return
     if berry_in_hand(encounter_image, device.viewport):
         # The last attempt left one in the hand; opening the picker again would
         # only select a second. Feed the one that is already there.
@@ -2243,8 +2270,9 @@ async def use_nanab_berry(
         # the same Pokemon forever: an SE spent five minutes on one Weezing at
         # nought throws a cycle.  Close the sheet and throw the ball unbuffed.
         names = ", ".join(kind for kind, _point in listed)
+        wanted_label = "Nanab" if berry == "nanab" else f"{berry}/nanab"
         print(
-            f"[{device.label}] No Nanab berry in the bag "
+            f"[{device.label}] No {wanted_label} berry in the bag "
             f"(picker: {names}); throwing without one",
             flush=True,
         )
@@ -2527,7 +2555,12 @@ async def clear_catch_screens(
             continue
 
         blocked = gbl_vision.blocked_label(boxes)
-        if blocked is not None and gbl_vision.normalize(blocked) == "power up":
+        # POWER UP sits below the fold on a page with a Dynamax or Mega
+        # section: the SE stood on a caught Ralts that way for five minutes
+        # on 16 Nov 2026.  The weight line is always in view.
+        if (
+            blocked is not None and gbl_vision.normalize(blocked) == "power up"
+        ) or gbl_vision.pokemon_page_visible(boxes):
             close = [
                 round(device.viewport[0] * CATCH_CLOSE_X),
                 round(device.viewport[1] * CATCH_CLOSE_Y),

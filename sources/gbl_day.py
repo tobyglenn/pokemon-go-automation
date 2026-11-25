@@ -83,6 +83,31 @@ def parse_cap_reached(output: str) -> bool:
     return bool(DAILY_CAP_LINE.search(output))
 
 
+# A phone that hit the game's cap today is remembered, so the start-of-day
+# script can skip GBL on that phone alone and still do its buddy and gifts
+# (user, 14 Nov).  One file per phone holding the local date; a new day reads
+# as not capped.
+def cap_marker(name: str) -> Path:
+    return config_paths.state_dir() / "gbl-day" / f"cap-{name}.txt"
+
+
+def mark_cap_reached(name: str, today: str | None = None) -> None:
+    path = cap_marker(name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text((today or datetime.now().strftime("%Y-%m-%d")) + "\n")
+    except OSError as exc:
+        print(f"[gbl-day] {name}: could not remember the battle cap ({exc})", flush=True)
+
+
+def cap_reached_today(name: str, today: str | None = None) -> bool:
+    try:
+        stored = cap_marker(name).read_text().strip()
+    except OSError:
+        return False
+    return stored == (today or datetime.now().strftime("%Y-%m-%d"))
+
+
 class GBLDayError(Exception):
     """Something the supervisor cannot work around."""
 
@@ -492,6 +517,7 @@ async def play_device_day(
         progress.last_line = result.last_line
         if result.cap_reached:
             progress.cap_reached = True
+            mark_cap_reached(progress.name)
             progress.stopped = "daily battle cap reached"
             on_update()
             break
@@ -575,6 +601,10 @@ async def run_day(
             return []
         raise GBLDayError("Name at least one phone to play on")
     devices = [DeviceProgress(name=name, allotment=allotment) for name in device_names]
+    if runner is None:
+        # Once for the whole day; the legs inherit the marker and skip it.
+        from . import android_memory
+        await asyncio.to_thread(android_memory.free_named, device_names)
 
     def update() -> None:
         if status_path is not None:

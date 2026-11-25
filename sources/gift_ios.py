@@ -4,7 +4,7 @@
 This is the iOS counterpart to gift.py.  Appium/WebDriverAgent replaces ADB,
 but the open-loop step sequence and screenshot guard remain the same.  Button
 coordinates are iOS logical points, not screenshot pixels.  For example, the
-current iPhone SE viewport is 375x667 points while screenshots are 750x1334.
+iPhone SE viewport is 375x667 points while screenshots are 750x1334.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from selenium.webdriver.common.actions import interaction
 from selenium.webdriver.common.actions.action_builder import ActionBuilder
 from selenium.webdriver.common.actions.pointer_input import PointerInput
 
-from . import config_paths, ios_wda_cleanup
+from . import config_paths, gbl_vision, gift_android, gift_profile, gift_sort, ios_wda_cleanup, starter_ios_session
 
 if TYPE_CHECKING:
     from appium import webdriver
@@ -82,30 +82,16 @@ GUARD_MIN_BRIGHTNESS = 200
 GUARD_MAX_SATURATION = 20
 GUARD_RECOVER_ATTEMPTS = 3
 GUARD_RECOVER_DELAY = 3
-# Consecutive friends whose cycle failed before the whole run gives up. A friend
-# whose gift screen will not resolve is skipped rather than taking the other 398
-# down with it: on 2026-09-14 the SE raised on friend 1 of 399 on every run and
-# so sent nothing at all, while the friends behind it were never even tried. A
-# run that cannot get through this many friends in a row is wedged, not unlucky,
-# and stopping is then the honest answer.
+# Skip an isolated failed cycle, but stop after repeated failures.
 GIFT_CYCLE_RETRIES = 3
-# Cycles in a row that open nothing and send nothing.  The list is re-sorted
-# "can receive a gift" first every cycle, so a top friend who can be sent
-# nothing means nobody can, and the next cycle reopens that same friend --
-# forever, as the SE did on 3 Nov with every gift for the day already sent.
+# Repeated cycles with no outgoing or incoming gift can reopen the same friend.
 IDLE_CYCLE_LIMIT = 3
 # Cycles in a row that opened and sent nothing; no day allows more opens.
 OPEN_ONLY_LIMIT = 20
 # A flung profile keeps moving after the drag returns; tap before it settles
 # and the close X is still travelling under the finger.
 SCROLL_SETTLE = 1.5
-# Seconds a recovered screen gets to finish painting before anything samples it.
-# The header flips the moment the old screen starts fading, so a recovery that
-# stopped there handed the caller a half-drawn frame. Measured on the SE from
-# one failed run: the friends list is a 423KB screenshot, the frame right after
-# the recovery tap 51KB, and the gift card that follows 449KB. OPEN_BTN sampled
-# on that 51KB frame reads grey, which is how a friend with a gift waiting was
-# taken for one without.
+# Let a recovered screen finish painting before sampling its controls.
 SCREEN_SETTLE = 1.0
 # A drag now and then does not register at all, which used to leave the close
 # tap on the action row and open a trade lobby. friend_close_probe watches a
@@ -120,10 +106,7 @@ SEND_CONFIRM_ATTEMPTS = 6
 SEND_CONFIRM_PAUSE = 1
 # Seconds to let a send's overlay clear before the close scroll starts.
 PRE_SCROLL_SETTLE = 4
-# Looks, a second apart, that the friend profile gets to come back after OPEN.
-# A capped open lands on the profile under a pink "Daily limit reached" banner
-# for a few seconds, and a single look then read it as the gift card: the CLOSE
-# that followed shut the profile itself and lost the friend (SE, 2026-10-03).
+# Allow a daily-limit banner to clear before deciding whether CLOSE is safe.
 OPEN_SETTLE_ATTEMPTS = 6
 # Looks, a second apart, that SEND_BTN gets to light up after FIRST_GIFT. The
 # picker can still be sliding in when the first look is taken, and one grey
@@ -330,21 +313,18 @@ def connect(
     device = device_config(config)
     name = device.get("name", "iPhone")
     udid = device.get("udid", "")
-    if not retry or not udid:
-        try:
+
+    def open_driver():
+        def create():
             return _connect_once(config, use_new_wda=use_new_wda)
-        except Exception as exc:
-            guidance = wda_startup_guidance(exc, name)
-            if guidance is not None:
-                raise guidance from exc
-            raise
+
+        if not retry or not udid:
+            return create()
+        return ios_wda_cleanup.connect_with_retry(create, udid=udid, name=name, interval=45.0)
 
     try:
-        return ios_wda_cleanup.connect_with_retry(
-            lambda: _connect_once(config, use_new_wda=use_new_wda),
-            udid=udid,
-            name=name,
-            interval=45.0,
+        return starter_ios_session.connect(
+            udid, config.get("server_url", "http://127.0.0.1:4723"), open_driver
         )
     except Exception as exc:
         guidance = wda_startup_guidance(exc, name)
@@ -363,7 +343,7 @@ def close_driver(driver: webdriver.Remote) -> None:
             flush=True,
         )
     else:
-        print("iPhone gift automation session closed", flush=True)
+        print("iPhone gift worker disconnected", flush=True)
 
 
 stale_wda_error = ios_wda_cleanup.stale_wda_error
@@ -520,6 +500,34 @@ def point_saturation(
 ) -> float:
     """Colored buttons score high; a blank stretch of the sheet scores near zero."""
     return point_stats(driver, point, logical_radius)[1]
+
+
+def sort_direction(driver: webdriver.Remote, sort_point: list[int]) -> str | None:
+    """Which way the friends list is sorted; None when unreadable."""
+    try:
+        image = screenshot_image(driver)
+        scale = image.width / driver.get_window_rect()["width"]
+    except Exception:  # a missed read only means the sort is tapped as configured
+        return None
+    return gift_sort.sort_arrow_image(image, [int(sort_point[0] * scale), int(sort_point[1] * scale)])
+
+
+def send_gift_point(driver: webdriver.Remote) -> list[int] | None:
+    """The lit SEND GIFT icon on a friend's profile, in logical points.
+
+    None when it is greyed out (the friend cannot receive) or not on screen.
+    Found rather than read at SEND_GIFT_BTN because the profile's action row
+    moves with the friend after the remote-trade update.
+    """
+    image = screenshot_image(driver)
+    found = gift_profile.find_send_gift_image(image)
+    if found is None:
+        return None
+    rect = driver.get_window_rect()
+    return [
+        round(found[0] * rect["width"] / image.width),
+        round(found[1] * rect["height"] / image.height),
+    ]
 
 
 def colored_action_available(driver: webdriver.Remote, point: list[int]) -> bool:
@@ -812,9 +820,15 @@ def run_gifts(
         opened = False
         sent = False
         skip_send = False
+        sorted_down = False
 
         for step in GIFT_STEPS:
             point_name = step.name
+            # The game remembers the sort direction, so the second SORT +
+            # CAN RECEIVE pair is only for when the first left it pointing up
+            # The sort arrow shows the current direction.
+            if sorted_down and step.name in ("SORT_BTN", "CAN_RECEIVE_GIFT_BTN"):
+                continue
             if point_name not in points:
                 point_name = FALLBACK_KEYS.get(point_name, point_name)
 
@@ -830,7 +844,11 @@ def run_gifts(
 
             if all_mode and not dry_run and step.name == "OPEN_BTN":
                 # Gift screen only exists if friend actually has incoming gift.
-                opened = colored_action_available(driver, points[step.name])
+                opened = (
+                    colored_action_available(driver, points[step.name])
+                    and not friendship_heading_visible(driver)
+                    and open_button_visible(driver, points[step.name])
+                )
                 if not opened:
                     print("  No incoming gift on friend; continuing Send Gift", flush=True)
                     continue
@@ -839,9 +857,10 @@ def run_gifts(
                 print("  No gift screen dismiss; skipping close", flush=True)
                 continue
 
+            found_gift_point = None
             if all_mode and not dry_run and step.name == "SEND_GIFT_BTN":
-                send_gift_btn_active = colored_action_available(driver, points[step.name])
-                if not send_gift_btn_active:
+                found_gift_point = send_gift_point(driver)
+                if found_gift_point is None:
                     outgoing_available = False
                     skip_send = True
 
@@ -930,10 +949,10 @@ def run_gifts(
                 time.sleep(max(delay, 0))
                 continue
 
-            x, y = points[point_name]
+            x, y = found_gift_point or points[point_name]
             print(f"  {point_name}: ({x}, {y})", flush=True)
             if not dry_run:
-                tap(driver, points[point_name])
+                tap(driver, [x, y])
 
             if step.name == "SEND_GIFT_BTN":
                 # Give gift grid one frame to appear before first gift tap.
@@ -941,6 +960,13 @@ def run_gifts(
 
             delay = step.delay_after + (delay_modifier if step.use_delay_modifier else 0)
             time.sleep(max(delay, 0))
+
+            if point_name == "CAN_RECEIVE_GIFT_BTN" and not dry_run and "SORT_BTN" in points:
+                direction = sort_direction(driver, points["SORT_BTN"])
+                if direction == "down":
+                    sorted_down = True
+                elif direction is None:
+                    print("  Sort direction not readable; tapping the sort as configured", flush=True)
 
         if opened or sent:
             idle_cycles = 0
@@ -958,6 +984,56 @@ def run_gifts(
 
     return completed
 
+def friendship_heading_visible(driver: webdriver.Remote) -> bool:
+    """True when FRIENDSHIP LEVEL is on screen: only a friend's profile has it.
+
+    Read the whole frame because a cropped region can miss the small heading.
+    """
+    try:
+        image = screenshot_image(driver)
+        if not isinstance(image, Image.Image):
+            return False
+        boxes = gbl_vision.recognize(image)
+        return any("friendship" in label for label in gbl_vision.labels(boxes, 0.4))
+    except Exception as exc:
+        print(f"  Profile heading read failed: {type(exc).__name__}: {exc}", flush=True)
+        return False
+
+
+def open_button_visible(driver: webdriver.Remote, point: list[int]) -> bool:
+    """True only when the word OPEN is read on the button at ``point``.
+
+    The profile's TRADE icon can overlap the gift card's OPEN position.
+    Require the OPEN label before tapping.
+    """
+    try:
+        image = screenshot_image(driver)
+        if not isinstance(image, Image.Image):
+            return False
+        rect = driver.get_window_rect()
+        scale = image.width / float(rect["width"])
+        px, py = point[0] * scale, point[1] * scale
+        for box in gbl_vision.recognize(image):
+            if box.confidence < 0.4 or gbl_vision.normalize(box.text) != "open":
+                continue
+            cx, cy = box.x + box.width / 2, box.y + box.height / 2
+            if abs(cx - px) <= 80 * scale and abs(cy - py) <= 30 * scale:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def bag_full_visible(driver: webdriver.Remote) -> bool:
+    """Recognize the full Item Bag notice without pressing its upgrade button."""
+    try:
+        boxes = gbl_vision.recognize(screenshot_image(driver))
+    except (gbl_vision.VisionOCRError, OSError):
+        return False
+    text = gbl_vision.normalize(" ".join(gbl_vision.lines(boxes, 0.4)))
+    return gift_android.BAG_FULL_PHRASE in text
+
+
 def friend_name(driver: webdriver.Remote) -> str | None:
     """The trainer name at the top of a friend's profile or gift card, or None.
 
@@ -965,8 +1041,6 @@ def friend_name(driver: webdriver.Remote) -> str | None:
     means this cycle cannot be compared with the last.
     """
     try:
-        from . import gbl_vision
-
         image = screenshot_image(driver)
         if not isinstance(image, Image.Image):
             return None
@@ -977,6 +1051,49 @@ def friend_name(driver: webdriver.Remote) -> str | None:
         return max(named, key=lambda box: box.height).text.strip()
     except Exception:
         return None
+
+
+def save_failure_frame(driver: webdriver.Remote, label: str) -> None:
+    """Keep the screen a failed cycle stopped on: the log alone never says."""
+    path = ARTIFACT_ROOT / "gifts" / f"ios-failed-{time.strftime('%H%M%S')}-{label}.png"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        screenshot_image(driver).save(path)
+        print(f"  Saved the failed screen: {path}", flush=True)
+    except Exception as exc:  # evidence only, never a reason to stop
+        print(f"  Could not save the failed screen: {exc}", flush=True)
+
+
+GAME_CRASH_RELAUNCHES = 2
+GAME_LOAD_SECONDS = 35.0
+
+
+def game_crashed(exc: BaseException) -> bool:
+    """WebDriverAgent's word for a game that is no longer running."""
+    return "is not running, possibly crashed" in str(exc)
+
+
+def relaunch_game(driver: webdriver.Remote, config: dict[str, Any], bundle_id: str) -> None:
+    """Starts the game again, waits out its splash and walks Map -> Avatar ->
+    Friends, so the gift loop starts from the list as it does after the
+    starter's walk.  Its own recovery would tap NEXT_FRIEND_BTN on the map."""
+    points = coordinates(config)
+    missing = [key for key in MAP_RECOVERY_KEYS if key not in points]
+    if missing:
+        raise GifterError(f"Pokemon GO crashed and the config has no {', '.join(missing)} to walk back")
+    driver.execute_script("mobile: activateApp", {"bundleId": bundle_id})
+    time.sleep(GAME_LOAD_SECONDS)
+    for _ in range(3):
+        if is_friends_list(driver):
+            return
+        tap(driver, points["AVATAR_BTN"])
+        time.sleep(GUARD_RECOVER_DELAY * 2)
+        tap(driver, points["FRIENDS_TAB_BTN"])
+        if wait_for_screen_state(driver, True):
+            print("Back on the friends list after the relaunch", flush=True)
+            return
+        time.sleep(5.0)
+    raise GifterError("Pokemon GO was relaunched but the friends list never came up")
 
 
 def run_gifts_v3(
@@ -1003,19 +1120,13 @@ def run_gifts_v3(
     failures = 0
     idle_cycles = 0
     open_only = 0
-    # Past the invisible daily open cap OPEN is refused silently and the same
-    # top friend comes back every cycle (the SE, 3 Nov, 58 cycles).  An "open"
-    # of the friend the last cycle had is no progress.
+    # A repeated open on the same friend is no progress after the cap.
     last_friend: str | None = None
     outgoing_available = True
     # Last cycle's read of this friend's row. The send half never consults it.
     open_allowed = True
-    # Pokemon GO refused an OPEN this run. Measured on the SE, 2026-10-06:
-    # after three opens the OPEN tap put up a screen that never changed, and
-    # CLOSE went back to the same unopened gift. Three friends in a row did
-    # that and the cycle-failure cap ended the phone's run with sends still
-    # to make. The daily open limit or a full item bag both last the day, so
-    # the rest of the run sends without opening.
+    # An unclassified refusal switches to send-only. A verified full bag
+    # ends this leg so Starter can clear it.
     opens_refused = False
 
     def pause(seconds: float, modified: bool = False) -> None:
@@ -1031,10 +1142,11 @@ def run_gifts_v3(
     def friend_profile_visible() -> bool:
         if is_friends_list(driver):
             return False
-        # OPEN_BTN is a colored control on an incoming-gift card and lies on
-        # the SEND control after a gift is selected.  It is blank on the
-        # friend profile, whether SEND GIFT is active or already greyed out.
-        return point_saturation(driver, points["OPEN_BTN"]) < 35
+        # The friend action row can overlap OPEN_BTN on short viewports.
+        # Check the profile heading if color alone is ambiguous.
+        if point_saturation(driver, points["OPEN_BTN"]) < 35:
+            return True
+        return friendship_heading_visible(driver)
 
     def selected_gift_visible() -> tuple[bool, float]:
         saturation = point_saturation(driver, points["SEND_BTN"])
@@ -1059,9 +1171,7 @@ def run_gifts_v3(
 
     def sent_is_confirmed() -> bool:
         for attempt in range(SEND_CONFIRM_ATTEMPTS):
-            if friend_profile_visible() and not colored_action_available(
-                driver, points["SEND_GIFT_BTN"]
-            ):
+            if friend_profile_visible() and send_gift_point(driver) is None:
                 return True
             if attempt + 1 < SEND_CONFIRM_ATTEMPTS:
                 time.sleep(SEND_CONFIRM_PAUSE)
@@ -1095,6 +1205,16 @@ def run_gifts_v3(
         except Exception as exc:  # the frame is evidence, never a reason to stop
             print(f"  Could not save the refused-open screen: {exc}", flush=True)
 
+    def stop_if_bag_full() -> None:
+        if not bag_full_visible(driver):
+            return
+        save_refused_frame()
+        if os.environ.get(gift_android.CLEAR_BAG_ENV):
+            marker = gift_android.bag_full_marker(device_config(config)["udid"])
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
+        raise gift_android.BagFullStop("the Item Bag is full")
+
     def open_incoming_gift() -> bool:
         """Open a waiting gift and land on the friend profile; False if none.
 
@@ -1104,14 +1224,23 @@ def run_gifts_v3(
         nonlocal opens_refused
         if not colored_action_available(driver, points["OPEN_BTN"]):
             return False
+        if friendship_heading_visible(driver):
+            # The profile action row can put TRADE directly under OPEN_BTN.
+            return False
+        if not open_button_visible(driver, points["OPEN_BTN"]):
+            print("  No OPEN label read on the button; not tapping it", flush=True)
+            return False
         log_tap("OPEN_BTN")
         pause(3, modified=True)
-        if wait_for_friend_profile():
+        stop_if_bag_full()
+        # Allow time for gift rewards to clear before deciding to tap CLOSE.
+        if wait_for_friend_profile() or wait_for_friend_profile():
             print(
                 "  OPEN returned to the friend profile; skipping CLOSE_BTN",
                 flush=True,
             )
         else:
+            stop_if_bag_full()
             print("  Incoming-gift screen still open; closing it", flush=True)
             save_refused_frame()
             log_tap("CLOSE_BTN")
@@ -1136,7 +1265,7 @@ def run_gifts_v3(
                     )
                 opens_refused = True
                 print(
-                    "  OPEN was refused (daily open limit or full item bag); "
+                    "  OPEN was refused without a verified full Item Bag notice; "
                     "sending without opening for the rest of the run",
                     flush=True,
                 )
@@ -1189,21 +1318,27 @@ def run_gifts_v3(
                     else "the row is highlighted"
                 )
                 print(f"  Leaving this gift unopened; {reason}", flush=True)
-                if not friend_profile_visible():
-                    # An unopened gift is a screen of its own in front of the
-                    # profile, and SEND GIFT is on the profile behind it.
+                # A visible gift card covers the profile. Wait for a fading
+                # profile to settle before deciding whether to close a card.
+                if not friend_profile_visible() and (
+                    open_button_visible(driver, points["OPEN_BTN"])
+                    or not wait_for_friend_profile()
+                ):
                     print("  Closing the unopened gift", flush=True)
                     log_tap("CLOSE_BTN")
                     pause(2, modified=True)
 
-            if not friend_profile_visible():
+            # Poll for the profile after a transition.
+            if not wait_for_friend_profile():
                 raise GifterError(
                     "Not on the friend profile before Send Gift; stopped without "
                     "tapping another control"
                 )
 
-            if colored_action_available(driver, points["SEND_GIFT_BTN"]):
-                log_tap("SEND_GIFT_BTN")
+            gift_point = send_gift_point(driver)
+            if gift_point is not None:
+                print(f"  SEND_GIFT_BTN: ({gift_point[0]}, {gift_point[1]}) found on screen", flush=True)
+                tap(driver, gift_point)
                 pause(2, modified=True)
 
                 log_tap("FIRST_GIFT_BTN")
@@ -1319,9 +1454,14 @@ def run_gifts_v3(
 
             if opened or sent:
                 continue
+        except gift_android.BagFullStop as exc:
+            print(f"  Stopping: {exc}", flush=True)
+            return completed
         except GifterError as exc:
             failures += 1
             print(f"  Skipping this friend: {exc}", flush=True)
+            if not dry_run:
+                save_failure_frame(driver, f"cycle-{gift_number}")
             # Skipping costs taps to get back to the friends list, and under
             # --no-guard there is no sanctioned way to check what is on screen
             # first. So without the guard a failed cycle stays fatal, as it was
@@ -1392,14 +1532,25 @@ def main() -> int:
         if args.count is None and not args.all:
             raise GifterError("Use --count N, --all, or --check")
         requested = args.max_cycles if args.all else args.count
-        completed = run_gifts_v3(
-            driver,
-            config,
-            requested,
-            not args.no_guard,
-            args.dry_run,
-            all_mode=args.all,
-        )
+        relaunches = 0
+        while True:
+            try:
+                completed = run_gifts_v3(
+                    driver,
+                    config,
+                    requested,
+                    not args.no_guard,
+                    args.dry_run,
+                    all_mode=args.all,
+                )
+                break
+            except Exception as exc:
+                if relaunches >= GAME_CRASH_RELAUNCHES or not game_crashed(exc):
+                    raise
+                relaunches += 1
+                print(f"Pokemon GO crashed ({type(exc).__name__}); relaunching it "
+                      f"({relaunches}/{GAME_CRASH_RELAUNCHES}) and carrying on", flush=True)
+                relaunch_game(driver, config, device.get("bundle_id", "com.nianticlabs.pokemongo"))
         print(f"Completed {completed} gift cycle(s)", flush=True)
         return 0
     finally:
@@ -1408,7 +1559,8 @@ def main() -> int:
                 close_driver(driver)
         finally:
             try:
-                ios_wda_cleanup.stop_wda_runner(device["udid"])
+                if starter_ios_session.directory(device["udid"]) is None:
+                    ios_wda_cleanup.stop_wda_runner(device["udid"])
             finally:
                 release_direct_device_lock(lock_handle)
 

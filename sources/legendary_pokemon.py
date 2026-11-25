@@ -59,3 +59,14 @@ def legendary_named(texts: Iterable[str]) -> str | None:
             if key in words or (key not in _WORD_ONLY and key in run):
                 return name
     return None
+
+
+# Mythicals a Mystery Box spawns on a loop, one a minute for half an hour.
+# They are not worth a Silver Pinap and an Ultra Ball each: the box hands out
+# dozens, and the user catches them by hand alongside the bot (9 Nov 2026).
+BOX_SPAWNS = frozenset({"Meltan"})
+
+
+def premium_berry_worthy(name: str | None) -> bool:
+    """Whether a named legendary/mythical earns the Silver Pinap + Ultra Ball."""
+    return name is not None and name not in BOX_SPAWNS
