@@ -184,14 +184,18 @@ class EveningTests(unittest.TestCase):
             self.assertEqual(sent[device]["term"], terms[device])
             self.assertFalse(sent[device]["favorite_only"])
 
+        from sources import storage_favorites
+        synced = {n: terms[n] + "&!#ToPower" for n in roster}
         with patch.object(storage_review, "load_policy", return_value=policy), \
+             patch.object(storage_favorites, "wanted", side_effect=lambda n, _p: {storage_review.STRICT: synced[n]}), \
              patch.object(night.fleet_entrypoint, "local_machine", return_value="local"), \
              patch.object(night.asyncio, "create_subprocess_exec", spawn):
             asyncio.run(night.finish(dict.fromkeys(roster, "local"), {}, roster,
                                      Path("clear"), {"receiver": "receiver"}, "receiver", pinned=True))
         for device in roster:
+            # The pinned favorite is checked against the synced term, guards included.
             self.assertTrue(sent[device]["favorite_only"])
-            self.assertEqual(sent[device]["term"], terms[device])
+            self.assertEqual(sent[device]["term"], synced[device])
 
     def test_review_query_requires_open_mode_before_connecting_to_a_phone(self):
         args = night.clear_pokemon.parse_args(["--all", "--confirm-delete"])

@@ -113,9 +113,15 @@ async def finish(owners, machines, roster, clear_path, cfg, receiver, *, plan=Fa
             if prepared_only:
                 payload["favorite_only"] = True
                 payload["term"] = ender_inventory.account_favorites(snapshot, name, physical)[storage_review.STRICT]["term"]
+            elif pinned:
+                # The handset's pinned favorite carries the guards a favorite
+                # sync adds (e.g. !#ToPower), so compare against that term.
+                from . import storage_favorites
+                payload["favorite_only"] = True
+                payload["term"] = storage_favorites.wanted(name, policy)[storage_review.STRICT]
             else:
                 payload["term"] = policy.favorites(name)[storage_review.STRICT]
-                payload["favorite_only"] = pinned
+                payload["favorite_only"] = False
         except trade_history.ConfirmationStateError as exc:
             payload["pending"] = True
             payload["error"] = str(exc)
