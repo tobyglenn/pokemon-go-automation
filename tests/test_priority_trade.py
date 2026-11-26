@@ -332,10 +332,16 @@ class PriorityRunTests(unittest.TestCase):
 
     def test_a_phone_briefly_held_by_another_command_rejoins_the_run(self):
         with mock.patch.object(priority, "BUSY_RETRY", 0.01):
-            _, records, _, history, log, _ = self.exercise(busy="donor-b")
+            code, records, _, history, log, _ = self.exercise(busy="donor-b")
+        self.assertEqual(code, 0)
         self.assertIn("donor-b: busy with another fleet command", log)
         self.assertNotIn("donor-b: unavailable", log)
-        self.assertTrue(any("donor-b" in pair for pair, _ in records))
+        # The receiver phase waits for the resting donor instead of ending,
+        # and donor trades leave that donor enough allowance for the receiver.
+        received = [tier for pair, tier in records if set(pair) == {"donor-b", "receiver"}]
+        self.assertEqual(received, ["XXL/XXS", "ReceiverPerfect"])
+        self.assertEqual(history["receiver"], 5)
+        self.assertLess(log.index("ReceiverPerfect: donor-b <-> receiver"), log.index("receiver phase finished"))
 
     def test_exhausted_priority_stock_frees_all_donors_before_receiver_cap(self):
         code, records, attempts, history, log, _ = self.exercise(hundo=False)

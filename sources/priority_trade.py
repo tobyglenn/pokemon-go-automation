@@ -394,6 +394,17 @@ async def run(args: argparse.Namespace) -> int:
     def peer_edges(offers):
         return set(combinations(sorted(offers), 2)) - held_back()
 
+    def receiver_pending(remaining):
+        """Donors still holding receiver-tier stock the receiver can take today.
+
+        A pair that is only resting (a passing failure) still counts: the
+        receiver comes back to it, so its stock keeps first claim.
+        """
+        if not remaining[receiver] or not returns.available:
+            return set()
+        return {d for d in donors if remaining[d] and _pair(d, receiver) not in blocked
+                and any(_first_available(priority[t][d]) is not None for t in PRIORITY_TIERS)}
+
     def complement(donor):
         others = sorted(n for n in donors if n != donor)
         return (others[0], others[1]) if len(others) == 2 else None
@@ -489,7 +500,14 @@ async def run(args: argparse.Namespace) -> int:
                     or not all(remaining[n] for n in edge)):
                 edge = None
         else:
-            if not donor_phase:
+            pending = set() if donor_phase else receiver_pending(remaining)
+            if pending:
+                # The receiver still wants stock that only a resting donor
+                # holds. Donor trades go on meanwhile, but never spend that
+                # donor's allowance below what the receiver still needs.
+                edges = {e for e in edges
+                         if all(remaining[d] > (remaining[receiver] if d in pending else 0) for d in e)}
+            elif not donor_phase:
                 donor_phase = True
                 _log("receiver phase finished; starting donor trades")
             plan = _plan_budget(remaining, receiver, set(), edges, lane_p.held)
